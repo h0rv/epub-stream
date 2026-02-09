@@ -9,7 +9,6 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use heapless::Vec as HeaplessVec;
 use log;
-use miniz_oxide::inflate::decompress_slice_iter_to_slice;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -344,6 +343,23 @@ impl<F: Read + Seek> StreamingZip<F> {
     /// Read and decompress a file into the provided buffer
     /// Returns number of bytes written to buffer
     pub fn read_file(&mut self, entry: &CdEntry, buf: &mut [u8]) -> Result<usize, ZipError> {
+        let mut input_buf = alloc::vec![0u8; 8 * 1024];
+        self.read_file_with_scratch(entry, buf, &mut input_buf)
+    }
+
+    /// Read and decompress a file into the provided buffer using caller-provided scratch input.
+    ///
+    /// This is intended for embedded callers that want deterministic allocation behavior.
+    /// `input_buf` must be non-empty.
+    pub fn read_file_with_scratch(
+        &mut self,
+        entry: &CdEntry,
+        buf: &mut [u8],
+        input_buf: &mut [u8],
+    ) -> Result<usize, ZipError> {
+        if input_buf.is_empty() {
+            return Err(ZipError::BufferTooSmall);
+        }
         if let Some(limits) = self.limits {
             if entry.uncompressed_size as usize > limits.max_file_read_size {
                 return Err(ZipError::FileTooLarge);
@@ -384,34 +400,68 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(size)
             }
             METHOD_DEFLATED => {
-                // Read compressed data and decompress
-                let compressed_size = entry.compressed_size as usize;
-                let mut compressed_buf = alloc::vec![0u8; compressed_size];
-                self.file
-                    .read_exact(&mut compressed_buf)
-                    .map_err(|_| ZipError::IoError)?;
-
-                // Decompress using miniz_oxide
-                let result = decompress_slice_iter_to_slice(
-                    buf,
-                    core::iter::once(compressed_buf.as_slice()),
-                    false, // zlib_header: ZIP uses raw deflate, not zlib
-                    true,  // ignore_adler32
+                let mut state = alloc::boxed::Box::new(
+                    miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
                 );
+                let mut compressed_remaining = entry.compressed_size as usize;
+                let mut pending = &[][..];
+                let mut written = 0usize;
 
-                match result {
-                    Ok(decompressed_len) => {
-                        // Verify CRC32 if available
-                        if entry.crc32 != 0 {
-                            let calc_crc = crc32fast::hash(&buf[..decompressed_len]);
-                            if calc_crc != entry.crc32 {
-                                return Err(ZipError::CrcMismatch);
+                loop {
+                    if pending.is_empty() && compressed_remaining > 0 {
+                        let take = core::cmp::min(compressed_remaining, input_buf.len());
+                        self.file
+                            .read_exact(&mut input_buf[..take])
+                            .map_err(|_| ZipError::IoError)?;
+                        pending = &input_buf[..take];
+                        compressed_remaining -= take;
+                    }
+
+                    if written >= buf.len() && (compressed_remaining > 0 || !pending.is_empty()) {
+                        return Err(ZipError::BufferTooSmall);
+                    }
+
+                    let flush = if compressed_remaining == 0 {
+                        MZFlush::Finish
+                    } else {
+                        MZFlush::None
+                    };
+                    let result = miniz_oxide::inflate::stream::inflate(
+                        &mut state,
+                        pending,
+                        &mut buf[written..],
+                        flush,
+                    );
+                    let consumed = result.bytes_consumed;
+                    let produced = result.bytes_written;
+                    pending = &pending[consumed..];
+                    written += produced;
+
+                    match result.status {
+                        Ok(MZStatus::StreamEnd) => {
+                            if compressed_remaining != 0 || !pending.is_empty() {
+                                return Err(ZipError::DecompressError);
+                            }
+                            break;
+                        }
+                        Ok(MZStatus::Ok) => {
+                            if consumed == 0 && produced == 0 {
+                                return Err(ZipError::DecompressError);
                             }
                         }
-                        Ok(decompressed_len)
+                        Ok(MZStatus::NeedDict) => return Err(ZipError::DecompressError),
+                        Err(_) => return Err(ZipError::DecompressError),
                     }
-                    Err(_) => Err(ZipError::DecompressError),
                 }
+
+                // Verify CRC32 if available
+                if entry.crc32 != 0 {
+                    let calc_crc = crc32fast::hash(&buf[..written]);
+                    if calc_crc != entry.crc32 {
+                        return Err(ZipError::CrcMismatch);
+                    }
+                }
+                Ok(written)
             }
             _ => Err(ZipError::UnsupportedCompression),
         }
@@ -989,6 +1039,38 @@ mod tests {
         let mut output = [0u8; 16];
         let err = zip
             .read_file_to_writer_with_scratch(&entry, &mut out, &mut input, &mut output)
+            .expect_err("empty input buffer must fail");
+        assert!(matches!(err, ZipError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_read_file_with_scratch_streams_into_output_buffer() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let entry = zip.get_entry("mimetype").unwrap().clone();
+
+        let mut out = [0u8; 64];
+        let mut input = [0u8; 8];
+        let n = zip
+            .read_file_with_scratch(&entry, &mut out, &mut input)
+            .expect("read_file_with_scratch should succeed");
+        assert_eq!(&out[..n], content);
+    }
+
+    #[test]
+    fn test_read_file_with_scratch_rejects_empty_input_buffer() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let entry = zip.get_entry("mimetype").unwrap().clone();
+
+        let mut out = [0u8; 64];
+        let mut input = [];
+        let err = zip
+            .read_file_with_scratch(&entry, &mut out, &mut input)
             .expect_err("empty input buffer must fail");
         assert!(matches!(err, ZipError::BufferTooSmall));
     }

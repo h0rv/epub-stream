@@ -695,9 +695,31 @@ impl<R: Read + Seek> EpubBook<R> {
 
     /// Read a spine chapter as UTF-8 HTML/XHTML text by index.
     pub fn chapter_html(&mut self, index: usize) -> Result<String, EpubError> {
+        let mut out = String::new();
+        self.chapter_html_into(index, &mut out)?;
+        Ok(out)
+    }
+
+    /// Read a spine chapter as UTF-8 HTML/XHTML text into caller-provided output.
+    pub fn chapter_html_into(&mut self, index: usize, out: &mut String) -> Result<(), EpubError> {
+        self.chapter_html_into_with_limit(index, usize::MAX, out)
+    }
+
+    /// Read a spine chapter as UTF-8 HTML/XHTML text with a hard byte cap into caller output.
+    pub fn chapter_html_into_with_limit(
+        &mut self,
+        index: usize,
+        max_bytes: usize,
+        out: &mut String,
+    ) -> Result<(), EpubError> {
+        out.clear();
         let chapter = self.chapter(index)?;
-        let bytes = self.read_resource(&chapter.href)?;
-        String::from_utf8(bytes).map_err(|_| EpubError::ChapterNotUtf8 { href: chapter.href })
+        let mut bytes = Vec::new();
+        self.read_resource_into_with_hard_cap(&chapter.href, &mut bytes, max_bytes)?;
+        let mut html = String::from_utf8(bytes)
+            .map_err(|_| EpubError::ChapterNotUtf8 { href: chapter.href })?;
+        core::mem::swap(out, &mut html);
+        Ok(())
     }
 
     /// Resolve chapter stylesheet sources in cascade order.
@@ -1466,6 +1488,36 @@ mod tests {
         book.chapter_text_into(0, &mut out)
             .expect("chapter text into should extract");
         assert_eq!(baseline, out);
+    }
+
+    #[test]
+    fn test_chapter_html_into_matches_chapter_html() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let baseline = book.chapter_html(0).expect("chapter html should extract");
+        let mut out = String::new();
+        book.chapter_html_into(0, &mut out)
+            .expect("chapter html into should extract");
+        assert_eq!(baseline, out);
+    }
+
+    #[test]
+    fn test_chapter_html_into_with_limit_enforces_cap() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let mut out = String::new();
+        let err = book
+            .chapter_html_into_with_limit(0, 8, &mut out)
+            .expect_err("hard cap should fail");
+        assert!(matches!(err, EpubError::Zip(ZipError::FileTooLarge)));
     }
 
     #[test]

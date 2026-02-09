@@ -518,56 +518,65 @@ impl Styler {
         &mut self,
         sources: &ChapterStylesheets,
     ) -> Result<(), RenderPrepError> {
-        self.parsed.clear();
+        self.clear_stylesheets();
         for source in &sources.sources {
-            let css_limit = min(self.config.limits.max_css_bytes, self.memory.max_css_bytes);
-            if source.css.len() > css_limit {
-                let err = RenderPrepError::new(
-                    "STYLE_CSS_TOO_LARGE",
-                    format!(
-                        "Stylesheet exceeds max_css_bytes ({} > {})",
-                        source.css.len(),
-                        css_limit
-                    ),
-                )
-                .with_phase(ErrorPhase::Style)
-                .with_limit("max_css_bytes", source.css.len(), css_limit)
-                .with_path(source.href.clone())
-                .with_source(source.href.clone());
-                return Err(err);
-            }
-            let parsed = parse_stylesheet(&source.css).map_err(|e| {
-                RenderPrepError::new_with_phase(
-                    ErrorPhase::Style,
-                    "STYLE_PARSE_ERROR",
-                    format!("Failed to parse stylesheet: {}", e),
-                )
-                .with_path(source.href.clone())
-                .with_source(source.href.clone())
-            })?;
-            if parsed.len() > self.config.limits.max_selectors {
-                let err = RenderPrepError::new(
-                    "STYLE_SELECTOR_LIMIT",
-                    format!(
-                        "Stylesheet exceeds max_selectors ({} > {})",
-                        parsed.len(),
-                        self.config.limits.max_selectors
-                    ),
-                )
-                .with_phase(ErrorPhase::Style)
-                .with_limit(
-                    "max_selectors",
-                    parsed.len(),
-                    self.config.limits.max_selectors,
-                )
-                .with_selector(format!("selector_count={}", parsed.len()))
-                .with_selector_index(self.config.limits.max_selectors)
-                .with_path(source.href.clone())
-                .with_source(source.href.clone());
-                return Err(err);
-            }
-            self.parsed.push(parsed);
+            self.push_stylesheet_source(&source.href, &source.css)?;
         }
+        Ok(())
+    }
+
+    fn clear_stylesheets(&mut self) {
+        self.parsed.clear();
+    }
+
+    fn push_stylesheet_source(&mut self, href: &str, css: &str) -> Result<(), RenderPrepError> {
+        let css_limit = min(self.config.limits.max_css_bytes, self.memory.max_css_bytes);
+        if css.len() > css_limit {
+            let err = RenderPrepError::new(
+                "STYLE_CSS_TOO_LARGE",
+                format!(
+                    "Stylesheet exceeds max_css_bytes ({} > {})",
+                    css.len(),
+                    css_limit
+                ),
+            )
+            .with_phase(ErrorPhase::Style)
+            .with_limit("max_css_bytes", css.len(), css_limit)
+            .with_path(href.to_string())
+            .with_source(href.to_string());
+            return Err(err);
+        }
+        let parsed = parse_stylesheet(css).map_err(|e| {
+            RenderPrepError::new_with_phase(
+                ErrorPhase::Style,
+                "STYLE_PARSE_ERROR",
+                format!("Failed to parse stylesheet: {}", e),
+            )
+            .with_path(href.to_string())
+            .with_source(href.to_string())
+        })?;
+        if parsed.len() > self.config.limits.max_selectors {
+            let err = RenderPrepError::new(
+                "STYLE_SELECTOR_LIMIT",
+                format!(
+                    "Stylesheet exceeds max_selectors ({} > {})",
+                    parsed.len(),
+                    self.config.limits.max_selectors
+                ),
+            )
+            .with_phase(ErrorPhase::Style)
+            .with_limit(
+                "max_selectors",
+                parsed.len(),
+                self.config.limits.max_selectors,
+            )
+            .with_selector(format!("selector_count={}", parsed.len()))
+            .with_selector_index(self.config.limits.max_selectors)
+            .with_path(href.to_string())
+            .with_source(href.to_string());
+            return Err(err);
+        }
+        self.parsed.push(parsed);
         Ok(())
     }
 
@@ -1236,15 +1245,15 @@ impl RenderPrep {
         Ok((href, html))
     }
 
-    fn load_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
-        &self,
+    fn apply_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
+        &mut self,
         book: &mut EpubBook<R>,
         chapter_index: usize,
         chapter_href: &str,
         html: &str,
-    ) -> Result<ChapterStylesheets, RenderPrepError> {
+    ) -> Result<(), RenderPrepError> {
         let links = parse_stylesheet_links(chapter_href, html);
-        let mut sources = Vec::new();
+        self.styler.clear_stylesheets();
         let css_limit = min(
             self.opts.style.limits.max_css_bytes,
             self.opts.memory.max_css_bytes,
@@ -1282,9 +1291,11 @@ impl RenderPrep {
                 .with_path(href.clone())
                 .with_chapter_index(chapter_index)
             })?;
-            sources.push(StylesheetSource { href, css });
+            self.styler
+                .push_stylesheet_source(&href, &css)
+                .map_err(|e| e.with_chapter_index(chapter_index))?;
         }
-        Ok(ChapterStylesheets { sources })
+        Ok(())
     }
 
     /// Register fonts from any external source with a byte loader callback.
@@ -1333,9 +1344,7 @@ impl RenderPrep {
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
-        let sources =
-            self.load_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
-        self.styler.load_stylesheets(&sources)?;
+        self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
         self.styler.style_chapter_with(&html, |item| {
             let (item, _) = resolve_item_with_font(font_resolver, item);
@@ -1354,9 +1363,7 @@ impl RenderPrep {
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
-        let sources =
-            self.load_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
-        self.styler.load_stylesheets(&sources)?;
+        self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
         self.styler.style_chapter_with(&html, |item| {
             let (item, trace) = resolve_item_with_font(font_resolver, item);
