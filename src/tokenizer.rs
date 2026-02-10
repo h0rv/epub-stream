@@ -86,329 +86,10 @@ impl std::error::Error for TokenizeError {}
 /// let tokens = tokenize_html(html).unwrap();
 /// ```
 pub fn tokenize_html(html: &str) -> Result<Vec<Token>, TokenizeError> {
-    let mut reader = Reader::from_str(html);
-    reader.config_mut().trim_text(false);
-    // Enable entity expansion (converts &lt; to <, &amp; to &, etc.)
-    reader.config_mut().expand_empty_elements = false;
-
-    let mut buf = Vec::new();
-    let mut tokens = Vec::new();
-
-    // Stack to track nested elements for proper closing
-    let mut element_stack: Vec<ElementType> = Vec::new();
-    // Track if we're inside a tag that should be skipped (script, style, head)
-    let mut skip_depth: usize = 0;
-    // Track if we need a paragraph break after current block element
-    let mut pending_paragraph_break: bool = false;
-    // Track if we need a heading close after text content
-    let mut pending_heading_close: Option<u8> = None;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
-
-                // Check if we should skip this element and its children
-                if should_skip_element(&name) {
-                    skip_depth += 1;
-                    continue;
-                }
-
-                // If skipping, don't process anything
-                if skip_depth > 0 {
-                    continue;
-                }
-
-                // Flush any pending paragraph break from previous block
-                if pending_paragraph_break && !tokens.is_empty() {
-                    tokens.push(Token::ParagraphBreak);
-                    pending_paragraph_break = false;
-                }
-
-                // Flush any pending heading close
-                if let Some(level) = pending_heading_close.take() {
-                    tokens.push(Token::Heading(level));
-                    pending_paragraph_break = true;
-                }
-
-                match name.as_str() {
-                    "p" | "div" => {
-                        element_stack.push(ElementType::Paragraph);
-                    }
-                    "span" => {
-                        element_stack.push(ElementType::Span);
-                    }
-                    h if h.starts_with('h') && h.len() == 2 => {
-                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
-                            if (1..=6).contains(&level) {
-                                element_stack.push(ElementType::Heading(level as u8));
-                                pending_heading_close = Some(level as u8);
-                            }
-                        }
-                    }
-                    "em" | "i" => {
-                        element_stack.push(ElementType::Emphasis);
-                        tokens.push(Token::Emphasis(true));
-                    }
-                    "strong" | "b" => {
-                        element_stack.push(ElementType::Strong);
-                        tokens.push(Token::Strong(true));
-                    }
-                    "ul" => {
-                        element_stack.push(ElementType::UnorderedList);
-                        tokens.push(Token::ListStart(false));
-                    }
-                    "ol" => {
-                        element_stack.push(ElementType::OrderedList);
-                        tokens.push(Token::ListStart(true));
-                    }
-                    "li" => {
-                        element_stack.push(ElementType::ListItem);
-                        tokens.push(Token::ListItemStart);
-                    }
-                    "a" => {
-                        if let Some(href) = get_attribute(&e, &reader, "href") {
-                            element_stack.push(ElementType::Link);
-                            tokens.push(Token::LinkStart(href));
-                        } else {
-                            // No href — treat as generic container
-                            element_stack.push(ElementType::Generic);
-                        }
-                    }
-                    "img" => {
-                        // <img> as a start tag (non-self-closing)
-                        if let Some(src) = get_attribute(&e, &reader, "src") {
-                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
-                            tokens.push(Token::Image { src, alt });
-                        }
-                        element_stack.push(ElementType::Generic);
-                    }
-                    _ => {
-                        // Unknown element, treat as generic container
-                        element_stack.push(ElementType::Generic);
-                    }
-                }
-            }
-            Ok(Event::Text(e)) => {
-                // Skip text if we're inside a script/style/head block
-                if skip_depth > 0 {
-                    continue;
-                }
-
-                let text = e
-                    .decode()
-                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                    .to_string();
-
-                // Normalize whitespace: collapse multiple spaces/newlines
-                let normalized = normalize_whitespace(&text);
-
-                if !normalized.is_empty() {
-                    // Flush any pending heading close
-                    if let Some(level) = pending_heading_close.take() {
-                        tokens.push(Token::Heading(level));
-                    }
-                    tokens.push(Token::Text(normalized));
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
-
-                // Check if we're ending a skip element
-                if should_skip_element(&name) {
-                    skip_depth = skip_depth.saturating_sub(1);
-                    continue;
-                }
-
-                // If skipping, don't process end tags
-                if skip_depth > 0 {
-                    continue;
-                }
-
-                // Pop the element from stack and emit appropriate close token
-                if let Some(element) = element_stack.pop() {
-                    match element {
-                        ElementType::Paragraph => {
-                            pending_paragraph_break = true;
-                        }
-                        ElementType::Heading(_level) => {
-                            // Heading already emitted on start, just mark for paragraph break
-                            pending_paragraph_break = true;
-                            // Clear any pending close since we already handled it
-                            pending_heading_close = None;
-                        }
-                        ElementType::Emphasis => {
-                            tokens.push(Token::Emphasis(false));
-                        }
-                        ElementType::Strong => {
-                            tokens.push(Token::Strong(false));
-                        }
-                        ElementType::UnorderedList | ElementType::OrderedList => {
-                            tokens.push(Token::ListEnd);
-                        }
-                        ElementType::ListItem => {
-                            tokens.push(Token::ListItemEnd);
-                        }
-                        ElementType::Link => {
-                            tokens.push(Token::LinkEnd);
-                        }
-                        ElementType::Span | ElementType::Generic => {
-                            // No tokens needed for these
-                        }
-                    }
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
-
-                // Skip empty elements inside script/style blocks
-                if skip_depth > 0 {
-                    continue;
-                }
-
-                // Flush any pending paragraph break
-                if pending_paragraph_break && !tokens.is_empty() {
-                    tokens.push(Token::ParagraphBreak);
-                    pending_paragraph_break = false;
-                }
-
-                // Flush any pending heading close
-                if let Some(level) = pending_heading_close.take() {
-                    tokens.push(Token::Heading(level));
-                    pending_paragraph_break = true;
-                }
-
-                match name.as_str() {
-                    "br" => {
-                        tokens.push(Token::LineBreak);
-                    }
-                    "p" | "div" => {
-                        // Empty paragraph still creates a paragraph break
-                        pending_paragraph_break = true;
-                    }
-                    h if h.starts_with('h') && h.len() == 2 => {
-                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
-                            if (1..=6).contains(&level) {
-                                // Empty heading - just emit the heading token
-                                tokens.push(Token::Heading(level as u8));
-                                pending_paragraph_break = true;
-                            }
-                        }
-                    }
-                    "img" => {
-                        if let Some(src) = get_attribute(&e, &reader, "src") {
-                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
-                            tokens.push(Token::Image { src, alt });
-                        }
-                        // No src → skip
-                    }
-                    _ => {
-                        // Other empty elements are ignored
-                    }
-                }
-            }
-            Ok(Event::CData(e)) => {
-                // CDATA content is treated as raw text
-                if skip_depth == 0 {
-                    let text = reader
-                        .decoder()
-                        .decode(&e)
-                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                        .to_string();
-
-                    let normalized = normalize_whitespace(&text);
-                    if !normalized.is_empty() {
-                        if let Some(level) = pending_heading_close.take() {
-                            tokens.push(Token::Heading(level));
-                        }
-                        tokens.push(Token::Text(normalized));
-                    }
-                }
-            }
-            Ok(Event::GeneralRef(e)) => {
-                // Entity references: &amp; &lt; &gt; &quot; &apos; &#8220; etc.
-                if skip_depth > 0 {
-                    continue;
-                }
-
-                let entity_name = e
-                    .decode()
-                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
-                // Reconstruct the entity string and unescape it
-                let entity_str = format!("&{};", entity_name);
-                let resolved = unescape(&entity_str)
-                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?
-                    .to_string();
-
-                if !resolved.is_empty() {
-                    // Flush any pending heading close
-                    if let Some(level) = pending_heading_close.take() {
-                        tokens.push(Token::Heading(level));
-                    }
-                    // Append to the last Text token if possible, otherwise create new one
-                    if let Some(Token::Text(ref mut last_text)) = tokens.last_mut() {
-                        last_text.push_str(&resolved);
-                    } else {
-                        tokens.push(Token::Text(resolved));
-                    }
-                }
-            }
-            Ok(Event::Comment(_)) => {
-                // Comments are ignored
-            }
-            Ok(Event::Decl(_)) => {
-                // XML declaration is ignored
-            }
-            Ok(Event::PI(_)) => {
-                // Processing instructions are ignored
-            }
-            Ok(Event::DocType(_)) => {
-                // DOCTYPE is ignored
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                return Err(TokenizeError::ParseError(format!("XML error: {:?}", e)));
-            }
-        }
-        buf.clear();
-    }
-
-    // Flush any remaining pending paragraph break
-    if pending_paragraph_break && !tokens.is_empty() {
-        // Don't add trailing paragraph break
-        // tokens.push(Token::ParagraphBreak);
-    }
-
-    // Close any unclosed formatting tags
-    while let Some(element) = element_stack.pop() {
-        match element {
-            ElementType::Emphasis => {
-                tokens.push(Token::Emphasis(false));
-            }
-            ElementType::Strong => {
-                tokens.push(Token::Strong(false));
-            }
-            ElementType::UnorderedList | ElementType::OrderedList => {
-                tokens.push(Token::ListEnd);
-            }
-            ElementType::ListItem => {
-                tokens.push(Token::ListItemEnd);
-            }
-            ElementType::Link => {
-                tokens.push(Token::LinkEnd);
-            }
-            ElementType::Paragraph | ElementType::Heading(_) => {
-                // These already handled via pending_paragraph_break
-            }
-            _ => {}
-        }
-    }
-
-    // Flush any pending heading close
-    if let Some(level) = pending_heading_close {
-        tokens.push(Token::Heading(level));
-    }
-
+    // Estimate token count: roughly 1 token per 10 bytes of HTML
+    let estimated_tokens = html.len() / 10;
+    let mut tokens = Vec::with_capacity(estimated_tokens.min(10000));
+    tokenize_html_into(html, &mut tokens)?;
     Ok(tokens)
 }
 
@@ -1114,6 +795,483 @@ fn decode_name(name: &[u8], reader: &Reader<&[u8]>) -> Result<String, TokenizeEr
         .decode(name)
         .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))
         .map(|s| s.to_string())
+}
+
+/// Scratch buffer pool for tokenization to minimize allocations.
+///
+/// Pre-allocated buffers that can be reused across tokenization operations
+/// to avoid repeated allocations in hot paths. This is critical for embedded
+/// environments where allocation overhead must be minimized.
+#[derive(Debug)]
+pub struct TokenizeScratch {
+    /// Buffer for XML parsing
+    pub xml_buf: Vec<u8>,
+    /// Buffer for text accumulation and normalization
+    pub text_buf: String,
+    /// Buffer for element tracking (private, accessed via methods)
+    element_buf: Vec<ElementType>,
+}
+
+impl TokenizeScratch {
+    /// Create scratch buffers with specified capacities.
+    ///
+    /// # Arguments
+    /// * `xml_capacity` - Initial capacity for XML parsing buffer
+    /// * `text_capacity` - Initial capacity for text accumulation buffer
+    ///
+    /// # Example
+    /// ```
+    /// use mu_epub::tokenizer::TokenizeScratch;
+    ///
+    /// let scratch = TokenizeScratch::new(4096, 8192);
+    /// ```
+    pub fn new(xml_capacity: usize, text_capacity: usize) -> Self {
+        Self {
+            xml_buf: Vec::with_capacity(xml_capacity),
+            text_buf: String::with_capacity(text_capacity),
+            element_buf: Vec::with_capacity(64),
+        }
+    }
+
+    /// Create buffers suitable for embedded use (small, bounded).
+    ///
+    /// Uses conservative buffer sizes suitable for constrained environments:
+    /// - XML buffer: 4KB
+    /// - Text buffer: 8KB
+    /// - Element stack: 64 elements
+    pub fn embedded() -> Self {
+        Self::new(4096, 8192)
+    }
+
+    /// Create buffers for desktop use (larger, more performant).
+    ///
+    /// Uses larger buffer sizes for better performance on desktop:
+    /// - XML buffer: 32KB
+    /// - Text buffer: 64KB
+    /// - Element stack: 64 elements
+    pub fn desktop() -> Self {
+        Self::new(32768, 65536)
+    }
+
+    /// Clear all buffers without deallocating.
+    ///
+    /// This preserves the allocated capacity while resetting the length to zero,
+    /// allowing the buffers to be reused for subsequent tokenization operations
+    /// without requiring new allocations.
+    pub fn clear(&mut self) {
+        self.xml_buf.clear();
+        self.text_buf.clear();
+        self.element_buf.clear();
+    }
+
+    /// Ensure text buffer has at least the given capacity.
+    ///
+    /// # Arguments
+    /// * `min_cap` - Minimum capacity required
+    ///
+    /// If the current capacity is less than `min_cap`, the buffer will be
+    /// expanded to at least that capacity.
+    pub fn ensure_text_capacity(&mut self, min_cap: usize) {
+        if self.text_buf.capacity() < min_cap {
+            self.text_buf.reserve(min_cap - self.text_buf.capacity());
+        }
+    }
+}
+
+/// Tokenize XHTML into a caller-provided Vec to avoid allocation.
+///
+/// This variant allows the caller to provide their own `Vec<Token>` buffer,
+/// avoiding the need to allocate a new Vec for each tokenization call.
+/// The existing contents of the Vec are cleared before tokenization begins.
+///
+/// # Allocation behavior
+/// - **Zero token buffer allocations**: Reuses caller's Vec
+/// - Internal buffers: Allocates temporarily during parsing (use `tokenize_html_with_scratch` to avoid)
+/// - Caller buffer required: Yes (tokens_out)
+/// - **Preferred for embedded**: Avoids Vec allocation
+///
+/// # Arguments
+/// * `html` - The XHTML content to tokenize
+/// * `tokens_out` - Output buffer for tokens (will be cleared first)
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err(TokenizeError)` on parse failure
+///
+/// # Example
+/// ```
+/// use mu_epub::tokenizer::{tokenize_html_into, Token};
+///
+/// let html = "<p>Hello <em>world</em></p>";
+/// let mut tokens: Vec<Token> = Vec::new();
+/// tokenize_html_into(html, &mut tokens).unwrap();
+/// ```
+pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(), TokenizeError> {
+    let mut scratch = TokenizeScratch::embedded();
+    tokenize_html_with_scratch(html, tokens_out, &mut scratch)
+}
+
+/// Tokenize XHTML with caller-provided scratch buffers for minimal allocations.
+///
+/// This is the most memory-efficient tokenization API. It uses pre-allocated
+/// scratch buffers to minimize allocations during parsing. All internal buffers
+/// are provided by the caller and can be reused across multiple tokenization calls.
+///
+/// # Allocation behavior
+/// - **Minimal allocations**: Reuses all scratch buffers
+/// - Still allocates for Token::Text content (owned String required by Token type)
+/// - Caller buffer required: Yes (tokens_out, scratch)
+/// - **Preferred for embedded**: Minimal allocation path
+///
+/// # Arguments
+/// * `html` - The XHTML content to tokenize
+/// * `tokens_out` - Output buffer for tokens (will be cleared first)
+/// * `scratch` - Scratch buffers for internal parsing state
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err(TokenizeError)` on parse failure
+///
+/// # Example
+/// ```
+/// use mu_epub::tokenizer::{tokenize_html_with_scratch, TokenizeScratch, Token};
+///
+/// let html = "<p>Hello <em>world</em></p>";
+/// let mut tokens: Vec<Token> = Vec::new();
+/// let mut scratch = TokenizeScratch::embedded();
+/// tokenize_html_with_scratch(html, &mut tokens, &mut scratch).unwrap();
+///
+/// // Reuse scratch for subsequent calls
+/// let html2 = "<p>Second paragraph</p>";
+/// tokenize_html_with_scratch(html2, &mut tokens, &mut scratch).unwrap();
+/// ```
+pub fn tokenize_html_with_scratch(
+    html: &str,
+    tokens_out: &mut Vec<Token>,
+    scratch: &mut TokenizeScratch,
+) -> Result<(), TokenizeError> {
+    tokens_out.clear();
+    scratch.clear();
+
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().expand_empty_elements = false;
+
+    // Track if we're inside a tag that should be skipped (script, style, head)
+    let mut skip_depth: usize = 0;
+    // Track if we need a paragraph break after current block element
+    let mut pending_paragraph_break: bool = false;
+    // Track if we need a heading close after text content
+    let mut pending_heading_close: Option<u8> = None;
+
+    loop {
+        match reader.read_event_into(&mut scratch.xml_buf) {
+            Ok(Event::Start(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Check if we should skip this element and its children
+                if should_skip_element(&name) {
+                    skip_depth += 1;
+                    continue;
+                }
+
+                // If skipping, don't process anything
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Flush any pending paragraph break from previous block
+                if pending_paragraph_break && !tokens_out.is_empty() {
+                    tokens_out.push(Token::ParagraphBreak);
+                    pending_paragraph_break = false;
+                }
+
+                // Flush any pending heading close
+                if let Some(level) = pending_heading_close.take() {
+                    tokens_out.push(Token::Heading(level));
+                    pending_paragraph_break = true;
+                }
+
+                match name.as_str() {
+                    "p" | "div" => {
+                        scratch.element_buf.push(ElementType::Paragraph);
+                    }
+                    "span" => {
+                        scratch.element_buf.push(ElementType::Span);
+                    }
+                    h if h.starts_with('h') && h.len() == 2 => {
+                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
+                            if (1..=6).contains(&level) {
+                                scratch.element_buf.push(ElementType::Heading(level as u8));
+                                pending_heading_close = Some(level as u8);
+                            }
+                        }
+                    }
+                    "em" | "i" => {
+                        scratch.element_buf.push(ElementType::Emphasis);
+                        tokens_out.push(Token::Emphasis(true));
+                    }
+                    "strong" | "b" => {
+                        scratch.element_buf.push(ElementType::Strong);
+                        tokens_out.push(Token::Strong(true));
+                    }
+                    "ul" => {
+                        scratch.element_buf.push(ElementType::UnorderedList);
+                        tokens_out.push(Token::ListStart(false));
+                    }
+                    "ol" => {
+                        scratch.element_buf.push(ElementType::OrderedList);
+                        tokens_out.push(Token::ListStart(true));
+                    }
+                    "li" => {
+                        scratch.element_buf.push(ElementType::ListItem);
+                        tokens_out.push(Token::ListItemStart);
+                    }
+                    "a" => {
+                        if let Some(href) = get_attribute(&e, &reader, "href") {
+                            scratch.element_buf.push(ElementType::Link);
+                            tokens_out.push(Token::LinkStart(href));
+                        } else {
+                            // No href — treat as generic container
+                            scratch.element_buf.push(ElementType::Generic);
+                        }
+                    }
+                    "img" => {
+                        // <img> as a start tag (non-self-closing)
+                        if let Some(src) = get_attribute(&e, &reader, "src") {
+                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
+                            tokens_out.push(Token::Image { src, alt });
+                        }
+                        scratch.element_buf.push(ElementType::Generic);
+                    }
+                    _ => {
+                        // Unknown element, treat as generic container
+                        scratch.element_buf.push(ElementType::Generic);
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                // Skip text if we're inside a script/style/head block
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                let text = e
+                    .decode()
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
+                    .to_string();
+
+                // Normalize whitespace: collapse multiple spaces/newlines
+                let normalized = normalize_whitespace(&text);
+
+                if !normalized.is_empty() {
+                    // Flush any pending heading close
+                    if let Some(level) = pending_heading_close.take() {
+                        tokens_out.push(Token::Heading(level));
+                    }
+                    tokens_out.push(Token::Text(normalized));
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Check if we're ending a skip element
+                if should_skip_element(&name) {
+                    skip_depth = skip_depth.saturating_sub(1);
+                    continue;
+                }
+
+                // If skipping, don't process end tags
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Pop the element from stack and emit appropriate close token
+                if let Some(element) = scratch.element_buf.pop() {
+                    match element {
+                        ElementType::Paragraph => {
+                            pending_paragraph_break = true;
+                        }
+                        ElementType::Heading(_level) => {
+                            // Heading already emitted on start, just mark for paragraph break
+                            pending_paragraph_break = true;
+                            // Clear any pending close since we already handled it
+                            pending_heading_close = None;
+                        }
+                        ElementType::Emphasis => {
+                            tokens_out.push(Token::Emphasis(false));
+                        }
+                        ElementType::Strong => {
+                            tokens_out.push(Token::Strong(false));
+                        }
+                        ElementType::UnorderedList | ElementType::OrderedList => {
+                            tokens_out.push(Token::ListEnd);
+                        }
+                        ElementType::ListItem => {
+                            tokens_out.push(Token::ListItemEnd);
+                        }
+                        ElementType::Link => {
+                            tokens_out.push(Token::LinkEnd);
+                        }
+                        ElementType::Span | ElementType::Generic => {
+                            // No tokens needed for these
+                        }
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Skip empty elements inside script/style blocks
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Flush any pending paragraph break
+                if pending_paragraph_break && !tokens_out.is_empty() {
+                    tokens_out.push(Token::ParagraphBreak);
+                    pending_paragraph_break = false;
+                }
+
+                // Flush any pending heading close
+                if let Some(level) = pending_heading_close.take() {
+                    tokens_out.push(Token::Heading(level));
+                    pending_paragraph_break = true;
+                }
+
+                match name.as_str() {
+                    "br" => {
+                        tokens_out.push(Token::LineBreak);
+                    }
+                    "p" | "div" => {
+                        // Empty paragraph still creates a paragraph break
+                        pending_paragraph_break = true;
+                    }
+                    h if h.starts_with('h') && h.len() == 2 => {
+                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
+                            if (1..=6).contains(&level) {
+                                // Empty heading - just emit the heading token
+                                tokens_out.push(Token::Heading(level as u8));
+                                pending_paragraph_break = true;
+                            }
+                        }
+                    }
+                    "img" => {
+                        if let Some(src) = get_attribute(&e, &reader, "src") {
+                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
+                            tokens_out.push(Token::Image { src, alt });
+                        }
+                        // No src → skip
+                    }
+                    _ => {
+                        // Other empty elements are ignored
+                    }
+                }
+            }
+            Ok(Event::CData(e)) => {
+                // CDATA content is treated as raw text
+                if skip_depth == 0 {
+                    let text = reader
+                        .decoder()
+                        .decode(&e)
+                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
+                        .to_string();
+
+                    let normalized = normalize_whitespace(&text);
+                    if !normalized.is_empty() {
+                        // Flush any pending heading close
+                        if let Some(level) = pending_heading_close.take() {
+                            tokens_out.push(Token::Heading(level));
+                        }
+                        tokens_out.push(Token::Text(normalized));
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                // Entity references: &amp; &lt; &gt; &quot; &apos; &#8220; etc.
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                let entity_name = e
+                    .decode()
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
+                // Reconstruct the entity string and unescape it
+                let entity_str = format!("&{};", entity_name);
+                let resolved = unescape(&entity_str)
+                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?
+                    .to_string();
+
+                if !resolved.is_empty() {
+                    // Flush any pending heading close
+                    if let Some(level) = pending_heading_close.take() {
+                        tokens_out.push(Token::Heading(level));
+                    }
+                    // Append to the last Text token if possible, otherwise create new one
+                    if let Some(Token::Text(ref mut last_text)) = tokens_out.last_mut() {
+                        last_text.push_str(&resolved);
+                    } else {
+                        tokens_out.push(Token::Text(resolved));
+                    }
+                }
+            }
+            Ok(Event::Comment(_)) => {
+                // Comments are ignored
+            }
+            Ok(Event::Decl(_)) => {
+                // XML declaration is ignored
+            }
+            Ok(Event::PI(_)) => {
+                // Processing instructions are ignored
+            }
+            Ok(Event::DocType(_)) => {
+                // DOCTYPE is ignored
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(TokenizeError::ParseError(format!("XML error: {:?}", e)));
+            }
+        }
+        scratch.xml_buf.clear();
+    }
+
+    // Flush any remaining pending paragraph break
+    if pending_paragraph_break && !tokens_out.is_empty() {
+        // Don't add trailing paragraph break
+        // tokens_out.push(Token::ParagraphBreak);
+    }
+
+    // Close any unclosed formatting tags
+    while let Some(element) = scratch.element_buf.pop() {
+        match element {
+            ElementType::Emphasis => {
+                tokens_out.push(Token::Emphasis(false));
+            }
+            ElementType::Strong => {
+                tokens_out.push(Token::Strong(false));
+            }
+            ElementType::UnorderedList | ElementType::OrderedList => {
+                tokens_out.push(Token::ListEnd);
+            }
+            ElementType::ListItem => {
+                tokens_out.push(Token::ListItemEnd);
+            }
+            ElementType::Link => {
+                tokens_out.push(Token::LinkEnd);
+            }
+            ElementType::Paragraph | ElementType::Heading(_) => {
+                // These already handled via pending_paragraph_break
+            }
+            _ => {}
+        }
+    }
+
+    // Flush any pending heading close
+    if let Some(level) = pending_heading_close {
+        tokens_out.push(Token::Heading(level));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

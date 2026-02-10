@@ -5,10 +5,11 @@
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::min;
 
+#[cfg(feature = "std")]
 use crate::render_prep::{RenderPrepError, RenderPrepOptions, StyledEventOrRun};
 
 /// Scratch buffer pool for streaming operations.
@@ -266,6 +267,7 @@ enum StreamingParseState {
     Error(String),
 }
 
+#[cfg(feature = "std")]
 impl StreamingChapterProcessor {
     /// Create a new streaming processor.
     pub fn new(_options: RenderPrepOptions, limits: ChunkLimits) -> Self {

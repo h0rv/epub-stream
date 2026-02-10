@@ -1355,6 +1355,51 @@ impl RenderPrep {
         })
     }
 
+    /// Prepare a chapter from caller-provided XHTML bytes and stream each styled item.
+    ///
+    /// This avoids re-reading chapter bytes from the ZIP archive and is intended for
+    /// embedded call sites that already own a reusable chapter buffer.
+    pub fn prepare_chapter_bytes_with<
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(StyledEventOrRun),
+    >(
+        &mut self,
+        book: &mut EpubBook<R>,
+        index: usize,
+        html: &[u8],
+        mut on_item: F,
+    ) -> Result<(), RenderPrepError> {
+        let chapter = book.chapter(index).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
+                .with_chapter_index(index)
+        })?;
+        let chapter_href = chapter.href;
+        if html.len() > self.opts.memory.max_entry_bytes {
+            return Err(RenderPrepError::new_with_phase(
+                ErrorPhase::Parse,
+                "ENTRY_BYTES_LIMIT",
+                format!(
+                    "Chapter entry exceeds max_entry_bytes ({} > {})",
+                    html.len(),
+                    self.opts.memory.max_entry_bytes
+                ),
+            )
+            .with_path(chapter_href.clone())
+            .with_chapter_index(index)
+            .with_limit(
+                "max_entry_bytes",
+                html.len(),
+                self.opts.memory.max_entry_bytes,
+            ));
+        }
+        self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, html)?;
+        let font_resolver = &self.font_resolver;
+        self.styler.style_chapter_bytes_with(html, |item| {
+            let (item, _) = resolve_item_with_font(font_resolver, item);
+            on_item(item);
+        })
+    }
+
     /// Prepare a chapter and stream each styled item with structured trace context.
     pub fn prepare_chapter_with_trace_context<
         R: std::io::Read + std::io::Seek,

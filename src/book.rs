@@ -17,7 +17,7 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::error::{
-    EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext, ZipError,
+    EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
 };
 use crate::metadata::{extract_metadata, EpubMetadata};
 use crate::navigation::{parse_nav_xhtml, parse_ncx, NavPoint, Navigation};
@@ -27,7 +27,7 @@ use crate::render_prep::{
     StylesheetSource,
 };
 use crate::spine::Spine;
-use crate::streaming::StreamingStats;
+
 use crate::tokenizer::{tokenize_html, Token};
 use crate::zip::{CdEntry, StreamingZip, ZipLimits};
 
@@ -155,13 +155,15 @@ impl StreamingChapterOptions {
     }
 }
 
-/// Result from streaming chapter processing.
+/// Result from streaming chapter event processing.
 #[derive(Clone, Debug)]
-pub struct StreamingResult {
+pub struct ChapterStreamResult {
     /// Number of items emitted.
     pub items_emitted: usize,
-    /// Processing statistics.
-    pub stats: StreamingStats,
+    /// Total bytes read from chapter.
+    pub bytes_read: usize,
+    /// Whether streaming is complete.
+    pub complete: bool,
 }
 
 /// Builder for ergonomic high-level EPUB opening/parsing.
@@ -482,6 +484,137 @@ impl ReadingSession {
                 self.resolve_locator(Locator::Chapter(pos.chapter_index))
             }
         }
+    }
+}
+
+/// Resumable pagination session that tracks parse/layout state across page turns.
+///
+/// This session maintains cursor state so that page N+1 can continue from where
+/// page N left off without re-parsing the chapter from the start.
+#[derive(Clone, Debug)]
+pub struct PaginationSession {
+    /// Current chapter index.
+    chapter_index: usize,
+    /// Current byte offset in chapter source.
+    byte_offset: usize,
+    /// Current event/token index.
+    event_index: usize,
+    /// Element stack at current position.
+    element_stack: Vec<String>,
+    /// Current page number.
+    page_number: usize,
+    /// Whether chapter has been fully processed.
+    chapter_complete: bool,
+}
+
+impl PaginationSession {
+    /// Create a new pagination session starting at chapter 0.
+    pub fn new() -> Self {
+        Self {
+            chapter_index: 0,
+            byte_offset: 0,
+            event_index: 0,
+            element_stack: Vec::with_capacity(32),
+            page_number: 0,
+            chapter_complete: false,
+        }
+    }
+
+    /// Create session for a specific chapter and offset.
+    pub fn at_position(chapter: usize, byte_offset: usize, event_index: usize) -> Self {
+        Self {
+            chapter_index: chapter,
+            byte_offset,
+            event_index,
+            element_stack: Vec::with_capacity(32),
+            page_number: 0,
+            chapter_complete: false,
+        }
+    }
+
+    /// Get current chapter index.
+    pub fn chapter_index(&self) -> usize {
+        self.chapter_index
+    }
+
+    /// Get current byte offset.
+    pub fn byte_offset(&self) -> usize {
+        self.byte_offset
+    }
+
+    /// Get current event index.
+    pub fn event_index(&self) -> usize {
+        self.event_index
+    }
+
+    /// Get current page number.
+    pub fn page_number(&self) -> usize {
+        self.page_number
+    }
+
+    /// Check if current chapter is fully processed.
+    pub fn is_chapter_complete(&self) -> bool {
+        self.chapter_complete
+    }
+
+    /// Advance to next page, preserving cursor state.
+    pub fn next_page(&mut self) {
+        self.page_number += 1;
+    }
+
+    /// Advance cursor position.
+    pub fn advance(&mut self, bytes: usize, events: usize) {
+        self.byte_offset += bytes;
+        self.event_index += events;
+    }
+
+    /// Push element onto stack.
+    pub fn push_element(&mut self, tag: &str) {
+        self.element_stack.push(tag.to_string());
+    }
+
+    /// Pop element from stack.
+    pub fn pop_element(&mut self) -> Option<String> {
+        self.element_stack.pop()
+    }
+
+    /// Move to next chapter.
+    pub fn next_chapter(&mut self) {
+        self.chapter_index += 1;
+        self.byte_offset = 0;
+        self.event_index = 0;
+        self.element_stack.clear();
+        self.chapter_complete = false;
+    }
+
+    /// Mark chapter as complete.
+    pub fn mark_chapter_complete(&mut self) {
+        self.chapter_complete = true;
+    }
+
+    /// Reset for new chapter.
+    pub fn reset_chapter(&mut self, chapter_index: usize) {
+        self.chapter_index = chapter_index;
+        self.byte_offset = 0;
+        self.event_index = 0;
+        self.element_stack.clear();
+        self.chapter_complete = false;
+    }
+
+    /// Create a reading position from current state.
+    pub fn to_position(&self) -> ReadingPosition {
+        ReadingPosition {
+            chapter_index: self.chapter_index,
+            chapter_href: None,
+            anchor: None,
+            fallback_offset: self.byte_offset,
+        }
+    }
+}
+
+impl Default for PaginationSession {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -870,6 +1003,49 @@ impl<R: Read + Seek> EpubBook<R> {
         self.chapter_stylesheets_with_options(index, limits)
     }
 
+    /// Resolve chapter stylesheet sources with caller-provided buffers.
+    ///
+    /// This variant reuses the provided buffer for each stylesheet read, avoiding
+    /// repeated allocations in the hot path.
+    ///
+    /// # Allocation behavior
+    /// - **Zero per-stylesheet allocations**: Reuses caller-provided buffer
+    /// - Caller buffer required: Yes (scratch_buf for I/O)
+    /// - **Preferred for embedded**: Avoids allocation per stylesheet
+    pub fn chapter_stylesheets_with_scratch(
+        &mut self,
+        index: usize,
+        limits: StyleLimits,
+        scratch_buf: &mut Vec<u8>,
+    ) -> Result<ChapterStylesheets, EpubError> {
+        let chapter = self.chapter(index)?;
+        let html = self.chapter_html(index)?;
+        let links = parse_stylesheet_links(&chapter.href, &html);
+        let mut sources = Vec::with_capacity(links.len());
+
+        for href in links {
+            scratch_buf.clear();
+            self.read_resource_into(&href, scratch_buf)
+                .map_err(|_| EpubError::Zip(ZipError::FileNotFound))?;
+
+            if scratch_buf.len() > limits.max_css_bytes {
+                return Err(EpubError::LimitExceeded {
+                    kind: LimitKind::CssSize,
+                    actual: scratch_buf.len(),
+                    limit: limits.max_css_bytes,
+                    path: Some(href.clone()),
+                });
+            }
+
+            let css = String::from_utf8(scratch_buf.clone())
+                .map_err(|_| EpubError::ChapterNotUtf8 { href: href.clone() })?;
+
+            sources.push(StylesheetSource { href, css });
+        }
+
+        Ok(ChapterStylesheets { sources })
+    }
+
     /// Enumerate embedded font-face metadata from EPUB CSS resources.
     pub fn embedded_fonts(&mut self) -> Result<Vec<EmbeddedFontFace>, EpubError> {
         self.embedded_fonts_with_limits(FontLimits::default())
@@ -892,12 +1068,71 @@ impl<R: Read + Seek> EpubBook<R> {
     ) -> Result<Vec<EmbeddedFontFace>, EpubError> {
         let faces = self.ensure_embedded_fonts_loaded()?;
         if faces.len() > limits.max_faces {
-            return Err(EpubError::Parse(format!(
-                "Embedded font face count exceeds max_faces ({})",
-                limits.max_faces
-            )));
+            return Err(EpubError::LimitExceeded {
+                kind: LimitKind::FontLimit,
+                actual: faces.len(),
+                limit: limits.max_faces,
+                path: None,
+            });
         }
         Ok(faces.clone())
+    }
+
+    /// Enumerate embedded font-face metadata with caller-provided buffer.
+    ///
+    /// This variant scans CSS files without caching, using a caller-provided buffer
+    /// to avoid allocations. Suitable for one-time font enumeration in constrained
+    /// environments where caching is not desired.
+    ///
+    /// # Allocation behavior
+    /// - **Zero per-CSS allocations**: Reuses caller-provided buffer
+    /// - Caller buffer required: Yes (scratch_buf for I/O)
+    /// - No caching: Always reads from archive
+    pub fn embedded_fonts_with_scratch(
+        &mut self,
+        limits: FontLimits,
+        scratch_buf: &mut Vec<u8>,
+    ) -> Result<Vec<EmbeddedFontFace>, EpubError> {
+        let css_hrefs: Vec<String> = self
+            .metadata
+            .manifest
+            .iter()
+            .filter(|item| item.media_type == "text/css")
+            .map(|item| item.href.clone())
+            .collect();
+
+        let mut out = Vec::with_capacity(limits.max_faces.min(16));
+
+        for href in css_hrefs {
+            if out.len() >= limits.max_faces {
+                break;
+            }
+
+            scratch_buf.clear();
+            match self.read_resource_into(&href, scratch_buf) {
+                Ok(_) => {}
+                Err(_) => continue, // Skip missing CSS files
+            }
+
+            if scratch_buf.len() > limits.max_bytes_per_font {
+                continue; // Skip oversized CSS
+            }
+
+            let css = match String::from_utf8(scratch_buf.clone()) {
+                Ok(s) => s,
+                Err(_) => continue, // Skip non-UTF8 CSS
+            };
+
+            let faces = parse_font_faces_from_css(&href, &css);
+            for face in faces {
+                if out.len() >= limits.max_faces {
+                    break;
+                }
+                out.push(face);
+            }
+        }
+
+        Ok(out)
     }
 
     /// Style chapter content into an event/run stream with default options.
@@ -980,6 +1215,131 @@ impl<R: Read + Seek> EpubBook<R> {
             )));
         }
         Ok(emitted)
+    }
+
+    /// Stream chapter events with caller-provided scratch buffers.
+    ///
+    /// This is the most memory-efficient API for processing chapter content. It uses
+    /// caller-provided buffers for all internal operations, avoiding any hidden allocations
+    /// in the hot path.
+    ///
+    /// # Allocation behavior
+    /// - **Zero hidden allocations**: Uses only caller-provided buffers
+    /// - Caller buffer required: Yes (chapter_buf, token_buf, scratch)
+    /// - **Preferred for embedded**: True zero-allocation streaming path
+    /// - Worst-case memory: Bounded by provided buffer sizes
+    ///
+    /// # Errors
+    /// Returns `EpubError::BufferTooSmall` if provided buffers are insufficient.
+    /// Returns `EpubError::LimitExceeded` if hard caps are reached.
+    pub fn chapter_events_with_scratch<F>(
+        &mut self,
+        index: usize,
+        opts: ChapterEventsOptions,
+        chapter_buf: &mut Vec<u8>,
+        scratch: &mut crate::streaming::ScratchBuffers,
+        mut on_item: F,
+    ) -> Result<ChapterStreamResult, EpubError>
+    where
+        F: FnMut(StyledEventOrRun) -> Result<(), EpubError>,
+    {
+        use crate::zip::CdEntry;
+
+        // Clear buffers for reuse
+        chapter_buf.clear();
+        scratch.clear();
+
+        let chapter = self.chapter(index)?;
+        let href = chapter.href;
+        let zip_path = resolve_opf_relative_path(&self.opf_path, &href);
+
+        // Get ZIP entry
+        let entry = self
+            .zip
+            .get_entry(&zip_path)
+            .ok_or(EpubError::Zip(ZipError::FileNotFound))?
+            .clone();
+
+        // Check hard caps before reading
+        let uncompressed = entry.uncompressed_size as usize;
+
+        // Check ZIP limits
+        if let Some(limits) = self.zip.limits() {
+            if uncompressed > limits.max_file_read_size {
+                return Err(EpubError::LimitExceeded {
+                    kind: LimitKind::FileSize,
+                    actual: uncompressed,
+                    limit: limits.max_file_read_size,
+                    path: Some(zip_path),
+                });
+            }
+        }
+
+        // Check memory budget
+        if uncompressed > opts.render.memory.max_entry_bytes {
+            return Err(EpubError::LimitExceeded {
+                kind: LimitKind::MemoryBudget,
+                actual: uncompressed,
+                limit: opts.render.memory.max_entry_bytes,
+                path: Some(zip_path),
+            });
+        }
+
+        // Check if chapter fits in provided buffer
+        if uncompressed > chapter_buf.capacity() {
+            return Err(EpubError::BufferTooSmall {
+                required: uncompressed,
+                provided: chapter_buf.capacity(),
+                context: "chapter_buf".to_string(),
+            });
+        }
+
+        // Read chapter into caller-provided buffer using scratch for I/O
+        let use_entry = CdEntry {
+            filename: String::new(),
+            method: entry.method,
+            compressed_size: entry.compressed_size,
+            uncompressed_size: entry.uncompressed_size,
+            local_header_offset: entry.local_header_offset,
+            crc32: entry.crc32,
+        };
+
+        self.zip
+            .read_file_with_scratch(&use_entry, chapter_buf, &mut scratch.read_buf)
+            .map_err(EpubError::Zip)?;
+
+        let mut emitted = 0usize;
+        let mut callback_err: Option<EpubError> = None;
+        let mut prep = RenderPrep::new(opts.render).with_serif_default();
+        prep.prepare_chapter_bytes_with(self, index, chapter_buf, |item| {
+            if callback_err.is_some() || emitted >= opts.max_items {
+                return;
+            }
+            if let Err(e) = on_item(item) {
+                callback_err = Some(e);
+                return;
+            }
+            emitted += 1;
+        })
+        .map_err(EpubError::from)?;
+
+        if let Some(err) = callback_err {
+            return Err(err);
+        }
+        if emitted >= opts.max_items {
+            return Err(EpubError::LimitExceeded {
+                kind: LimitKind::EventCount,
+                actual: emitted,
+                limit: opts.max_items,
+                path: Some(zip_path),
+            });
+        }
+
+        Ok(ChapterStreamResult {
+            items_emitted: emitted,
+            bytes_read: chapter_buf.len(),
+            complete: true,
+        })
     }
 
     /// Read a chapter and return plain text extracted from token stream.

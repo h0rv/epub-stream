@@ -18,7 +18,11 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
-#![deny(clippy::large_enum_variant, clippy::large_stack_arrays, clippy::redundant_clone)]
+#![deny(
+    clippy::large_enum_variant,
+    clippy::large_stack_arrays,
+    clippy::redundant_clone
+)]
 #![warn(
     clippy::box_collection,
     clippy::needless_collect,
@@ -61,12 +65,14 @@ pub use async_api::{open_epub_file_async, open_epub_file_async_with_options};
 #[cfg(feature = "std")]
 pub use book::{
     parse_epub_file, parse_epub_file_with_options, parse_epub_reader,
-    parse_epub_reader_with_options, ChapterRef, EpubBook, EpubBookBuilder, EpubBookOptions,
-    EpubSummary, Locator, ReadingPosition, ReadingSession, ResolvedLocation, ValidationMode,
+    parse_epub_reader_with_options, ChapterRef, ChapterStreamResult, EpubBook, EpubBookBuilder,
+    EpubBookOptions, EpubSummary, Locator, PaginationSession, ReadingPosition, ReadingSession,
+    ResolvedLocation, ValidationMode,
 };
 pub use css::{CssStyle, Stylesheet};
 pub use error::{
-    EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext, ZipError, ZipErrorKind,
+    EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
+    ZipErrorKind,
 };
 pub use metadata::EpubMetadata;
 pub use navigation::Navigation;
@@ -79,10 +85,13 @@ pub use render_prep::{
     StyledRun, Styler, StylesheetSource,
 };
 pub use spine::Spine;
-pub use tokenizer::{Token, TokenizeError, TokenizeLimits, tokenize_html_limited};
 pub use streaming::{
-    ChunkAllocator, ChunkLimits, PaginationContext, ScratchBuffers,
-    StreamingChapterProcessor, StreamingStats,
+    ChunkAllocator, ChunkLimits, PaginationContext, ScratchBuffers, StreamingChapterProcessor,
+    StreamingStats,
+};
+pub use tokenizer::{
+    tokenize_html_into, tokenize_html_limited, tokenize_html_with_scratch, Token, TokenizeError,
+    TokenizeLimits, TokenizeScratch,
 };
 #[cfg(feature = "std")]
 pub use validate::{

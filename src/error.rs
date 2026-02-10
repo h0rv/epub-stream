@@ -6,6 +6,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::{String, ToString};
 use core::fmt;
 
@@ -144,6 +145,44 @@ pub enum EpubError {
         /// Chapter href/path in the EPUB archive.
         href: String,
     },
+    /// Hard limit exceeded (typed error instead of OOM)
+    LimitExceeded {
+        /// Kind of limit that was exceeded.
+        kind: LimitKind,
+        /// Actual value observed.
+        actual: usize,
+        /// Configured limit.
+        limit: usize,
+        /// Optional path context.
+        path: Option<String>,
+    },
+    /// Provided buffer is too small for the operation
+    BufferTooSmall {
+        /// Required size.
+        required: usize,
+        /// Provided size.
+        provided: usize,
+        /// Context about which buffer.
+        context: String,
+    },
+}
+
+/// Kinds of limits that can be exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitKind {
+    /// File size limit.
+    FileSize,
+    /// Memory budget limit.
+    MemoryBudget,
+    /// Token/event count limit.
+    EventCount,
+    /// Nesting depth limit.
+    NestingDepth,
+    /// CSS stylesheet size limit.
+    CssSize,
+    /// Font count/size limit.
+    FontLimit,
 }
 
 impl fmt::Display for EpubError {
@@ -176,6 +215,47 @@ impl fmt::Display for EpubError {
             EpubError::ChapterNotUtf8 { href } => {
                 write!(f, "Chapter content is not valid UTF-8: {}", href)
             }
+            EpubError::LimitExceeded {
+                kind,
+                actual,
+                limit,
+                path,
+            } => {
+                write!(
+                    f,
+                    "{} limit exceeded: {} > {}{}",
+                    kind,
+                    actual,
+                    limit,
+                    path.as_ref()
+                        .map(|p| format!(" at {}", p))
+                        .unwrap_or_default()
+                )
+            }
+            EpubError::BufferTooSmall {
+                required,
+                provided,
+                context,
+            } => {
+                write!(
+                    f,
+                    "Buffer too small for {}: required {} bytes, provided {}",
+                    context, required, provided
+                )
+            }
+        }
+    }
+}
+
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LimitKind::FileSize => write!(f, "File size"),
+            LimitKind::MemoryBudget => write!(f, "Memory budget"),
+            LimitKind::EventCount => write!(f, "Event count"),
+            LimitKind::NestingDepth => write!(f, "Nesting depth"),
+            LimitKind::CssSize => write!(f, "CSS size"),
+            LimitKind::FontLimit => write!(f, "Font limit"),
         }
     }
 }
