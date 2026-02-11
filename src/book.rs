@@ -1305,9 +1305,28 @@ impl<R: Read + Seek> EpubBook<R> {
             crc32: entry.crc32,
         };
 
-        self.zip
-            .read_file_with_scratch(&use_entry, chapter_buf, &mut scratch.read_buf)
+        // `ZipArchive::read_file_with_scratch` consumes `&mut [u8]` and therefore
+        // uses slice length (not Vec capacity) as the writable output window.
+        // Ensure the Vec length matches the entry size before decompression while
+        // staying within the pre-validated capacity budget.
+        if chapter_buf.len() < uncompressed {
+            chapter_buf.resize(uncompressed, 0);
+        }
+        if scratch.read_buf.is_empty() {
+            // `read_file_with_scratch` requires a non-empty input slice and uses
+            // slice length as the compressed read chunk size.
+            let read_chunk = scratch.read_buf.capacity().max(1024);
+            scratch.read_buf.resize(read_chunk, 0);
+        }
+        let bytes_read = self
+            .zip
+            .read_file_with_scratch(
+                &use_entry,
+                chapter_buf.as_mut_slice(),
+                &mut scratch.read_buf,
+            )
             .map_err(EpubError::Zip)?;
+        chapter_buf.truncate(bytes_read);
 
         let mut emitted = 0usize;
         let mut callback_err: Option<EpubError> = None;
