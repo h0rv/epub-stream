@@ -6,6 +6,7 @@ use crate::render_ir::{
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
+const LINE_FIT_GUARD_PX: f32 = 4.0;
 
 /// Policy for discretionary soft-hyphen handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,7 +358,9 @@ impl LayoutState {
         };
         let sanitized_word = strip_soft_hyphens(word);
         let word_w = measure_text(&sanitized_word, &style);
-        let max_width = (self.cfg.content_width() - line.left_inset_px).max(1) as f32;
+        let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
+            - LINE_FIT_GUARD_PX)
+            .max(1.0);
 
         if line.width_px + space_w + word_w > max_width {
             if (self.cfg.soft_hyphen_policy == SoftHyphenPolicy::Discretionary
@@ -462,7 +465,8 @@ impl LayoutState {
             self.start_next_page();
         }
 
-        let available_width = self.cfg.content_width() - line.left_inset_px;
+        let available_width =
+            ((self.cfg.content_width() - line.left_inset_px) as f32 - LINE_FIT_GUARD_PX) as i32;
         let words = line.text.split_whitespace().count();
         let spaces = line.text.chars().filter(|c| *c == ' ').count() as i32;
         let fill_ratio = if available_width > 0 {
@@ -575,10 +579,20 @@ fn measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     if chars == 0.0 {
         return 0.0;
     }
-    // Width estimation is intentionally conservative but should stay aligned
-    // with actual backend glyph metrics. Values here are tuned so mono/bitmap
-    // backends do not wrap far too early while keeping justified layout stable.
-    let width_factor = if style.weight >= 700 {
+    // Width estimation tuned for mixed backends:
+    // - proportional EPUB faces (Bookerly/serif-like) need a wider estimate
+    // - mono fallback should remain denser
+    let family = style.family.to_ascii_lowercase();
+    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let width_factor = if proportional {
+        if style.weight >= 700 {
+            0.47
+        } else if style.italic {
+            0.44
+        } else {
+            0.45
+        }
+    } else if style.weight >= 700 {
         0.40
     } else if style.italic {
         0.37
