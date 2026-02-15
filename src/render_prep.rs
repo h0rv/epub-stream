@@ -1359,6 +1359,7 @@ impl RenderPrep {
     ///
     /// This avoids re-reading chapter bytes from the ZIP archive and is intended for
     /// embedded call sites that already own a reusable chapter buffer.
+    #[inline(never)]
     pub fn prepare_chapter_bytes_with<
         R: std::io::Read + std::io::Seek,
         F: FnMut(StyledEventOrRun),

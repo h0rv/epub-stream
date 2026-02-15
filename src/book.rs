@@ -925,6 +925,20 @@ impl<R: Read + Seek> EpubBook<R> {
         self.spine.len()
     }
 
+    /// Return the uncompressed byte size for a chapter entry.
+    ///
+    /// This enables embedded callers to pre-size reusable chapter buffers
+    /// before invoking chapter streaming/render flows.
+    pub fn chapter_uncompressed_size(&mut self, index: usize) -> Result<usize, EpubError> {
+        let chapter = self.chapter(index)?;
+        let zip_path = resolve_opf_relative_path(&self.opf_path, &chapter.href);
+        let entry = self
+            .zip
+            .get_entry(&zip_path)
+            .ok_or(EpubError::Zip(ZipError::FileNotFound))?;
+        usize::try_from(entry.uncompressed_size).map_err(|_| EpubError::Zip(ZipError::FileTooLarge))
+    }
+
     /// Create a detached reading session for locator/progress operations.
     pub fn reading_session(&self) -> ReadingSession {
         ReadingSession::new(self.chapters().collect(), self.navigation.clone())
@@ -1364,6 +1378,7 @@ impl<R: Read + Seek> EpubBook<R> {
     /// # Errors
     /// Returns `EpubError::BufferTooSmall` if provided buffers are insufficient.
     /// Returns `EpubError::LimitExceeded` if hard caps are reached.
+    #[inline(never)]
     pub fn chapter_events_with_scratch<F>(
         &mut self,
         index: usize,
