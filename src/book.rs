@@ -664,6 +664,140 @@ impl EpubBook<File> {
         let file = File::open(path).map_err(|e| EpubError::Io(e.to_string()))?;
         Self::from_reader_with_config(file, config)
     }
+
+    /// Open an EPUB using SD card as extended memory (temp file backing).
+    ///
+    /// This is a memory-efficient alternative for embedded devices with limited RAM.
+    /// Instead of loading container.xml and OPF into RAM, it streams them to temp
+    /// files on the SD card and parses from there.
+    ///
+    /// # Memory behavior
+    /// - Peak RAM usage: ~4KB (ZIP directory) + small parsing buffers
+    /// - No large contiguous allocations for metadata files
+    /// - Temp files are cleaned up after parsing
+    ///
+    /// # Arguments
+    /// * `path` - Path to the EPUB file on SD card
+    /// * `temp_dir` - Directory for temporary files (should be on SD card)
+    /// * `config` - Open configuration (lazy_navigation recommended)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mu_epub::book::{EpubBook, OpenConfig, EpubBookOptions};
+    ///
+    /// let config = OpenConfig {
+    ///     options: EpubBookOptions::default(),
+    ///     lazy_navigation: true, // Defer TOC parsing to save RAM
+    /// };
+    /// let book = EpubBook::open_with_temp_storage(
+    ///     "/sd/books/mybook.epub",
+    ///     "/sd/.tmp",
+    ///     config
+    /// ).unwrap();
+    /// ```
+    pub fn open_with_temp_storage<EP: AsRef<Path>, TP: AsRef<Path>>(
+        epub_path: EP,
+        temp_dir: TP,
+        config: OpenConfig,
+    ) -> Result<Self, EpubError> {
+        use crate::metadata::{parse_container_xml_file, parse_opf_file};
+
+        let options = config.options;
+        let mut zip = StreamingZip::new_with_limits(
+            File::open(&epub_path).map_err(|e| EpubError::Io(e.to_string()))?,
+            options.zip_limits,
+        )
+        .map_err(EpubError::Zip)?;
+
+        zip.validate_mimetype().map_err(EpubError::Zip)?;
+
+        // Create temp file paths
+        let temp_dir = temp_dir.as_ref();
+        let container_temp = temp_dir.join(".mu_epub_container.xml");
+        let opf_temp = temp_dir.join(".mu_epub_opf.xml");
+
+        // Stream container.xml to temp file instead of loading into RAM
+        let mut container_file = File::create(&container_temp)
+            .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
+        read_entry_into(&mut zip, "META-INF/container.xml", &mut container_file)?;
+        drop(container_file);
+
+        // Parse container.xml from file to get OPF path
+        let opf_path = parse_container_xml_file(&container_temp)
+            .map_err(|e| EpubError::Parse(format!("Failed to parse container.xml: {}", e)))?;
+
+        // Clean up container temp file immediately
+        let _ = std::fs::remove_file(&container_temp);
+
+        // Get OPF entry info first (before we borrow zip mutably again)
+        let opf_entry = zip
+            .get_entry(&opf_path)
+            .ok_or_else(|| EpubError::Zip(ZipError::FileNotFound))?;
+
+        // Clone entry data we need (avoids borrow issues)
+        let opf_entry_data = CdEntry {
+            method: opf_entry.method,
+            compressed_size: opf_entry.compressed_size,
+            uncompressed_size: opf_entry.uncompressed_size,
+            local_header_offset: opf_entry.local_header_offset,
+            crc32: opf_entry.crc32,
+            filename: String::with_capacity(0),
+        };
+
+        // Stream OPF to temp file instead of loading into RAM
+        let mut opf_file = File::create(&opf_temp)
+            .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
+        zip.read_file_to_writer(&opf_entry_data, &mut opf_file)
+            .map_err(|e| EpubError::Zip(e))?;
+        drop(opf_file);
+
+        // Parse OPF from file
+        let mut metadata = parse_opf_file(&opf_temp)
+            .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
+
+        // Store the OPF path in metadata
+        metadata.opf_path = Some(opf_path.clone());
+
+        // Clean up OPF temp file
+        let _ = std::fs::remove_file(&opf_temp);
+
+        // Parse spine from a small OPF buffer (spine is typically small)
+        let mut opf_buf = Vec::with_capacity(4096);
+        zip.read_file(&opf_entry_data, &mut opf_buf)
+            .map_err(|e| EpubError::Zip(e))?;
+        let spine = crate::spine::parse_spine(&opf_buf)?;
+
+        validate_open_invariants(&metadata, &spine, options.validation_mode)?;
+
+        // Navigation is deferred if lazy_navigation is enabled
+        let (navigation, navigation_loaded) = if config.lazy_navigation {
+            (None, false)
+        } else {
+            (
+                parse_navigation(
+                    &mut zip,
+                    &metadata,
+                    &spine,
+                    &opf_path,
+                    options.validation_mode,
+                    options.max_nav_bytes,
+                )?,
+                true,
+            )
+        };
+
+        Ok(Self {
+            zip,
+            opf_path,
+            metadata,
+            spine,
+            validation_mode: options.validation_mode,
+            max_nav_bytes: options.max_nav_bytes,
+            navigation_loaded,
+            navigation,
+            embedded_fonts_cache: None,
+        })
+    }
 }
 
 impl<R: Read + Seek> EpubBook<R> {

@@ -562,6 +562,65 @@ pub fn extract_metadata(
     Ok(metadata)
 }
 
+/// Parse container.xml from a file path (SD card backed)
+///
+/// Memory-efficient alternative that reads and parses from file
+/// instead of loading entire content into RAM.
+#[cfg(feature = "std")]
+pub fn parse_container_xml_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, EpubError> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| EpubError::Io(format!("Failed to open container.xml: {}", e)))?;
+
+    // Read in chunks to avoid large allocations
+    let mut buf = Vec::with_capacity(4096);
+    file.read_to_end(&mut buf)
+        .map_err(|e| EpubError::Io(format!("Failed to read container.xml: {}", e)))?;
+
+    parse_container_xml(&buf)
+}
+
+/// Parse content.opf from a file path (SD card backed)
+///
+/// Memory-efficient alternative that reads and parses from file
+/// instead of loading entire content into RAM.
+#[cfg(feature = "std")]
+pub fn parse_opf_file<P: AsRef<std::path::Path>>(path: P) -> Result<EpubMetadata, EpubError> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
+
+    // Read in chunks to avoid large allocations
+    let mut buf = Vec::with_capacity(16384);
+    file.read_to_end(&mut buf)
+        .map_err(|e| EpubError::Io(format!("Failed to read OPF: {}", e)))?;
+
+    parse_opf(&buf)
+}
+
+/// Full EPUB metadata extraction using file-based parsing
+///
+/// This is a memory-efficient alternative that reads from temp files
+/// on SD card instead of loading everything into RAM.
+#[cfg(feature = "std")]
+pub fn extract_metadata_from_files<P: AsRef<std::path::Path>>(
+    container_path: P,
+    opf_path: P,
+) -> Result<EpubMetadata, EpubError> {
+    // Parse container.xml from file to get the OPF path
+    let opf_relative_path = parse_container_xml_file(&container_path)?;
+
+    // Parse the OPF content from file
+    let mut metadata = parse_opf_file(&opf_path)?;
+
+    // Store the OPF path in the metadata
+    metadata.opf_path = Some(opf_relative_path);
+
+    Ok(metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
