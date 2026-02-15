@@ -576,9 +576,9 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(size)
             }
             METHOD_DEFLATED => {
-                let mut state = alloc::boxed::Box::new(
-                    miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
-                );
+                // Keep inflate state on stack to avoid large transient heap
+                // allocations (~tens of KB) on constrained targets.
+                let mut state = miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
@@ -709,9 +709,9 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(written)
             }
             METHOD_DEFLATED => {
-                let mut state = alloc::boxed::Box::new(
-                    miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
-                );
+                // Keep inflate state on stack to avoid large transient heap
+                // allocations (~tens of KB) on constrained targets.
+                let mut state = miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];

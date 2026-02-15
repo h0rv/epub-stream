@@ -73,6 +73,10 @@ pub struct LayoutHints {
     pub min_line_height: f32,
     /// Upper clamp for effective line-height multiplier.
     pub max_line_height: f32,
+    /// Global text scale multiplier applied after CSS size resolution.
+    ///
+    /// This lets reader UIs scale books even when EPUB CSS uses fixed px sizes.
+    pub text_scale: f32,
 }
 
 impl Default for LayoutHints {
@@ -83,6 +87,7 @@ impl Default for LayoutHints {
             max_font_size_px: 42.0,
             min_line_height: 1.1,
             max_line_height: 2.2,
+            text_scale: 1.0,
         }
     }
 }
@@ -818,6 +823,7 @@ impl Styler {
                 }
             }
         };
+        size_px *= self.config.hints.text_scale.clamp(0.5, 3.0);
         size_px = size_px.clamp(
             self.config.hints.min_font_size_px,
             self.config.hints.max_font_size_px,
