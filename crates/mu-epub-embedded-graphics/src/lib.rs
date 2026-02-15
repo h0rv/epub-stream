@@ -15,18 +15,23 @@
 
 use embedded_graphics::{
     mono_font::{
-        ascii::{FONT_6X13_ITALIC, FONT_7X13_BOLD, FONT_8X13, FONT_9X15_BOLD},
-        MonoTextStyle,
+        ascii::{
+            FONT_10X20, FONT_6X13_BOLD, FONT_6X13_ITALIC, FONT_6X9, FONT_7X13_BOLD,
+            FONT_7X13_ITALIC, FONT_7X14, FONT_7X14_BOLD, FONT_8X13, FONT_8X13_BOLD,
+            FONT_8X13_ITALIC, FONT_9X15_BOLD, FONT_9X18, FONT_9X18_BOLD,
+        },
+        MonoFont, MonoTextStyle,
     },
     pixelcolor::BinaryColor,
     prelude::*,
     primitives::{Line, PrimitiveStyle, Rectangle},
-    text::Text,
+    text::{Baseline, Text},
 };
 use mu_epub_render::{
     DrawCommand, JustifyMode, PageChromeCommand, PageChromeConfig, PageChromeKind,
     PageChromeTextStyle, RenderPage, ResolvedTextStyle, TextCommand,
 };
+use std::borrow::Cow;
 
 /// Backend-local font identifier used for metrics and rasterization dispatch.
 pub type FontId = u8;
@@ -102,18 +107,89 @@ pub trait FontBackend {
 pub struct MonoFontBackend;
 
 impl MonoFontBackend {
-    const REGULAR: FontId = 0;
-    const ITALIC: FontId = 1;
-    const BOLD: FontId = 2;
-    const BOLD_ITALIC: FontId = 3;
+    const SIZE_SMALL: FontId = 0;
+    const SIZE_MEDIUM: FontId = 1;
+    const SIZE_LARGE: FontId = 2;
+    const SIZE_XL: FontId = 3;
+
+    const VARIANT_REGULAR: FontId = 0;
+    const VARIANT_ITALIC: FontId = 1;
+    const VARIANT_BOLD: FontId = 2;
+    const VARIANT_BOLD_ITALIC: FontId = 3;
+
+    fn encode_font_id(size_bucket: FontId, variant: FontId) -> FontId {
+        (size_bucket << 2) | (variant & 0x03)
+    }
+
+    fn decode_font_id(font_id: FontId) -> (FontId, FontId) {
+        ((font_id >> 2) & 0x03, font_id & 0x03)
+    }
+
+    fn size_bucket_for(style: &ResolvedTextStyle) -> FontId {
+        if style.size_px >= 24.0 {
+            Self::SIZE_XL
+        } else if style.size_px >= 20.0 {
+            Self::SIZE_LARGE
+        } else if style.size_px >= 16.0 {
+            Self::SIZE_MEDIUM
+        } else {
+            Self::SIZE_SMALL
+        }
+    }
+
+    fn style_variant_for(style: &ResolvedTextStyle) -> FontId {
+        if style.weight >= 700 && style.italic {
+            Self::VARIANT_BOLD_ITALIC
+        } else if style.weight >= 700 {
+            Self::VARIANT_BOLD
+        } else if style.italic {
+            Self::VARIANT_ITALIC
+        } else {
+            Self::VARIANT_REGULAR
+        }
+    }
+
+    fn font_for(font_id: FontId) -> (&'static MonoFont<'static>, Option<FontFallbackReason>) {
+        let (size_bucket, variant) = Self::decode_font_id(font_id);
+        match (size_bucket, variant) {
+            (Self::SIZE_SMALL, Self::VARIANT_REGULAR) => (&FONT_6X9, None),
+            (Self::SIZE_SMALL, Self::VARIANT_ITALIC) => (&FONT_6X13_ITALIC, None),
+            (Self::SIZE_SMALL, Self::VARIANT_BOLD) => (&FONT_6X13_BOLD, None),
+            (Self::SIZE_SMALL, Self::VARIANT_BOLD_ITALIC) => (
+                &FONT_6X13_BOLD,
+                Some(FontFallbackReason::UnsupportedWeightItalic),
+            ),
+            (Self::SIZE_MEDIUM, Self::VARIANT_REGULAR) => (&FONT_7X14, None),
+            (Self::SIZE_MEDIUM, Self::VARIANT_ITALIC) => (&FONT_7X13_ITALIC, None),
+            (Self::SIZE_MEDIUM, Self::VARIANT_BOLD) => (&FONT_7X14_BOLD, None),
+            (Self::SIZE_MEDIUM, Self::VARIANT_BOLD_ITALIC) => (
+                &FONT_7X14_BOLD,
+                Some(FontFallbackReason::UnsupportedWeightItalic),
+            ),
+            (Self::SIZE_LARGE, Self::VARIANT_REGULAR) => (&FONT_8X13, None),
+            (Self::SIZE_LARGE, Self::VARIANT_ITALIC) => (&FONT_8X13_ITALIC, None),
+            (Self::SIZE_LARGE, Self::VARIANT_BOLD) => (&FONT_8X13_BOLD, None),
+            (Self::SIZE_LARGE, Self::VARIANT_BOLD_ITALIC) => (
+                &FONT_8X13_BOLD,
+                Some(FontFallbackReason::UnsupportedWeightItalic),
+            ),
+            (Self::SIZE_XL, Self::VARIANT_REGULAR) => (&FONT_10X20, None),
+            (Self::SIZE_XL, Self::VARIANT_ITALIC) => (
+                &FONT_9X18,
+                Some(FontFallbackReason::UnsupportedWeightItalic),
+            ),
+            (Self::SIZE_XL, Self::VARIANT_BOLD) => (&FONT_9X18_BOLD, None),
+            (Self::SIZE_XL, Self::VARIANT_BOLD_ITALIC) => (
+                &FONT_9X18_BOLD,
+                Some(FontFallbackReason::UnsupportedWeightItalic),
+            ),
+            _ => (&FONT_8X13, Some(FontFallbackReason::UnknownFontId)),
+        }
+    }
 
     fn style_for(font_id: FontId) -> MonoTextStyle<'static, BinaryColor> {
-        match font_id {
-            Self::BOLD_ITALIC => MonoTextStyle::new(&FONT_7X13_BOLD, BinaryColor::On),
-            Self::BOLD => MonoTextStyle::new(&FONT_9X15_BOLD, BinaryColor::On),
-            Self::ITALIC => MonoTextStyle::new(&FONT_6X13_ITALIC, BinaryColor::On),
-            _ => MonoTextStyle::new(&FONT_8X13, BinaryColor::On),
-        }
+        let (font, _) = Self::font_for(font_id);
+        MonoTextStyle::new(font, BinaryColor::On)
     }
 
     fn family_supported(family: &str) -> bool {
@@ -130,34 +206,19 @@ impl FontBackend for MonoFontBackend {
     }
 
     fn resolve_font(&self, style: &ResolvedTextStyle, font_id: Option<u32>) -> FontSelection {
-        if let Some(id) = font_id {
-            let mapped = u8::try_from(id).ok();
-
-            if let Some(mapped_id) = mapped {
-                return FontSelection {
-                    font_id: mapped_id,
-                    fallback_reason: None,
-                };
-            }
-
-            return FontSelection {
-                font_id: Self::REGULAR,
-                fallback_reason: Some(FontFallbackReason::UnknownFontId),
-            };
-        }
-
-        let fallback_reason =
+        let mut fallback_reason =
             (!Self::family_supported(&style.family)).then_some(FontFallbackReason::UnknownFamily);
 
-        let mapped_by_style = if style.weight >= 700 && style.italic {
-            Self::BOLD_ITALIC
-        } else if style.weight >= 700 {
-            Self::BOLD
-        } else if style.italic {
-            Self::ITALIC
-        } else {
-            Self::REGULAR
-        };
+        if font_id.is_some_and(|id| id > u8::MAX as u32) {
+            fallback_reason = Some(FontFallbackReason::UnknownFontId);
+        }
+
+        let mapped_by_style =
+            Self::encode_font_id(Self::size_bucket_for(style), Self::style_variant_for(style));
+        let (_, style_fallback) = Self::font_for(mapped_by_style);
+        if style_fallback.is_some() {
+            fallback_reason = style_fallback;
+        }
 
         FontSelection {
             font_id: mapped_by_style,
@@ -185,8 +246,9 @@ impl FontBackend for MonoFontBackend {
         D: DrawTarget<Color = BinaryColor>,
     {
         let style = Self::style_for(font_id);
-        Text::new(text, origin, style).draw(display)?;
-        Ok((text.chars().count() as i32) * (style.font.character_size.width as i32))
+        let normalized = normalize_text_for_mono(text);
+        Text::with_baseline(normalized.as_ref(), origin, style, Baseline::Top).draw(display)?;
+        Ok((normalized.chars().count() as i32) * (style.font.character_size.width as i32))
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -197,6 +259,37 @@ impl FontBackend for MonoFontBackend {
             justification: true,
         }
     }
+}
+
+fn normalize_text_for_mono(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{00A0}' // nbsp
+                | '\u{2013}' // en dash
+                | '\u{2014}' // em dash
+                | '\u{2018}' // left single quote
+                | '\u{2019}' // right single quote
+                | '\u{201C}' // left double quote
+                | '\u{201D}' // right double quote
+                | '\u{2026}' // ellipsis
+        )
+    }) {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{00A0}' => out.push(' '),
+            '\u{2013}' | '\u{2014}' => out.push('-'),
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' => out.push('"'),
+            '\u{2026}' => out.push_str("..."),
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Optional TTF backend feature gate.
@@ -543,8 +636,12 @@ where
                     return Ok(());
                 }
 
-                let per_space = extra_px_total / spaces;
-                let mut remainder = extra_px_total % spaces;
+                // Guard against visually noisy justification when the layout
+                // asks for too much inter-word expansion for the active font.
+                let max_extra_per_space = (metrics.space_width / 2).max(1);
+                let capped_total = extra_px_total.min(max_extra_per_space * spaces);
+                let per_space = capped_total / spaces;
+                let mut remainder = capped_total % spaces;
                 let mut x = cmd.x;
                 let mut run_start = 0usize;
 

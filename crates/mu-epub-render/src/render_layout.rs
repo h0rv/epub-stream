@@ -575,12 +575,15 @@ fn measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     if chars == 0.0 {
         return 0.0;
     }
+    // Width estimation is intentionally conservative but should stay aligned
+    // with actual backend glyph metrics. Values here are tuned so mono/bitmap
+    // backends do not wrap far too early while keeping justified layout stable.
     let width_factor = if style.weight >= 700 {
-        0.62
+        0.40
     } else if style.italic {
-        0.55
+        0.37
     } else {
-        0.58
+        0.38
     };
     let mut width = chars * style.size_px * width_factor;
     if chars > 1.0 {

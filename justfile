@@ -1,5 +1,12 @@
 # mu-epub justfile
 
+# Host target used for local simulator/CLI binaries.
+host_target := `if [ -n "${HOST_TEST_TARGET:-}" ]; then \
+    echo "$HOST_TEST_TARGET"; \
+else \
+    rustc -vV | awk '/^host: / { print $2 }'; \
+fi`
+
 # Format code
 fmt:
     cargo fmt --all
@@ -124,6 +131,33 @@ cli-check:
 # Run CLI
 cli *args:
     cargo run --features cli --bin mu-epub -- {{args}}
+
+# Render EPUB pages to PNG snapshots for local visual layout debugging.
+#
+# Usage:
+#   just visualize
+#   just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 12 target/visualize-default
+visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-default":
+    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+      {{epub}} \
+      --chapter {{chapter}} \
+      --start-page {{start}} \
+      --pages {{pages}} \
+      --out {{out}}
+
+# One-command sane default render pass for local layout iteration.
+visualize-default:
+    just visualize
+
+# Same as visualize, but with inter-word justification enabled.
+visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-justify":
+    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+      {{epub}} \
+      --chapter {{chapter}} \
+      --start-page {{start}} \
+      --pages {{pages}} \
+      --out {{out}} \
+      --justify
 
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:
