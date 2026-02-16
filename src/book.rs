@@ -1478,16 +1478,22 @@ impl<R: Read + Seek> EpubBook<R> {
         let mut emitted = 0usize;
         let mut callback_err: Option<EpubError> = None;
         let mut prep = RenderPrep::new(opts.render).with_serif_default();
-        prep.prepare_chapter_bytes_with(self, index, chapter_buf, |item| {
-            if callback_err.is_some() || emitted >= opts.max_items {
-                return;
-            }
-            if let Err(e) = on_item(item) {
-                callback_err = Some(e);
-                return;
-            }
-            emitted += 1;
-        })
+        prep.prepare_chapter_bytes_with_scratch(
+            self,
+            index,
+            chapter_buf,
+            &mut scratch.read_buf,
+            |item| {
+                if callback_err.is_some() || emitted >= opts.max_items {
+                    return;
+                }
+                if let Err(e) = on_item(item) {
+                    callback_err = Some(e);
+                    return;
+                }
+                emitted += 1;
+            },
+        )
         .map_err(EpubError::from)?;
 
         if let Some(err) = callback_err {

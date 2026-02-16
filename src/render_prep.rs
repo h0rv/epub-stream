@@ -1261,37 +1261,58 @@ impl RenderPrep {
         chapter_href: &str,
         html: &[u8],
     ) -> Result<(), RenderPrepError> {
+        let mut scratch = Vec::with_capacity(0);
+        self.apply_chapter_stylesheets_with_budget_scratch(
+            book,
+            chapter_index,
+            chapter_href,
+            html,
+            &mut scratch,
+        )
+    }
+
+    fn apply_chapter_stylesheets_with_budget_scratch<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        chapter_href: &str,
+        html: &[u8],
+        scratch_buf: &mut Vec<u8>,
+    ) -> Result<(), RenderPrepError> {
         let links = parse_stylesheet_links_bytes(chapter_href, html);
         self.styler.clear_stylesheets();
         let css_limit = min(
             self.opts.style.limits.max_css_bytes,
             self.opts.memory.max_css_bytes,
         );
+        scratch_buf.clear();
         for href in links {
-            let bytes = book.read_resource(&href).map_err(|e| {
-                RenderPrepError::new_with_phase(
-                    ErrorPhase::Parse,
-                    "BOOK_CHAPTER_STYLESHEET_READ",
-                    e.to_string(),
-                )
-                .with_path(href.clone())
-                .with_chapter_index(chapter_index)
-            })?;
-            if bytes.len() > css_limit {
+            scratch_buf.clear();
+            book.read_resource_into_with_hard_cap(&href, scratch_buf, css_limit)
+                .map_err(|e| {
+                    RenderPrepError::new_with_phase(
+                        ErrorPhase::Parse,
+                        "BOOK_CHAPTER_STYLESHEET_READ",
+                        e.to_string(),
+                    )
+                    .with_path(href.clone())
+                    .with_chapter_index(chapter_index)
+                })?;
+            if scratch_buf.len() > css_limit {
                 return Err(RenderPrepError::new_with_phase(
                     ErrorPhase::Parse,
                     "STYLE_CSS_TOO_LARGE",
                     format!(
                         "Stylesheet exceeds max_css_bytes ({} > {})",
-                        bytes.len(),
+                        scratch_buf.len(),
                         css_limit
                     ),
                 )
                 .with_path(href.clone())
                 .with_chapter_index(chapter_index)
-                .with_limit("max_css_bytes", bytes.len(), css_limit));
+                .with_limit("max_css_bytes", scratch_buf.len(), css_limit));
             }
-            let css = String::from_utf8(bytes).map_err(|_| {
+            let css = core::str::from_utf8(scratch_buf).map_err(|_| {
                 RenderPrepError::new_with_phase(
                     ErrorPhase::Parse,
                     "STYLE_CSS_NOT_UTF8",
@@ -1301,7 +1322,7 @@ impl RenderPrep {
                 .with_chapter_index(chapter_index)
             })?;
             self.styler
-                .push_stylesheet_source(&href, &css)
+                .push_stylesheet_source(&href, css)
                 .map_err(|e| e.with_chapter_index(chapter_index))?;
         }
         Ok(())
@@ -1400,6 +1421,58 @@ impl RenderPrep {
             ));
         }
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, html)?;
+        let font_resolver = &self.font_resolver;
+        self.styler.style_chapter_bytes_with(html, |item| {
+            let (item, _) = resolve_item_with_font(font_resolver, item);
+            on_item(item);
+        })
+    }
+
+    /// Prepare chapter bytes with caller-provided stylesheet scratch.
+    ///
+    /// This avoids transient stylesheet `Vec<u8>` allocations by reusing `stylesheet_scratch`.
+    #[inline(never)]
+    pub fn prepare_chapter_bytes_with_scratch<
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(StyledEventOrRun),
+    >(
+        &mut self,
+        book: &mut EpubBook<R>,
+        index: usize,
+        html: &[u8],
+        stylesheet_scratch: &mut Vec<u8>,
+        mut on_item: F,
+    ) -> Result<(), RenderPrepError> {
+        let chapter = book.chapter(index).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
+                .with_chapter_index(index)
+        })?;
+        let chapter_href = chapter.href;
+        if html.len() > self.opts.memory.max_entry_bytes {
+            return Err(RenderPrepError::new_with_phase(
+                ErrorPhase::Parse,
+                "ENTRY_BYTES_LIMIT",
+                format!(
+                    "Chapter entry exceeds max_entry_bytes ({} > {})",
+                    html.len(),
+                    self.opts.memory.max_entry_bytes
+                ),
+            )
+            .with_path(chapter_href.clone())
+            .with_chapter_index(index)
+            .with_limit(
+                "max_entry_bytes",
+                html.len(),
+                self.opts.memory.max_entry_bytes,
+            ));
+        }
+        self.apply_chapter_stylesheets_with_budget_scratch(
+            book,
+            index,
+            &chapter_href,
+            html,
+            stylesheet_scratch,
+        )?;
         let font_resolver = &self.font_resolver;
         self.styler.style_chapter_bytes_with(html, |item| {
             let (item, _) = resolve_item_with_font(font_resolver, item);
