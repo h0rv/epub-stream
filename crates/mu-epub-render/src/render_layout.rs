@@ -505,6 +505,21 @@ impl LayoutState {
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
             - line_fit_guard_px(&line.style)) as i32;
+        if let Some(overflow_word) = self.rebalance_line_for_right_edge(&mut line, available_width)
+        {
+            let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
+                self.cfg.list_indent_px
+            } else {
+                0
+            };
+            self.line = Some(CurrentLine {
+                text: overflow_word.clone(),
+                style: line.style.clone(),
+                width_px: measure_text(&overflow_word, &line.style),
+                line_height_px: line_height_px(&line.style, &self.cfg),
+                left_inset_px: continuation_inset,
+            });
+        }
         let words = line.text.split_whitespace().count();
         let spaces = line.text.chars().filter(|c| *c == ' ').count() as i32;
         let fill_ratio = if available_width > 0 {
@@ -565,6 +580,32 @@ impl LayoutState {
             self.lines_on_current_paragraph_page =
                 self.lines_on_current_paragraph_page.saturating_add(1);
         }
+    }
+
+    fn rebalance_line_for_right_edge(
+        &self,
+        line: &mut CurrentLine,
+        available_width: i32,
+    ) -> Option<String> {
+        if available_width <= 0 {
+            return None;
+        }
+        let conservative = conservative_measure_text(&line.text, &line.style);
+        if conservative <= available_width as f32 {
+            return None;
+        }
+        let source = line.text.clone();
+        let Some((head, tail)) = source.rsplit_once(' ') else {
+            return None;
+        };
+        let head = head.trim_end();
+        let tail = tail.trim_start();
+        if head.is_empty() || tail.is_empty() {
+            return None;
+        }
+        line.text = head.to_string();
+        line.width_px = measure_text(&line.text, &line.style);
+        Some(tail.to_string())
     }
 
     fn add_vertical_gap(&mut self, gap_px: i32) {
@@ -630,42 +671,70 @@ fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
 }
 
 fn measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
-    let chars = text.chars().count() as f32;
-    if chars == 0.0 {
+    let chars = text.chars().count();
+    if chars == 0 {
         return 0.0;
     }
-    // Width estimation tuned for mixed backends.
-    // Large sizes get a slightly smaller width factor to avoid under-utilizing
-    // the right edge with conservative wrapping.
+    // Dynamic width model:
+    // - per-glyph class widths (narrow/regular/wide/punctuation/digit)
+    // - style/family modifiers
+    // This is more stable across font sizes/families than a single scalar.
     let family = style.family.to_ascii_lowercase();
     let proportional = !(family.contains("mono") || family.contains("fixed"));
-    let large_size_adjust = if style.size_px >= 24.0 {
-        0.03
-    } else if style.size_px >= 20.0 {
-        0.02
-    } else {
-        0.0
-    };
-    let width_factor = if proportional {
-        if style.weight >= 700 {
-            0.47 - large_size_adjust
-        } else if style.italic {
-            0.44 - large_size_adjust
-        } else {
-            0.45 - large_size_adjust
+    let mut em_sum = 0.0f32;
+    if proportional {
+        for ch in text.chars() {
+            em_sum += proportional_glyph_em_width(ch);
         }
-    } else if style.weight >= 700 {
-        0.40 - (large_size_adjust * 0.5)
-    } else if style.italic {
-        0.37 - (large_size_adjust * 0.5)
     } else {
-        0.38 - (large_size_adjust * 0.5)
+        // Fixed-width fallback still uses a small class delta for punctuation.
+        for ch in text.chars() {
+            em_sum += if ch == ' ' { 0.52 } else { 0.58 };
+        }
+    }
+
+    let mut family_scale = if family.contains("serif") {
+        1.03
+    } else if family.contains("sans") {
+        0.99
+    } else {
+        1.00
     };
-    let mut width = chars * style.size_px * width_factor;
-    if chars > 1.0 {
-        width += (chars - 1.0) * style.letter_spacing;
+    if style.weight >= 700 {
+        family_scale += 0.03;
+    }
+    if style.italic {
+        family_scale += 0.01;
+    }
+    if style.size_px >= 24.0 {
+        family_scale += 0.01;
+    }
+
+    let mut width = em_sum * style.size_px * family_scale;
+    if chars > 1 {
+        width += (chars as f32 - 1.0) * style.letter_spacing;
     }
     width
+}
+
+fn proportional_glyph_em_width(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.32,
+        '\t' => 1.28,
+        '\u{00A0}' => 0.32,
+        'i' | 'l' | 'I' | '|' | '!' => 0.24,
+        '.' | ',' | ':' | ';' | '\'' | '"' | '`' => 0.23,
+        '-' | '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' => 0.34,
+        '(' | ')' | '[' | ']' | '{' | '}' => 0.30,
+        'f' | 't' | 'j' | 'r' => 0.34,
+        'm' | 'w' | 'M' | 'W' | '@' | '%' | '&' | '#' => 0.74,
+        c if c.is_ascii_digit() => 0.52,
+        c if c.is_ascii_uppercase() => 0.64,
+        c if c.is_ascii_lowercase() => 0.52,
+        c if c.is_whitespace() => 0.32,
+        c if c.is_ascii_punctuation() => 0.42,
+        _ => 0.56,
+    }
 }
 
 fn line_height_px(style: &ResolvedTextStyle, cfg: &LayoutConfig) -> i32 {
@@ -683,15 +752,64 @@ fn line_fit_guard_px(style: &ResolvedTextStyle) -> f32 {
     // Proportional and larger sizes can have right-side overhangs in rendered
     // glyph bitmaps; reserve a tiny extra safety band to avoid clipping.
     if proportional {
-        guard += 1.0;
+        guard += 2.0;
     }
     if style.size_px >= 24.0 {
-        guard += 1.0;
+        guard += 2.0;
     }
     if style.weight >= 700 {
         guard += 1.0;
     }
     guard
+}
+
+fn conservative_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
+    let chars = text.chars().count();
+    if chars == 0 {
+        return 0.0;
+    }
+    let family = style.family.to_ascii_lowercase();
+    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let mut em_sum = 0.0f32;
+    if proportional {
+        for ch in text.chars() {
+            em_sum += match ch {
+                ' ' | '\u{00A0}' => 0.32,
+                '\t' => 1.28,
+                'i' | 'l' | 'I' | '|' | '!' => 0.24,
+                '.' | ',' | ':' | ';' | '\'' | '"' | '`' => 0.23,
+                '-' | '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' => 0.34,
+                '(' | ')' | '[' | ']' | '{' | '}' => 0.30,
+                'f' | 't' | 'j' | 'r' => 0.34,
+                'm' | 'w' | 'M' | 'W' | '@' | '%' | '&' | '#' => 0.74,
+                c if c.is_ascii_digit() => 0.52,
+                c if c.is_ascii_uppercase() => 0.61,
+                c if c.is_ascii_lowercase() => 0.50,
+                c if c.is_whitespace() => 0.32,
+                c if c.is_ascii_punctuation() => 0.42,
+                _ => 0.56,
+            };
+        }
+    } else {
+        for ch in text.chars() {
+            em_sum += if ch == ' ' { 0.52 } else { 0.58 };
+        }
+    }
+    let mut scale = if proportional { 1.05 } else { 1.02 };
+    if style.weight >= 700 {
+        scale += 0.02;
+    }
+    if style.italic {
+        scale += 0.01;
+    }
+    if style.size_px >= 24.0 {
+        scale += 0.01;
+    }
+    let mut width = em_sum * style.size_px * scale;
+    if chars > 1 {
+        width += (chars as f32 - 1.0) * style.letter_spacing.max(0.0);
+    }
+    width
 }
 
 fn line_ascent_px(style: &ResolvedTextStyle, line_height_px: i32) -> i32 {
