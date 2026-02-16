@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::render_ir::{OverlayContent, OverlaySize, PaginationProfileId, RenderPage};
-use crate::render_layout::{LayoutConfig, LayoutEngine, LayoutSession as CoreLayoutSession};
+use crate::render_layout::{
+    LayoutConfig, LayoutEngine, LayoutSession as CoreLayoutSession, TextMeasurer,
+};
 
 /// Cancellation hook for long-running layout operations.
 pub trait CancelToken {
@@ -83,6 +85,7 @@ pub struct RenderConfig<'a> {
     cache: Option<&'a dyn RenderCacheStore>,
     cancel: Option<&'a dyn CancelToken>,
     embedded_fonts: bool,
+    text_measurer: Option<Arc<dyn TextMeasurer>>,
 }
 
 impl<'a> Default for RenderConfig<'a> {
@@ -92,6 +95,7 @@ impl<'a> Default for RenderConfig<'a> {
             cache: None,
             cancel: None,
             embedded_fonts: true,
+            text_measurer: None,
         }
     }
 }
@@ -121,6 +125,12 @@ impl<'a> RenderConfig<'a> {
     /// and rely on fallback font policy.
     pub fn with_embedded_fonts(mut self, enabled: bool) -> Self {
         self.embedded_fonts = enabled;
+        self
+    }
+
+    /// Attach a glyph-width measurer used by line layout.
+    pub fn with_text_measurer(mut self, measurer: Arc<dyn TextMeasurer>) -> Self {
+        self.text_measurer = Some(measurer);
         self
     }
 }
@@ -182,6 +192,7 @@ impl RenderEngine {
         config: RenderConfig<'a>,
     ) -> LayoutSession<'a> {
         let profile = self.pagination_profile_id();
+        let text_measurer = config.text_measurer.clone();
         let mut pending = VecDeque::new();
         let mut cached_hit = false;
         if let Some(cache) = config.cache {
@@ -206,7 +217,7 @@ impl RenderEngine {
             inner: if cached_hit {
                 None
             } else {
-                Some(self.layout.start_session())
+                Some(self.layout.start_session_with_text_measurer(text_measurer))
             },
             pending_pages: pending,
             rendered_pages: Vec::with_capacity(0),
@@ -395,6 +406,7 @@ impl RenderEngine {
             return Err(RenderEngineError::Cancelled);
         }
         let mut session = self.begin(chapter_index, config);
+        session.set_hyphenation_language(book.language());
         if session.is_complete() {
             session.drain_pages(&mut on_page);
             return Ok(());
@@ -450,6 +462,7 @@ impl RenderEngine {
             return Err(RenderEngineError::Cancelled);
         }
         let mut session = self.begin(chapter_index, config);
+        session.set_hyphenation_language(book.language());
         if session.is_complete() {
             session.drain_pages(&mut on_page);
             return Ok(());
@@ -616,6 +629,13 @@ pub struct LayoutSession<'a> {
 }
 
 impl LayoutSession<'_> {
+    /// Set the hyphenation language hint (e.g. "en", "en-US").
+    pub fn set_hyphenation_language(&mut self, language_tag: &str) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.set_hyphenation_language(language_tag);
+        }
+    }
+
     /// Push one styled item through layout and enqueue closed pages.
     pub fn push(&mut self, item: StyledEventOrRun) -> Result<(), RenderEngineError> {
         if self.completed {

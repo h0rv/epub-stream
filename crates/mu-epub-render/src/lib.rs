@@ -31,4 +31,4 @@ pub use render_ir::{
     PageMeta, PageMetrics, PaginationProfileId, RectCommand, RenderIntent, RenderPage,
     ResolvedTextStyle, RuleCommand, SvgMode, TextCommand, TypographyConfig, WidowOrphanControl,
 };
-pub use render_layout::{LayoutConfig, LayoutEngine, SoftHyphenPolicy};
+pub use render_layout::{LayoutConfig, LayoutEngine, SoftHyphenPolicy, TextMeasurer};

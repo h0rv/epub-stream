@@ -1,4 +1,5 @@
 use mu_epub::{BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledRun};
+use std::sync::Arc;
 
 use crate::render_ir::{
     DrawCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand, PageChromeConfig,
@@ -7,6 +8,36 @@ use crate::render_ir::{
 
 const SOFT_HYPHEN: char = '\u{00AD}';
 const LINE_FIT_GUARD_PX: f32 = 6.0;
+
+/// Optional text measurement hook for glyph-accurate line fitting.
+pub trait TextMeasurer: Send + Sync {
+    /// Measure rendered text width for the provided style.
+    fn measure_text_px(&self, text: &str, style: &ResolvedTextStyle) -> f32;
+
+    /// Conservative (safe upper-bound) width estimate.
+    ///
+    /// Default delegates to `measure_text_px`.
+    fn conservative_text_px(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
+        self.measure_text_px(text, style)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HyphenationLang {
+    Unknown,
+    English,
+}
+
+impl HyphenationLang {
+    fn from_tag(tag: &str) -> Self {
+        let lower = tag.to_ascii_lowercase();
+        if lower.starts_with("en") {
+            Self::English
+        } else {
+            Self::Unknown
+        }
+    }
+}
 
 /// Policy for discretionary soft-hyphen handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +69,8 @@ pub struct LayoutConfig {
     pub paragraph_gap_px: i32,
     /// Gap around heading blocks.
     pub heading_gap_px: i32,
+    /// Keep headings with at least this many subsequent lines.
+    pub heading_keep_with_next_lines: u8,
     /// Left indent for list items.
     pub list_indent_px: i32,
     /// First-line indent for paragraph/body text.
@@ -95,6 +128,7 @@ impl Default for LayoutConfig {
             line_gap_px: 0,
             paragraph_gap_px: 8,
             heading_gap_px: 10,
+            heading_keep_with_next_lines: 2,
             list_indent_px: 12,
             first_line_indent_px: 18,
             suppress_indent_after_heading: true,
@@ -112,9 +146,10 @@ impl Default for LayoutConfig {
 }
 
 /// Deterministic layout engine that emits render pages.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LayoutEngine {
     cfg: LayoutConfig,
+    text_measurer: Option<Arc<dyn TextMeasurer>>,
 }
 
 /// Incremental layout session for streaming styled items into pages.
@@ -124,10 +159,28 @@ pub struct LayoutSession {
     ctx: BlockCtx,
 }
 
+impl core::fmt::Debug for LayoutEngine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LayoutEngine")
+            .field("cfg", &self.cfg)
+            .field("has_text_measurer", &self.text_measurer.is_some())
+            .finish()
+    }
+}
+
 impl LayoutEngine {
     /// Create a layout engine.
     pub fn new(cfg: LayoutConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            text_measurer: None,
+        }
+    }
+
+    /// Install a shared text measurer for glyph-accurate width fitting.
+    pub fn with_text_measurer(mut self, measurer: Arc<dyn TextMeasurer>) -> Self {
+        self.text_measurer = Some(measurer);
+        self
     }
 
     /// Layout styled items into pages.
@@ -142,9 +195,17 @@ impl LayoutEngine {
 
     /// Start an incremental layout session.
     pub fn start_session(&self) -> LayoutSession {
+        self.start_session_with_text_measurer(self.text_measurer.clone())
+    }
+
+    /// Start an incremental layout session with an explicit text measurer override.
+    pub fn start_session_with_text_measurer(
+        &self,
+        measurer: Option<Arc<dyn TextMeasurer>>,
+    ) -> LayoutSession {
         LayoutSession {
             engine: self.clone(),
-            st: LayoutState::new(self.cfg),
+            st: LayoutState::new(self.cfg, measurer),
             ctx: BlockCtx::default(),
         }
     }
@@ -192,6 +253,10 @@ impl LayoutEngine {
     fn handle_event(&self, st: &mut LayoutState, ctx: &mut BlockCtx, ev: StyledEvent) {
         match ev {
             StyledEvent::ParagraphStart => {
+                if ctx.keep_with_next_pending {
+                    st.set_pending_keep_with_next(self.cfg.heading_keep_with_next_lines);
+                    ctx.keep_with_next_pending = false;
+                }
                 st.begin_paragraph();
                 if !ctx.suppress_next_indent {
                     ctx.pending_indent = true;
@@ -217,8 +282,13 @@ impl LayoutEngine {
                 ctx.heading_level = None;
                 ctx.pending_indent = false;
                 ctx.suppress_next_indent = self.cfg.suppress_indent_after_heading;
+                ctx.keep_with_next_pending = true;
             }
             StyledEvent::ListItemStart => {
+                if ctx.keep_with_next_pending {
+                    st.set_pending_keep_with_next(self.cfg.heading_keep_with_next_lines);
+                    ctx.keep_with_next_pending = false;
+                }
                 st.flush_line(true, false);
                 st.end_paragraph();
                 ctx.in_list = true;
@@ -253,6 +323,11 @@ impl LayoutSession {
         self.push_item_impl(item);
     }
 
+    /// Set the hyphenation language hint (e.g. "en", "en-US").
+    pub fn set_hyphenation_language(&mut self, language_tag: &str) {
+        self.st.hyphenation_lang = HyphenationLang::from_tag(language_tag);
+    }
+
     /// Push one styled item and emit any fully closed pages.
     pub fn push_item_with_pages<F>(&mut self, item: StyledEventOrRun, on_page: &mut F)
     where
@@ -284,6 +359,7 @@ struct BlockCtx {
     in_list: bool,
     pending_indent: bool,
     suppress_next_indent: bool,
+    keep_with_next_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -295,9 +371,10 @@ struct CurrentLine {
     left_inset_px: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct LayoutState {
     cfg: LayoutConfig,
+    text_measurer: Option<Arc<dyn TextMeasurer>>,
     page_no: usize,
     cursor_y: i32,
     page: RenderPage,
@@ -305,18 +382,21 @@ struct LayoutState {
     emitted: Vec<RenderPage>,
     in_paragraph: bool,
     lines_on_current_paragraph_page: usize,
+    pending_keep_with_next_lines: u8,
+    hyphenation_lang: HyphenationLang,
 }
 
 impl Default for LayoutState {
     fn default() -> Self {
-        Self::new(LayoutConfig::default())
+        Self::new(LayoutConfig::default(), None)
     }
 }
 
 impl LayoutState {
-    fn new(cfg: LayoutConfig) -> Self {
+    fn new(cfg: LayoutConfig, text_measurer: Option<Arc<dyn TextMeasurer>>) -> Self {
         Self {
             cfg,
+            text_measurer,
             page_no: 1,
             cursor_y: cfg.margin_top,
             page: RenderPage::new(1),
@@ -324,6 +404,8 @@ impl LayoutState {
             emitted: Vec::with_capacity(2),
             in_paragraph: false,
             lines_on_current_paragraph_page: 0,
+            pending_keep_with_next_lines: 0,
+            hyphenation_lang: HyphenationLang::Unknown,
         }
     }
 
@@ -335,6 +417,24 @@ impl LayoutState {
     fn end_paragraph(&mut self) {
         self.in_paragraph = false;
         self.lines_on_current_paragraph_page = 0;
+    }
+
+    fn set_pending_keep_with_next(&mut self, lines: u8) {
+        self.pending_keep_with_next_lines = lines.max(1);
+    }
+
+    fn measure_text(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
+        self.text_measurer
+            .as_ref()
+            .map(|m| m.measure_text_px(text, style))
+            .unwrap_or_else(|| heuristic_measure_text(text, style))
+    }
+
+    fn conservative_measure_text(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
+        self.text_measurer
+            .as_ref()
+            .map(|m| m.conservative_text_px(text, style))
+            .unwrap_or_else(|| conservative_heuristic_measure_text(text, style))
     }
 
     fn push_word(&mut self, word: &str, style: ResolvedTextStyle, extra_first_line_indent_px: i32) {
@@ -350,6 +450,16 @@ impl LayoutState {
         left_inset_px += extra_first_line_indent_px.max(0);
 
         if self.line.is_none() {
+            if self.pending_keep_with_next_lines > 0 {
+                let reserve = self.pending_keep_with_next_lines as i32;
+                let line_h = line_height_px(&style, &self.cfg);
+                let required = reserve.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
+                let remaining = self.cfg.content_bottom() - self.cursor_y;
+                if remaining < required && !self.page.content_commands.is_empty() {
+                    self.start_next_page();
+                }
+                self.pending_keep_with_next_lines = 0;
+            }
             if self.cfg.typography.widow_orphan_control.enabled
                 && self.in_paragraph
                 && self.lines_on_current_paragraph_page == 0
@@ -384,10 +494,10 @@ impl LayoutState {
         let space_w = if line.text.is_empty() {
             0.0
         } else {
-            measure_text(" ", &line.style)
+            self.measure_text(" ", &line.style)
         };
         let sanitized_word = strip_soft_hyphens(word);
-        let word_w = measure_text(&sanitized_word, &style);
+        let word_w = self.measure_text(&sanitized_word, &style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
             - line_fit_guard_px(&style))
         .max(1.0);
@@ -408,6 +518,16 @@ impl LayoutState {
                 ))
                 && word.contains(SOFT_HYPHEN)
                 && self.try_break_word_at_soft_hyphen(&mut line, word, &style, max_width, space_w)
+            {
+                return;
+            }
+            if (self.cfg.soft_hyphen_policy == SoftHyphenPolicy::Discretionary
+                || matches!(
+                    self.cfg.typography.hyphenation.soft_hyphen_policy,
+                    crate::render_ir::HyphenationMode::Discretionary
+                ))
+                && !word.contains(SOFT_HYPHEN)
+                && self.try_auto_hyphenate(&mut line, &sanitized_word, &style, max_width, space_w)
             {
                 return;
             }
@@ -461,7 +581,7 @@ impl LayoutState {
                 continue;
             }
             let candidate = format!("{prefix}-");
-            let candidate_w = measure_text(&candidate, style);
+            let candidate_w = self.measure_text(&candidate, style);
             let added = if line.text.is_empty() {
                 candidate_w
             } else {
@@ -483,7 +603,60 @@ impl LayoutState {
             line.width_px += space_w;
         }
         line.text.push_str(&prefix_with_hyphen);
-        line.width_px += measure_text(&prefix_with_hyphen, style);
+        line.width_px += self.measure_text(&prefix_with_hyphen, style);
+
+        self.line = Some(line.clone());
+        self.flush_line(false, false);
+        self.push_word(&remainder, style.clone(), 0);
+        true
+    }
+
+    fn try_auto_hyphenate(
+        &mut self,
+        line: &mut CurrentLine,
+        word: &str,
+        style: &ResolvedTextStyle,
+        max_width: f32,
+        space_w: f32,
+    ) -> bool {
+        if !matches!(self.hyphenation_lang, HyphenationLang::English) {
+            return false;
+        }
+        let candidates = english_hyphenation_candidates(word);
+        if candidates.is_empty() {
+            return false;
+        }
+
+        let mut best_split: Option<(String, String, f32)> = None;
+        for split in candidates {
+            let Some((left, right)) = split_word_at_char_boundary(word, split) else {
+                continue;
+            };
+            if left.chars().count() < 3 || right.chars().count() < 3 {
+                continue;
+            }
+            let left_h = format!("{left}-");
+            let candidate_w = self.measure_text(&left_h, style);
+            let added = if line.text.is_empty() {
+                candidate_w
+            } else {
+                space_w + candidate_w
+            };
+            if line.width_px + added <= max_width {
+                best_split = Some((left_h, right.to_string(), candidate_w));
+            }
+        }
+
+        let Some((prefix_with_hyphen, remainder, _)) = best_split else {
+            return false;
+        };
+
+        if !line.text.is_empty() {
+            line.text.push(' ');
+            line.width_px += space_w;
+        }
+        line.text.push_str(&prefix_with_hyphen);
+        line.width_px += self.measure_text(&prefix_with_hyphen, style);
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
@@ -502,6 +675,16 @@ impl LayoutState {
         if self.cursor_y + line.line_height_px > self.cfg.content_bottom() {
             self.start_next_page();
         }
+        let short_line_words = line.text.split_whitespace().count();
+        let remaining_after = self.cfg.content_bottom()
+            - (self.cursor_y + line.line_height_px + self.cfg.line_gap_px.max(0));
+        if short_line_words <= 2
+            && !is_last_in_block
+            && !self.page.content_commands.is_empty()
+            && remaining_after < line.line_height_px
+        {
+            self.start_next_page();
+        }
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
             - line_fit_guard_px(&line.style)) as i32;
@@ -515,7 +698,7 @@ impl LayoutState {
             self.line = Some(CurrentLine {
                 text: overflow_word.clone(),
                 style: line.style.clone(),
-                width_px: measure_text(&overflow_word, &line.style),
+                width_px: self.measure_text(&overflow_word, &line.style),
                 line_height_px: line_height_px(&line.style, &self.cfg),
                 left_inset_px: continuation_inset,
             });
@@ -549,7 +732,7 @@ impl LayoutState {
                     .max(self.cfg.justify_min_fill_ratio)
         {
             let extra = (available_width as f32 - line.width_px).max(0.0) as i32;
-            let space_w = measure_text(" ", &line.style).max(1.0);
+            let space_w = self.measure_text(" ", &line.style).max(1.0);
             let max_extra_per_space = (space_w * 0.45).round().max(1.0) as i32;
             let max_extra_total = spaces.saturating_mul(max_extra_per_space);
             let punctuation_terminal = ends_with_terminal_punctuation(&line.text);
@@ -590,21 +773,19 @@ impl LayoutState {
         if available_width <= 0 {
             return None;
         }
-        let conservative = conservative_measure_text(&line.text, &line.style);
+        let conservative = self.conservative_measure_text(&line.text, &line.style);
         if conservative <= available_width as f32 {
             return None;
         }
         let source = line.text.clone();
-        let Some((head, tail)) = source.rsplit_once(' ') else {
-            return None;
-        };
+        let (head, tail) = source.rsplit_once(' ')?;
         let head = head.trim_end();
         let tail = tail.trim_start();
         if head.is_empty() || tail.is_empty() {
             return None;
         }
         line.text = head.to_string();
-        line.width_px = measure_text(&line.text, &line.style);
+        line.width_px = self.measure_text(&line.text, &line.style);
         Some(tail.to_string())
     }
 
@@ -670,7 +851,7 @@ fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
     }
 }
 
-fn measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
+fn heuristic_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     let chars = text.chars().count();
     if chars == 0 {
         return 0.0;
@@ -763,7 +944,7 @@ fn line_fit_guard_px(style: &ResolvedTextStyle) -> f32 {
     guard
 }
 
-fn conservative_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
+fn conservative_heuristic_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     let chars = text.chars().count();
     if chars == 0 {
         return 0.0;
@@ -841,6 +1022,59 @@ fn ends_with_terminal_punctuation(line: &str) -> bool {
     )
 }
 
+fn split_word_at_char_boundary(word: &str, split_chars: usize) -> Option<(&str, &str)> {
+    if split_chars == 0 {
+        return None;
+    }
+    let mut split_byte = None;
+    for (idx, (byte, _)) in word.char_indices().enumerate() {
+        if idx == split_chars {
+            split_byte = Some(byte);
+            break;
+        }
+    }
+    let split_byte = split_byte?;
+    Some((&word[..split_byte], &word[split_byte..]))
+}
+
+fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() < 7 {
+        return Vec::with_capacity(0);
+    }
+    let mut candidates = Vec::with_capacity(chars.len() / 2);
+    let is_vowel = |c: char| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
+
+    for i in 3..(chars.len().saturating_sub(3)) {
+        let prev = chars[i - 1];
+        let next = chars[i];
+        if !prev.is_ascii_alphabetic() || !next.is_ascii_alphabetic() {
+            continue;
+        }
+        if is_vowel(prev) != is_vowel(next) {
+            candidates.push(i);
+        }
+    }
+
+    const SUFFIXES: &[&str] = &[
+        "tion", "sion", "ment", "ness", "less", "able", "ible", "ally", "ingly", "edly", "ing",
+        "ed", "ly",
+    ];
+    let lower = word.to_ascii_lowercase();
+    for suffix in SUFFIXES {
+        if lower.ends_with(suffix) {
+            let split = chars.len().saturating_sub(suffix.chars().count());
+            if split >= 3 && split + 3 <= chars.len() {
+                candidates.push(split);
+            }
+        }
+    }
+
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
 fn strip_soft_hyphens(text: &str) -> String {
     if text.contains(SOFT_HYPHEN) {
         text.chars().filter(|ch| *ch != SOFT_HYPHEN).collect()
@@ -886,6 +1120,14 @@ fn annotate_page_chrome(pages: &mut [RenderPage], cfg: LayoutConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WideMeasurer;
+
+    impl TextMeasurer for WideMeasurer {
+        fn measure_text_px(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
+            text.chars().count() as f32 * (style.size_px * 0.9).max(1.0)
+        }
+    }
 
     fn body_run(text: &str) -> StyledEventOrRun {
         StyledEventOrRun::Run(StyledRun {
@@ -946,6 +1188,37 @@ mod tests {
             }
         }
         assert!(saw_justified);
+    }
+
+    #[test]
+    fn custom_text_measurer_changes_wrap_behavior() {
+        let cfg = LayoutConfig {
+            display_width: 280,
+            margin_left: 12,
+            margin_right: 12,
+            ..LayoutConfig::default()
+        };
+        let default_engine = LayoutEngine::new(cfg);
+        let measured_engine = LayoutEngine::new(cfg).with_text_measurer(Arc::new(WideMeasurer));
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("one two three four five six seven eight nine ten eleven twelve"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+
+        let default_lines = default_engine
+            .layout_items(items.clone())
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter(|cmd| matches!(cmd, DrawCommand::Text(_)))
+            .count();
+        let measured_lines = measured_engine
+            .layout_items(items)
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter(|cmd| matches!(cmd, DrawCommand::Text(_)))
+            .count();
+        assert!(measured_lines > default_lines);
     }
 
     #[test]
@@ -1177,6 +1450,61 @@ mod tests {
             })
             .expect("text command should exist");
         assert!(first_line.baseline_y > cfg.margin_top);
+    }
+
+    #[test]
+    fn heading_keep_with_next_moves_following_paragraph_to_next_page() {
+        let cfg = LayoutConfig {
+            display_height: 96,
+            margin_top: 8,
+            margin_bottom: 8,
+            heading_keep_with_next_lines: 2,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("alpha beta gamma delta epsilon"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+            StyledEventOrRun::Event(StyledEvent::HeadingStart(1)),
+            body_run("Heading"),
+            StyledEventOrRun::Event(StyledEvent::HeadingEnd(1)),
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("next paragraph should move"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        assert!(pages.len() >= 2);
+    }
+
+    #[test]
+    fn english_auto_hyphenation_breaks_long_word_when_needed() {
+        let cfg = LayoutConfig {
+            display_width: 170,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let mut session = engine.start_session();
+        session.set_hyphenation_language("en-US");
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("characteristically"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        for item in items {
+            session.push_item(item);
+        }
+        let mut pages = Vec::new();
+        session.finish(&mut |p| pages.push(p));
+        let texts: Vec<String> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.ends_with('-')));
     }
 
     #[test]

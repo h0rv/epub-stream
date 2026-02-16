@@ -11,6 +11,43 @@ fn fixture_path(name: &str) -> PathBuf {
     path
 }
 
+fn gutenberg_sample_paths(limit: usize) -> Vec<PathBuf> {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.push("../../tests/datasets/wild/gutenberg");
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
+            {
+                out.push(path);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        let fallback = [
+            fixture_path("pg84-frankenstein.epub"),
+            fixture_path("pg1342-pride-and-prejudice.epub"),
+            fixture_path("pg1661-sherlock-holmes.epub"),
+        ];
+        for path in fallback {
+            if path.exists() {
+                out.push(path);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn build_engine(width: i32, height: i32, font_size_px: f32, justify: bool) -> RenderEngine {
     let mut opts = RenderEngineOptions::for_display(width, height);
     opts.layout.margin_left = 10;
@@ -339,6 +376,55 @@ fn right_edge_safety_matrix_across_sizes_margins_and_justify() {
 }
 
 #[test]
+fn frankenstein_progress_and_chapter_metrics_are_monotonic() {
+    let mut book = EpubBook::open(fixture_path("pg84-frankenstein.epub")).expect("fixture open");
+    let engine = build_engine(480, 800, 24.0, false);
+    let mut validated = 0usize;
+
+    for chapter_idx in 0..book.chapter_count() {
+        let first = engine
+            .prepare_chapter_page_range(&mut book, chapter_idx, 0, 1)
+            .expect("chapter first page should render");
+        if first.is_empty() {
+            continue;
+        }
+        let metrics = first[0].metrics;
+        assert_eq!(metrics.chapter_index, chapter_idx);
+        assert_eq!(metrics.chapter_page_index, 0);
+        let chapter_pages = metrics.chapter_page_count.unwrap_or(1).max(1);
+        assert!(chapter_pages >= 1);
+        if chapter_pages > 1 {
+            assert!(
+                metrics.progress_chapter <= 0.05,
+                "chapter {} first-page progress should start near zero, got {}",
+                chapter_idx,
+                metrics.progress_chapter
+            );
+        } else {
+            assert!(
+                metrics.progress_chapter >= 0.99,
+                "single-page chapter should report full chapter progress"
+            );
+        }
+        validated += 1;
+    }
+    assert!(validated >= 3, "expected several renderable chapters");
+
+    let (chapter_idx, pages) = (0..book.chapter_count())
+        .find_map(|idx| {
+            let pages = engine.prepare_chapter(&mut book, idx).ok()?;
+            (pages.len() >= 2).then_some((idx, pages))
+        })
+        .expect("expected a chapter with >=2 pages");
+    let last = pages.last().expect("chapter should have last page");
+    assert_eq!(last.metrics.chapter_index, chapter_idx);
+    assert!(
+        last.metrics.progress_chapter >= 0.95,
+        "last chapter page should have near-complete chapter progress"
+    );
+}
+
+#[test]
 fn ranged_metrics_are_complete_and_monotonic_for_frankenstein() {
     let mut book = EpubBook::open(fixture_path("pg84-frankenstein.epub")).expect("fixture open");
     let engine = build_engine(480, 800, 24.0, false);
@@ -401,4 +487,27 @@ fn tiny_viewport_large_font_still_produces_bounded_lines() {
         })
         .expect("expected renderable chapter");
     assert_no_screen_edge_overrun(&pages, 320, 2);
+}
+
+#[test]
+fn gutenberg_corpus_sample_has_no_body_right_edge_overrun() {
+    let samples = gutenberg_sample_paths(3);
+    if samples.is_empty() {
+        return;
+    }
+    for path in samples {
+        let mut book = EpubBook::open(&path).expect("gutenberg sample should open");
+        let mut opts = RenderEngineOptions::for_display(480, 800);
+        opts.layout.margin_left = 8;
+        opts.layout.margin_right = 8;
+        opts.layout.margin_top = 10;
+        opts.layout.margin_bottom = 24;
+        opts.layout.first_line_indent_px = 0;
+        opts.layout.typography.justification.enabled = true;
+        opts.prep.layout_hints.base_font_size_px = 24.0;
+        opts.prep.style.hints = opts.prep.layout_hints;
+        let engine = RenderEngine::new(opts);
+        let (_, pages) = chapter_with_pages(&engine, &mut book).expect("chapter should render");
+        assert_no_screen_edge_overrun(&pages, 480, 2);
+    }
 }
