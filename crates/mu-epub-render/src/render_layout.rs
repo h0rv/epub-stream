@@ -8,6 +8,8 @@ use crate::render_ir::{
 
 const SOFT_HYPHEN: char = '\u{00AD}';
 const LINE_FIT_GUARD_PX: f32 = 6.0;
+const MAX_BUFFERED_PARAGRAPH_WORDS: usize = 64;
+const MAX_BUFFERED_PARAGRAPH_CHARS: usize = 1200;
 
 /// Optional text measurement hook for glyph-accurate line fitting.
 pub trait TextMeasurer: Send + Sync {
@@ -400,6 +402,7 @@ struct LayoutState {
     pending_keep_with_next_lines: u8,
     hyphenation_lang: HyphenationLang,
     paragraph_words: Vec<ParagraphWord>,
+    paragraph_chars: usize,
     replay_direct_mode: bool,
     buffered_flush_mode: bool,
 }
@@ -424,7 +427,8 @@ impl LayoutState {
             lines_on_current_paragraph_page: 0,
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
-            paragraph_words: Vec::with_capacity(0),
+            paragraph_words: Vec::with_capacity(MAX_BUFFERED_PARAGRAPH_WORDS),
+            paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
         }
@@ -434,10 +438,12 @@ impl LayoutState {
         self.in_paragraph = true;
         self.lines_on_current_paragraph_page = 0;
         self.paragraph_words.clear();
+        self.paragraph_chars = 0;
     }
 
     fn end_paragraph(&mut self) {
         self.paragraph_words.clear();
+        self.paragraph_chars = 0;
         self.in_paragraph = false;
         self.lines_on_current_paragraph_page = 0;
     }
@@ -474,16 +480,26 @@ impl LayoutState {
 
         let sanitized_word = strip_soft_hyphens(word);
         if self.should_buffer_paragraph_word(&style, word) {
+            let projected_chars = self
+                .paragraph_chars
+                .saturating_add(sanitized_word.chars().count())
+                .saturating_add(usize::from(!self.paragraph_words.is_empty()));
+            if self.paragraph_words.len() >= MAX_BUFFERED_PARAGRAPH_WORDS
+                || projected_chars > MAX_BUFFERED_PARAGRAPH_CHARS
+            {
+                self.flush_buffered_paragraph(false, false);
+            }
             let word_w = self.measure_text(&sanitized_word, &style);
+            self.paragraph_chars = self
+                .paragraph_chars
+                .saturating_add(sanitized_word.chars().count())
+                .saturating_add(usize::from(!self.paragraph_words.is_empty()));
             self.paragraph_words.push(ParagraphWord {
                 text: sanitized_word,
                 style,
                 left_inset_px,
                 width_px: word_w,
             });
-            if self.paragraph_words.len() >= 256 {
-                self.flush_buffered_paragraph(false, false);
-            }
             return;
         }
         self.push_word_direct(word, style, left_inset_px);
@@ -659,6 +675,7 @@ impl LayoutState {
         }
         if self.paragraph_words.len() < 2 {
             let replay = core::mem::take(&mut self.paragraph_words);
+            self.paragraph_chars = 0;
             self.replay_direct_mode = true;
             for word in replay {
                 self.push_word_direct(&word.text, word.style, word.left_inset_px);
@@ -670,6 +687,7 @@ impl LayoutState {
             Some(breaks) if !breaks.is_empty() => breaks,
             _ => {
                 let replay = core::mem::take(&mut self.paragraph_words);
+                self.paragraph_chars = 0;
                 self.replay_direct_mode = true;
                 for word in replay {
                     self.push_word_direct(&word.text, word.style, word.left_inset_px);
@@ -680,6 +698,7 @@ impl LayoutState {
         };
 
         let words = core::mem::take(&mut self.paragraph_words);
+        self.paragraph_chars = 0;
         self.buffered_flush_mode = true;
         let mut start = 0usize;
         for (idx, end) in breaks.iter().copied().enumerate() {
