@@ -627,7 +627,7 @@ impl LayoutState {
             return false;
         }
 
-        let mut best_split: Option<(String, String, f32)> = None;
+        let mut best_split: Option<(String, String, f32, i32)> = None;
         for split in candidates {
             let Some((left, right)) = split_word_at_char_boundary(word, split) else {
                 continue;
@@ -643,11 +643,21 @@ impl LayoutState {
                 space_w + candidate_w
             };
             if line.width_px + added <= max_width {
-                best_split = Some((left_h, right.to_string(), candidate_w));
+                let left_len = left.chars().count() as i32;
+                let right_len = right.chars().count() as i32;
+                let balance_penalty = (left_len - right_len).abs();
+                // Prefer fitting split near the right edge while avoiding overly
+                // unbalanced chunks that produce bad rhythm.
+                let fit_slack = (max_width - (line.width_px + added)).round() as i32;
+                let score = fit_slack.saturating_mul(2).saturating_add(balance_penalty);
+                match best_split {
+                    Some((_, _, _, best_score)) if score >= best_score => {}
+                    _ => best_split = Some((left_h, right.to_string(), candidate_w, score)),
+                }
             }
         }
 
-        let Some((prefix_with_hyphen, remainder, _)) = best_split else {
+        let Some((prefix_with_hyphen, remainder, _, _)) = best_split else {
             return false;
         };
 
@@ -688,6 +698,26 @@ impl LayoutState {
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
             - line_fit_guard_px(&line.style)) as i32;
+        let quality_remainder =
+            if self.cfg.typography.justification.enabled && !is_last_in_block && !hard_break {
+                self.rebalance_line_for_quality(&mut line, available_width)
+            } else {
+                None
+            };
+        if let Some(overflow_word) = quality_remainder {
+            let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
+                self.cfg.list_indent_px
+            } else {
+                0
+            };
+            self.line = Some(CurrentLine {
+                text: overflow_word.clone(),
+                style: line.style.clone(),
+                width_px: self.measure_text(&overflow_word, &line.style),
+                line_height_px: line_height_px(&line.style, &self.cfg),
+                left_inset_px: continuation_inset,
+            });
+        }
         if let Some(overflow_word) = self.rebalance_line_for_right_edge(&mut line, available_width)
         {
             let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
@@ -786,6 +816,36 @@ impl LayoutState {
         }
         line.text = head.to_string();
         line.width_px = self.measure_text(&line.text, &line.style);
+        Some(tail.to_string())
+    }
+
+    fn rebalance_line_for_quality(
+        &self,
+        line: &mut CurrentLine,
+        available_width: i32,
+    ) -> Option<String> {
+        if available_width <= 0 {
+            return None;
+        }
+        let words: Vec<&str> = line.text.split_whitespace().collect();
+        let tail = *words.last()?;
+        if tail.chars().count() > 2 || words.len() < 3 {
+            return None;
+        }
+        let source = line.text.clone();
+        let (head, tail) = source.rsplit_once(' ')?;
+        let head = head.trim_end();
+        let tail = tail.trim_start();
+        if head.is_empty() || tail.is_empty() {
+            return None;
+        }
+        let head_w = self.measure_text(head, &line.style);
+        let fill = head_w / available_width as f32;
+        if fill < 0.55 {
+            return None;
+        }
+        line.text = head.to_string();
+        line.width_px = head_w;
         Some(tail.to_string())
     }
 
@@ -1043,6 +1103,9 @@ fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
         return Vec::with_capacity(0);
     }
     let mut candidates = Vec::with_capacity(chars.len() / 2);
+    if let Some(exception) = english_hyphenation_exception(word) {
+        candidates.extend_from_slice(exception);
+    }
     let is_vowel = |c: char| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
 
     for i in 3..(chars.len().saturating_sub(3)) {
@@ -1073,6 +1136,35 @@ fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
     candidates.sort_unstable();
     candidates.dedup();
     candidates
+}
+
+fn english_hyphenation_exception(word: &str) -> Option<&'static [usize]> {
+    let lower = word.to_ascii_lowercase();
+    match lower.as_str() {
+        "characteristically" => Some(&[4, 6, 9, 12]),
+        "accessibility" => Some(&[3, 6, 9]),
+        "fundamental" => Some(&[3, 6]),
+        "functionality" => Some(&[4, 7, 10]),
+        "publication" => Some(&[3, 6]),
+        "consortium" => Some(&[3, 6]),
+        "adventure" => Some(&[2, 5]),
+        "marvellous" => Some(&[3, 6]),
+        "extraordinary" => Some(&[5, 8]),
+        "responsibility" => Some(&[3, 6, 9]),
+        "determined" => Some(&[3, 6]),
+        "encounter" => Some(&[2, 5]),
+        "obedient" => Some(&[2, 5]),
+        "endeavour" => Some(&[2, 5]),
+        "providence" => Some(&[3, 6]),
+        "language" => Some(&[3]),
+        "fortune" => Some(&[3]),
+        "navigator" => Some(&[3, 6]),
+        "navigators" => Some(&[3, 6]),
+        "apparently" => Some(&[3, 6]),
+        "hitherto" => Some(&[3]),
+        "merchantman" => Some(&[4, 7]),
+        _ => None,
+    }
 }
 
 fn strip_soft_hyphens(text: &str) -> String {
@@ -1505,6 +1597,72 @@ mod tests {
             })
             .collect();
         assert!(texts.iter().any(|t| t.ends_with('-')));
+    }
+
+    #[test]
+    fn english_exception_hyphenation_handles_accessibility() {
+        let cfg = LayoutConfig {
+            display_width: 170,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let mut session = engine.start_session();
+        session.set_hyphenation_language("en");
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("accessibility"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        for item in items {
+            session.push_item(item);
+        }
+        let mut pages = Vec::with_capacity(2);
+        session.finish(&mut |p| pages.push(p));
+        let texts: Vec<String> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.ends_with('-')));
+    }
+
+    #[test]
+    fn quality_rebalance_avoids_short_trailing_word_on_wrapped_line() {
+        let cfg = LayoutConfig {
+            display_width: 220,
+            typography: TypographyConfig {
+                justification: crate::render_ir::JustificationConfig {
+                    enabled: true,
+                    min_words: 3,
+                    min_fill_ratio: 0.5,
+                },
+                ..TypographyConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("alpha beta gamma delta to epsilon zeta eta theta"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let lines: Vec<String> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            lines.iter().all(|line| !line.ends_with(" to")),
+            "quality rebalance should avoid short trailing 'to': {:?}",
+            lines
+        );
     }
 
     #[test]
