@@ -531,6 +531,28 @@ impl LayoutState {
             {
                 return;
             }
+            if let Some((left_text, right_text, left_w, right_w)) =
+                self.optimize_overflow_break(&line, &sanitized_word, &style, max_width)
+            {
+                let continuation_inset = if matches!(style.role, BlockRole::ListItem) {
+                    self.cfg.list_indent_px
+                } else {
+                    0
+                };
+                line.text = left_text;
+                line.width_px = left_w;
+                line.style = style.clone();
+                self.line = Some(line);
+                self.flush_line(false, false);
+                self.line = Some(CurrentLine {
+                    text: right_text,
+                    style: style.clone(),
+                    width_px: right_w,
+                    line_height_px: line_height_px(&style, &self.cfg),
+                    left_inset_px: continuation_inset,
+                });
+                return;
+            }
             if line.text.is_empty() {
                 line.text = sanitized_word;
                 line.width_px = word_w;
@@ -558,6 +580,60 @@ impl LayoutState {
         line.width_px += word_w;
         line.style = style;
         self.line = Some(line);
+    }
+
+    fn optimize_overflow_break(
+        &self,
+        line: &CurrentLine,
+        incoming_word: &str,
+        style: &ResolvedTextStyle,
+        max_width: f32,
+    ) -> Option<(String, String, f32, f32)> {
+        if line.text.is_empty() || incoming_word.is_empty() {
+            return None;
+        }
+        let mut words: Vec<&str> = line.text.split_whitespace().collect();
+        words.push(incoming_word);
+        if words.len() < 3 {
+            return None;
+        }
+        let mut best: Option<(String, String, f32, f32, i32)> = None;
+        // Keep at least one word on each side.
+        for break_idx in 1..words.len() {
+            let left_words = &words[..break_idx];
+            let right_words = &words[break_idx..];
+            let left = left_words.join(" ");
+            let right = right_words.join(" ");
+            let left_w = self.measure_text(&left, style);
+            if left_w > max_width {
+                continue;
+            }
+            let right_w = self.measure_text(&right, style);
+            let slack = (max_width - left_w).max(0.0);
+            let last_left_len = left_words
+                .last()
+                .map(|w| w.chars().count() as i32)
+                .unwrap_or_default();
+            let first_right_len = right_words
+                .first()
+                .map(|w| w.chars().count() as i32)
+                .unwrap_or_default();
+            let mut score = (slack * slack).round() as i32;
+            if last_left_len <= 2 {
+                score += 1400;
+            }
+            if first_right_len <= 2 {
+                score += 900;
+            }
+            if right_words.len() == 1 {
+                score += 400;
+            }
+            match best {
+                Some((_, _, _, _, best_score)) if score >= best_score => {}
+                _ => best = Some((left, right, left_w, right_w, score)),
+            }
+        }
+        best.map(|(left, right, left_w, right_w, _)| (left, right, left_w, right_w))
     }
 
     fn try_break_word_at_soft_hyphen(
