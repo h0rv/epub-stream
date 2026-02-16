@@ -264,12 +264,14 @@ impl LayoutEngine {
                 ctx.suppress_next_indent = false;
             }
             StyledEvent::ParagraphEnd => {
+                st.flush_buffered_paragraph(false, true);
                 st.flush_line(true, false);
                 st.end_paragraph();
                 st.add_vertical_gap(self.cfg.paragraph_gap_px);
                 ctx.pending_indent = true;
             }
             StyledEvent::HeadingStart(level) => {
+                st.flush_buffered_paragraph(false, true);
                 st.flush_line(true, false);
                 st.end_paragraph();
                 st.add_vertical_gap(self.cfg.heading_gap_px);
@@ -277,6 +279,7 @@ impl LayoutEngine {
                 ctx.pending_indent = false;
             }
             StyledEvent::HeadingEnd(_) => {
+                st.flush_buffered_paragraph(false, true);
                 st.flush_line(true, false);
                 st.add_vertical_gap(self.cfg.heading_gap_px);
                 ctx.heading_level = None;
@@ -289,18 +292,21 @@ impl LayoutEngine {
                     st.set_pending_keep_with_next(self.cfg.heading_keep_with_next_lines);
                     ctx.keep_with_next_pending = false;
                 }
+                st.flush_buffered_paragraph(false, true);
                 st.flush_line(true, false);
                 st.end_paragraph();
                 ctx.in_list = true;
                 ctx.pending_indent = false;
             }
             StyledEvent::ListItemEnd => {
+                st.flush_buffered_paragraph(false, true);
                 st.flush_line(true, false);
                 st.add_vertical_gap(self.cfg.paragraph_gap_px.saturating_sub(2));
                 ctx.in_list = false;
                 ctx.pending_indent = true;
             }
             StyledEvent::LineBreak => {
+                st.flush_buffered_paragraph(true, false);
                 st.flush_line(false, true);
                 ctx.pending_indent = false;
             }
@@ -344,6 +350,7 @@ impl LayoutSession {
     where
         F: FnMut(RenderPage),
     {
+        self.st.flush_buffered_paragraph(false, true);
         self.st.flush_line(true, false);
         let mut pages = core::mem::take(&mut self.st).into_pages();
         annotate_page_chrome(&mut pages, self.engine.cfg);
@@ -371,6 +378,14 @@ struct CurrentLine {
     left_inset_px: i32,
 }
 
+#[derive(Clone, Debug)]
+struct ParagraphWord {
+    text: String,
+    style: ResolvedTextStyle,
+    left_inset_px: i32,
+    width_px: f32,
+}
+
 #[derive(Clone)]
 struct LayoutState {
     cfg: LayoutConfig,
@@ -384,6 +399,9 @@ struct LayoutState {
     lines_on_current_paragraph_page: usize,
     pending_keep_with_next_lines: u8,
     hyphenation_lang: HyphenationLang,
+    paragraph_words: Vec<ParagraphWord>,
+    replay_direct_mode: bool,
+    buffered_flush_mode: bool,
 }
 
 impl Default for LayoutState {
@@ -406,15 +424,20 @@ impl LayoutState {
             lines_on_current_paragraph_page: 0,
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
+            paragraph_words: Vec::with_capacity(0),
+            replay_direct_mode: false,
+            buffered_flush_mode: false,
         }
     }
 
     fn begin_paragraph(&mut self) {
         self.in_paragraph = true;
         self.lines_on_current_paragraph_page = 0;
+        self.paragraph_words.clear();
     }
 
     fn end_paragraph(&mut self) {
+        self.paragraph_words.clear();
         self.in_paragraph = false;
         self.lines_on_current_paragraph_page = 0;
     }
@@ -449,29 +472,53 @@ impl LayoutState {
         };
         left_inset_px += extra_first_line_indent_px.max(0);
 
+        let sanitized_word = strip_soft_hyphens(word);
+        if self.should_buffer_paragraph_word(&style, word) {
+            let word_w = self.measure_text(&sanitized_word, &style);
+            self.paragraph_words.push(ParagraphWord {
+                text: sanitized_word,
+                style,
+                left_inset_px,
+                width_px: word_w,
+            });
+            if self.paragraph_words.len() >= 256 {
+                self.flush_buffered_paragraph(false, false);
+            }
+            return;
+        }
+        self.push_word_direct(word, style, left_inset_px);
+    }
+
+    fn should_buffer_paragraph_word(&self, style: &ResolvedTextStyle, raw_word: &str) -> bool {
+        if self.replay_direct_mode {
+            return false;
+        }
+        if !self.cfg.typography.justification.enabled {
+            return false;
+        }
+        if !self.in_paragraph || self.line.is_some() {
+            return false;
+        }
+        if raw_word.contains(SOFT_HYPHEN) {
+            return false;
+        }
+        if raw_word.chars().count() > 18 {
+            return false;
+        }
+        matches!(style.role, BlockRole::Body | BlockRole::Paragraph)
+    }
+
+    fn push_word_direct(&mut self, word: &str, style: ResolvedTextStyle, left_inset_px: i32) {
+        if word.is_empty() {
+            return;
+        }
+        let display_word = strip_soft_hyphens(word);
+        if display_word.is_empty() {
+            return;
+        }
+
         if self.line.is_none() {
-            if self.pending_keep_with_next_lines > 0 {
-                let reserve = self.pending_keep_with_next_lines as i32;
-                let line_h = line_height_px(&style, &self.cfg);
-                let required = reserve.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
-                let remaining = self.cfg.content_bottom() - self.cursor_y;
-                if remaining < required && !self.page.content_commands.is_empty() {
-                    self.start_next_page();
-                }
-                self.pending_keep_with_next_lines = 0;
-            }
-            if self.cfg.typography.widow_orphan_control.enabled
-                && self.in_paragraph
-                && self.lines_on_current_paragraph_page == 0
-            {
-                let min_lines = self.cfg.typography.widow_orphan_control.min_lines.max(1) as i32;
-                let line_h = line_height_px(&style, &self.cfg);
-                let required = min_lines.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
-                let remaining = self.cfg.content_bottom() - self.cursor_y;
-                if remaining < required && !self.page.content_commands.is_empty() {
-                    self.start_next_page();
-                }
-            }
+            self.prepare_for_new_line(&style);
             self.line = Some(CurrentLine {
                 text: String::with_capacity(64),
                 style: style.clone(),
@@ -496,8 +543,7 @@ impl LayoutState {
         } else {
             self.measure_text(" ", &line.style)
         };
-        let sanitized_word = strip_soft_hyphens(word);
-        let word_w = self.measure_text(&sanitized_word, &style);
+        let word_w = self.measure_text(&display_word, &style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
             - line_fit_guard_px(&style))
         .max(1.0);
@@ -505,7 +551,7 @@ impl LayoutState {
         let projected = line.width_px + space_w + word_w;
         let overflow = projected - max_width;
         let hang_credit = if self.cfg.typography.hanging_punctuation.enabled {
-            trailing_hang_credit_px(&sanitized_word, &style)
+            trailing_hang_credit_px(word, &style)
         } else {
             0.0
         };
@@ -527,12 +573,12 @@ impl LayoutState {
                     crate::render_ir::HyphenationMode::Discretionary
                 ))
                 && !word.contains(SOFT_HYPHEN)
-                && self.try_auto_hyphenate(&mut line, &sanitized_word, &style, max_width, space_w)
+                && self.try_auto_hyphenate(&mut line, word, &style, max_width, space_w)
             {
                 return;
             }
             if let Some((left_text, right_text, left_w, right_w)) =
-                self.optimize_overflow_break(&line, &sanitized_word, &style, max_width)
+                self.optimize_overflow_break(&line, word, &style, max_width)
             {
                 let continuation_inset = if matches!(style.role, BlockRole::ListItem) {
                     self.cfg.list_indent_px
@@ -554,7 +600,7 @@ impl LayoutState {
                 return;
             }
             if line.text.is_empty() {
-                line.text = sanitized_word;
+                line.text = display_word.clone();
                 line.width_px = word_w;
                 line.style = style;
                 self.line = Some(line);
@@ -563,7 +609,7 @@ impl LayoutState {
             self.line = Some(line);
             self.flush_line(false, false);
             self.line = Some(CurrentLine {
-                text: sanitized_word,
+                text: display_word,
                 style: style.clone(),
                 width_px: word_w,
                 line_height_px: line_height_px(&style, &self.cfg),
@@ -576,10 +622,193 @@ impl LayoutState {
             line.text.push(' ');
             line.width_px += space_w;
         }
-        line.text.push_str(&sanitized_word);
+        line.text.push_str(&display_word);
         line.width_px += word_w;
         line.style = style;
         self.line = Some(line);
+    }
+
+    fn prepare_for_new_line(&mut self, style: &ResolvedTextStyle) {
+        if self.pending_keep_with_next_lines > 0 {
+            let reserve = self.pending_keep_with_next_lines as i32;
+            let line_h = line_height_px(style, &self.cfg);
+            let required = reserve.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
+            let remaining = self.cfg.content_bottom() - self.cursor_y;
+            if remaining < required && !self.page.content_commands.is_empty() {
+                self.start_next_page();
+            }
+            self.pending_keep_with_next_lines = 0;
+        }
+        if self.cfg.typography.widow_orphan_control.enabled
+            && self.in_paragraph
+            && self.lines_on_current_paragraph_page == 0
+        {
+            let min_lines = self.cfg.typography.widow_orphan_control.min_lines.max(1) as i32;
+            let line_h = line_height_px(style, &self.cfg);
+            let required = min_lines.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
+            let remaining = self.cfg.content_bottom() - self.cursor_y;
+            if remaining < required && !self.page.content_commands.is_empty() {
+                self.start_next_page();
+            }
+        }
+    }
+
+    fn flush_buffered_paragraph(&mut self, mark_last_hard_break: bool, is_last_in_block: bool) {
+        if self.paragraph_words.is_empty() {
+            return;
+        }
+        if self.paragraph_words.len() < 2 {
+            let replay = core::mem::take(&mut self.paragraph_words);
+            self.replay_direct_mode = true;
+            for word in replay {
+                self.push_word_direct(&word.text, word.style, word.left_inset_px);
+            }
+            self.replay_direct_mode = false;
+            return;
+        }
+        let breaks = match self.optimize_paragraph_breaks() {
+            Some(breaks) if !breaks.is_empty() => breaks,
+            _ => {
+                let replay = core::mem::take(&mut self.paragraph_words);
+                self.replay_direct_mode = true;
+                for word in replay {
+                    self.push_word_direct(&word.text, word.style, word.left_inset_px);
+                }
+                self.replay_direct_mode = false;
+                return;
+            }
+        };
+
+        let words = core::mem::take(&mut self.paragraph_words);
+        self.buffered_flush_mode = true;
+        let mut start = 0usize;
+        for (idx, end) in breaks.iter().copied().enumerate() {
+            if end <= start || end > words.len() {
+                break;
+            }
+            let mut text = String::with_capacity(64);
+            for (offset, word) in words[start..end].iter().enumerate() {
+                if offset > 0 {
+                    text.push(' ');
+                }
+                text.push_str(&word.text);
+            }
+            let style = words[end - 1].style.clone();
+            let left_inset_px = words[start].left_inset_px;
+            self.prepare_for_new_line(&style);
+            let width_px = self.measure_text(&text, &style);
+            self.line = Some(CurrentLine {
+                text,
+                style,
+                width_px,
+                line_height_px: line_height_px(&words[end - 1].style, &self.cfg),
+                left_inset_px,
+            });
+            let is_last_line = idx + 1 == breaks.len();
+            self.flush_line(
+                is_last_line && is_last_in_block,
+                is_last_line && mark_last_hard_break,
+            );
+            start = end;
+        }
+        self.buffered_flush_mode = false;
+    }
+
+    fn optimize_paragraph_breaks(&self) -> Option<Vec<usize>> {
+        let words = &self.paragraph_words;
+        let n = words.len();
+        if n == 0 {
+            return Some(Vec::with_capacity(0));
+        }
+        if n == 1 {
+            return Some(vec![1]);
+        }
+
+        for (idx, word) in words.iter().enumerate() {
+            let available = ((self.cfg.content_width() - word.left_inset_px).max(1) as f32
+                - line_fit_guard_px(&word.style))
+            .max(1.0);
+            if word.width_px > available && idx == 0 {
+                return None;
+            }
+        }
+
+        let inf = i64::MAX / 4;
+        let mut dp = Vec::with_capacity(n + 1);
+        dp.resize(n + 1, inf);
+        let mut next_break = Vec::with_capacity(n + 1);
+        next_break.resize(n + 1, n);
+        dp[n] = 0;
+
+        for i in (0..n).rev() {
+            let available = ((self.cfg.content_width() - words[i].left_inset_px).max(1) as f32
+                - line_fit_guard_px(&words[i].style))
+            .max(1.0);
+            let mut line_width = 0.0f32;
+            for j in i..n {
+                if j == i {
+                    line_width += words[j].width_px;
+                } else {
+                    line_width += self.measure_text(" ", &words[j - 1].style) + words[j].width_px;
+                }
+                let slack = available - line_width;
+                if slack < 0.0 {
+                    break;
+                }
+                let is_last = j + 1 == n;
+                let words_in_line = j + 1 - i;
+                let fill_ratio = if available > 0.0 {
+                    line_width / available
+                } else {
+                    0.0
+                };
+                let mut badness = if is_last {
+                    let rag = (1.0 - fill_ratio).max(0.0);
+                    (rag * rag * 120.0).round() as i64
+                } else {
+                    let ratio = (slack / available).clamp(0.0, 1.2);
+                    (ratio * ratio * ratio * 2400.0).round() as i64
+                };
+                let min_fill = self
+                    .cfg
+                    .typography
+                    .justification
+                    .min_fill_ratio
+                    .max(self.cfg.justify_min_fill_ratio);
+                if !is_last && fill_ratio < min_fill {
+                    badness += ((min_fill - fill_ratio) * 8000.0).round() as i64;
+                }
+                if !is_last && words_in_line == 1 {
+                    badness += 3000;
+                }
+                if !is_last && words[j].text.chars().count() <= 2 {
+                    badness += 4200;
+                }
+                if i > 0 && words[i].text.chars().count() <= 2 {
+                    badness += 1000;
+                }
+                let candidate = badness.saturating_add(dp[j + 1]);
+                if candidate < dp[i] {
+                    dp[i] = candidate;
+                    next_break[i] = j + 1;
+                }
+            }
+        }
+
+        if dp[0] >= inf {
+            return None;
+        }
+        let mut out = Vec::with_capacity(n / 2 + 1);
+        let mut cursor = 0usize;
+        while cursor < n {
+            let next = next_break[cursor];
+            if next <= cursor || next > n {
+                return None;
+            }
+            out.push(next);
+            cursor = next;
+        }
+        Some(out)
     }
 
     fn optimize_overflow_break(
@@ -774,12 +1003,15 @@ impl LayoutState {
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
             - line_fit_guard_px(&line.style)) as i32;
-        let quality_remainder =
-            if self.cfg.typography.justification.enabled && !is_last_in_block && !hard_break {
-                self.rebalance_line_for_quality(&mut line, available_width)
-            } else {
-                None
-            };
+        let quality_remainder = if self.cfg.typography.justification.enabled
+            && !is_last_in_block
+            && !hard_break
+            && !self.buffered_flush_mode
+        {
+            self.rebalance_line_for_quality(&mut line, available_width)
+        } else {
+            None
+        };
         if let Some(overflow_word) = quality_remainder {
             let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
                 self.cfg.list_indent_px
@@ -794,20 +1026,23 @@ impl LayoutState {
                 left_inset_px: continuation_inset,
             });
         }
-        if let Some(overflow_word) = self.rebalance_line_for_right_edge(&mut line, available_width)
-        {
-            let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
-                self.cfg.list_indent_px
-            } else {
-                0
-            };
-            self.line = Some(CurrentLine {
-                text: overflow_word.clone(),
-                style: line.style.clone(),
-                width_px: self.measure_text(&overflow_word, &line.style),
-                line_height_px: line_height_px(&line.style, &self.cfg),
-                left_inset_px: continuation_inset,
-            });
+        if !self.buffered_flush_mode {
+            if let Some(overflow_word) =
+                self.rebalance_line_for_right_edge(&mut line, available_width)
+            {
+                let continuation_inset = if matches!(line.style.role, BlockRole::ListItem) {
+                    self.cfg.list_indent_px
+                } else {
+                    0
+                };
+                self.line = Some(CurrentLine {
+                    text: overflow_word.clone(),
+                    style: line.style.clone(),
+                    width_px: self.measure_text(&overflow_word, &line.style),
+                    line_height_px: line_height_px(&line.style, &self.cfg),
+                    left_inset_px: continuation_inset,
+                });
+            }
         }
         let words = line.text.split_whitespace().count();
         let spaces = line.text.chars().filter(|c| *c == ' ').count() as i32;
@@ -1739,6 +1974,62 @@ mod tests {
             "quality rebalance should avoid short trailing 'to': {:?}",
             lines
         );
+    }
+
+    #[test]
+    fn paragraph_optimizer_keeps_non_terminal_lines_reasonably_filled() {
+        let cfg = LayoutConfig {
+            display_width: 260,
+            margin_left: 10,
+            margin_right: 10,
+            typography: TypographyConfig {
+                justification: crate::render_ir::JustificationConfig {
+                    enabled: true,
+                    min_words: 4,
+                    min_fill_ratio: 0.72,
+                },
+                ..TypographyConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run(
+                "The quick brown fox jumps over the lazy dog while curious readers inspect global paragraph balancing across many lines and widths",
+            ),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let lines: Vec<&TextCommand> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t)
+                    if matches!(t.style.role, BlockRole::Body | BlockRole::Paragraph) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() >= 3, "expected wrapped paragraph");
+
+        for line in lines.iter().take(lines.len().saturating_sub(1)) {
+            let words = line.text.split_whitespace().count();
+            if words < 4 {
+                continue;
+            }
+            let available =
+                ((cfg.content_width() - 0).max(1) as f32 - line_fit_guard_px(&line.style)).max(1.0);
+            let ratio = heuristic_measure_text(&line.text, &line.style) / available;
+            assert!(
+                ratio >= 0.60,
+                "non-terminal line underfilled too much: '{}' ratio={}",
+                line.text,
+                ratio
+            );
+        }
     }
 
     #[test]

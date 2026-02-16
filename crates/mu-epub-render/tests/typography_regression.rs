@@ -314,6 +314,48 @@ fn assert_no_screen_edge_overrun(
     }
 }
 
+fn assert_nonterminal_body_lines_are_well_filled(
+    pages: &[mu_epub_render::RenderPage],
+    display_width: i32,
+    margin_right: i32,
+    max_pages: usize,
+) {
+    let available = (display_width - margin_right).max(1) as f32;
+    let mut sampled = 0usize;
+    for page in pages.iter().take(max_pages) {
+        let body_lines: Vec<_> = page
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(text)
+                    if matches!(
+                        text.style.role,
+                        BlockRole::Body | BlockRole::Paragraph | BlockRole::ListItem
+                    ) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        for line in body_lines.iter().take(body_lines.len().saturating_sub(1)) {
+            let words = line.text.split_whitespace().count();
+            if words < 7 || is_uppercase_heavy(&line.text) {
+                continue;
+            }
+            let fill = conservative_text_width_px(&line.text, &line.style) / available;
+            assert!(
+                fill >= 0.55,
+                "underfilled non-terminal line: '{}' fill={}",
+                line.text,
+                fill
+            );
+            sampled += 1;
+        }
+    }
+    assert!(sampled > 0, "expected to sample non-terminal body lines");
+}
+
 fn is_uppercase_heavy(text: &str) -> bool {
     let mut alpha = 0usize;
     let mut upper = 0usize;
@@ -326,6 +368,30 @@ fn is_uppercase_heavy(text: &str) -> bool {
         }
     }
     alpha >= 8 && (upper as f32 / alpha as f32) >= 0.75
+}
+
+#[test]
+fn justified_corpus_non_terminal_lines_remain_well_filled() {
+    let fixtures = ["pg84-frankenstein.epub", "pg1342-pride-and-prejudice.epub"];
+    for fixture in fixtures {
+        let mut book = EpubBook::open(fixture_path(fixture)).expect("fixture should open");
+        let mut opts = RenderEngineOptions::for_display(480, 800);
+        opts.layout.margin_left = 10;
+        opts.layout.margin_right = 10;
+        opts.layout.margin_top = 10;
+        opts.layout.margin_bottom = 24;
+        opts.layout.first_line_indent_px = 0;
+        opts.layout.line_gap_px = 4;
+        opts.layout.paragraph_gap_px = 8;
+        opts.layout.typography.justification.enabled = true;
+        opts.layout.typography.justification.min_words = 6;
+        opts.layout.typography.justification.min_fill_ratio = 0.78;
+        opts.prep.layout_hints.base_font_size_px = 24.0;
+        opts.prep.style.hints = opts.prep.layout_hints;
+        let engine = RenderEngine::new(opts);
+        let (_, pages) = chapter_with_pages(&engine, &mut book).expect("chapter should render");
+        assert_nonterminal_body_lines_are_well_filled(&pages, 480, 10, 3);
+    }
 }
 
 #[test]

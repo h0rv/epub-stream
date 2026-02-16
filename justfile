@@ -138,7 +138,7 @@ cli *args:
 #   just visualize
 #   just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 12 target/visualize-default
 visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-default":
-    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -151,7 +151,7 @@ visualize-default:
 
 # Same as visualize, but with inter-word justification enabled.
 visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-justify":
-    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -161,7 +161,7 @@ visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5"
 
 # Larger type profile for wrap/spacing validation.
 visualize-large epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="8" out="target/visualize-large":
-    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -176,6 +176,22 @@ visualize-matrix epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" 
     just visualize {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-default
     just visualize-justify {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-justify
     just visualize-large {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-large
+
+# High-confidence typography gate:
+# - run render-layout + typography regression tests
+# - generate deterministic visual matrices for core Gutenberg fixtures
+typography-confidence:
+    cargo test -p mu-epub-render --tests
+    cargo test -p mu-epub-render render_layout::tests:: -- --nocapture
+    just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 8 target/visualize-confidence/frankenstein/default
+    just visualize-justify tests/fixtures/bench/pg84-frankenstein.epub 5 0 8 target/visualize-confidence/frankenstein/justify
+    just visualize-large tests/fixtures/bench/pg84-frankenstein.epub 5 0 6 target/visualize-confidence/frankenstein/large
+    just visualize tests/fixtures/bench/pg1342-pride-and-prejudice.epub 7 0 8 target/visualize-confidence/pride/default
+    just visualize-justify tests/fixtures/bench/pg1342-pride-and-prejudice.epub 7 0 8 target/visualize-confidence/pride/justify
+    just visualize-large tests/fixtures/bench/pg1342-pride-and-prejudice.epub 7 0 6 target/visualize-confidence/pride/large
+    just visualize tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 8 target/visualize-confidence/sherlock/default
+    just visualize-justify tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 8 target/visualize-confidence/sherlock/justify
+    just visualize-large tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 6 target/visualize-confidence/sherlock/large
 
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:
