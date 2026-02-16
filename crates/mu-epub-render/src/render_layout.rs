@@ -6,7 +6,7 @@ use crate::render_ir::{
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
-const LINE_FIT_GUARD_PX: f32 = 4.0;
+const LINE_FIT_GUARD_PX: f32 = 6.0;
 
 /// Policy for discretionary soft-hyphen handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,42 +192,46 @@ impl LayoutEngine {
     fn handle_event(&self, st: &mut LayoutState, ctx: &mut BlockCtx, ev: StyledEvent) {
         match ev {
             StyledEvent::ParagraphStart => {
+                st.begin_paragraph();
                 if !ctx.suppress_next_indent {
                     ctx.pending_indent = true;
                 }
                 ctx.suppress_next_indent = false;
             }
             StyledEvent::ParagraphEnd => {
-                st.flush_line(true);
+                st.flush_line(true, false);
+                st.end_paragraph();
                 st.add_vertical_gap(self.cfg.paragraph_gap_px);
                 ctx.pending_indent = true;
             }
             StyledEvent::HeadingStart(level) => {
-                st.flush_line(true);
+                st.flush_line(true, false);
+                st.end_paragraph();
                 st.add_vertical_gap(self.cfg.heading_gap_px);
                 ctx.heading_level = Some(level.clamp(1, 6));
                 ctx.pending_indent = false;
             }
             StyledEvent::HeadingEnd(_) => {
-                st.flush_line(true);
+                st.flush_line(true, false);
                 st.add_vertical_gap(self.cfg.heading_gap_px);
                 ctx.heading_level = None;
                 ctx.pending_indent = false;
                 ctx.suppress_next_indent = self.cfg.suppress_indent_after_heading;
             }
             StyledEvent::ListItemStart => {
-                st.flush_line(true);
+                st.flush_line(true, false);
+                st.end_paragraph();
                 ctx.in_list = true;
                 ctx.pending_indent = false;
             }
             StyledEvent::ListItemEnd => {
-                st.flush_line(true);
+                st.flush_line(true, false);
                 st.add_vertical_gap(self.cfg.paragraph_gap_px.saturating_sub(2));
                 ctx.in_list = false;
                 ctx.pending_indent = true;
             }
             StyledEvent::LineBreak => {
-                st.flush_line(false);
+                st.flush_line(false, true);
                 ctx.pending_indent = false;
             }
         }
@@ -265,7 +269,7 @@ impl LayoutSession {
     where
         F: FnMut(RenderPage),
     {
-        self.st.flush_line(true);
+        self.st.flush_line(true, false);
         let mut pages = core::mem::take(&mut self.st).into_pages();
         annotate_page_chrome(&mut pages, self.engine.cfg);
         for page in pages {
@@ -299,6 +303,8 @@ struct LayoutState {
     page: RenderPage,
     line: Option<CurrentLine>,
     emitted: Vec<RenderPage>,
+    in_paragraph: bool,
+    lines_on_current_paragraph_page: usize,
 }
 
 impl Default for LayoutState {
@@ -316,7 +322,19 @@ impl LayoutState {
             page: RenderPage::new(1),
             line: None,
             emitted: Vec::with_capacity(2),
+            in_paragraph: false,
+            lines_on_current_paragraph_page: 0,
         }
+    }
+
+    fn begin_paragraph(&mut self) {
+        self.in_paragraph = true;
+        self.lines_on_current_paragraph_page = 0;
+    }
+
+    fn end_paragraph(&mut self) {
+        self.in_paragraph = false;
+        self.lines_on_current_paragraph_page = 0;
     }
 
     fn push_word(&mut self, word: &str, style: ResolvedTextStyle, extra_first_line_indent_px: i32) {
@@ -332,6 +350,18 @@ impl LayoutState {
         left_inset_px += extra_first_line_indent_px.max(0);
 
         if self.line.is_none() {
+            if self.cfg.typography.widow_orphan_control.enabled
+                && self.in_paragraph
+                && self.lines_on_current_paragraph_page == 0
+            {
+                let min_lines = self.cfg.typography.widow_orphan_control.min_lines.max(1) as i32;
+                let line_h = line_height_px(&style, &self.cfg);
+                let required = min_lines.saturating_mul(line_h + self.cfg.line_gap_px.max(0));
+                let remaining = self.cfg.content_bottom() - self.cursor_y;
+                if remaining < required && !self.page.content_commands.is_empty() {
+                    self.start_next_page();
+                }
+            }
             self.line = Some(CurrentLine {
                 text: String::with_capacity(64),
                 style: style.clone(),
@@ -362,7 +392,15 @@ impl LayoutState {
             - LINE_FIT_GUARD_PX)
             .max(1.0);
 
-        if line.width_px + space_w + word_w > max_width {
+        let projected = line.width_px + space_w + word_w;
+        let overflow = projected - max_width;
+        let hang_credit = if self.cfg.typography.hanging_punctuation.enabled {
+            trailing_hang_credit_px(&sanitized_word, &style)
+        } else {
+            0.0
+        };
+
+        if overflow > hang_credit {
             if (self.cfg.soft_hyphen_policy == SoftHyphenPolicy::Discretionary
                 || matches!(
                     self.cfg.typography.hyphenation.soft_hyphen_policy,
@@ -381,7 +419,7 @@ impl LayoutState {
                 return;
             }
             self.line = Some(line);
-            self.flush_line(false);
+            self.flush_line(false, false);
             self.line = Some(CurrentLine {
                 text: sanitized_word,
                 style: style.clone(),
@@ -448,12 +486,12 @@ impl LayoutState {
         line.width_px += measure_text(&prefix_with_hyphen, style);
 
         self.line = Some(line.clone());
-        self.flush_line(false);
+        self.flush_line(false, false);
         self.push_word(&remainder, style.clone(), 0);
         true
     }
 
-    fn flush_line(&mut self, is_last_in_block: bool) {
+    fn flush_line(&mut self, is_last_in_block: bool, hard_break: bool) {
         let Some(mut line) = self.line.take() else {
             return;
         };
@@ -478,6 +516,7 @@ impl LayoutState {
         if self.cfg.typography.justification.enabled
             && matches!(line.style.role, BlockRole::Body | BlockRole::Paragraph)
             && !is_last_in_block
+            && !hard_break
             && words
                 >= self
                     .cfg
@@ -495,9 +534,18 @@ impl LayoutState {
                     .max(self.cfg.justify_min_fill_ratio)
         {
             let extra = (available_width as f32 - line.width_px).max(0.0) as i32;
-            line.style.justify_mode = JustifyMode::InterWord {
-                extra_px_total: extra,
-            };
+            let space_w = measure_text(" ", &line.style).max(1.0);
+            let max_extra_per_space = (space_w * 0.45).round().max(1.0) as i32;
+            let max_extra_total = spaces.saturating_mul(max_extra_per_space);
+            let punctuation_terminal = ends_with_terminal_punctuation(&line.text);
+            let extra = extra.min(max_extra_total);
+            if punctuation_terminal || extra <= 0 {
+                line.style.justify_mode = JustifyMode::None;
+            } else {
+                line.style.justify_mode = JustifyMode::InterWord {
+                    extra_px_total: extra,
+                };
+            }
         } else {
             line.style.justify_mode = JustifyMode::None;
         }
@@ -505,7 +553,7 @@ impl LayoutState {
         self.page
             .push_content_command(DrawCommand::Text(TextCommand {
                 x: self.cfg.margin_left + line.left_inset_px,
-                baseline_y: self.cursor_y,
+                baseline_y: self.cursor_y + line_ascent_px(&line.style, line.line_height_px),
                 text: line.text,
                 font_id: line.style.font_id,
                 style: line.style,
@@ -513,6 +561,10 @@ impl LayoutState {
         self.page.sync_commands();
 
         self.cursor_y += line.line_height_px + self.cfg.line_gap_px;
+        if self.in_paragraph {
+            self.lines_on_current_paragraph_page =
+                self.lines_on_current_paragraph_page.saturating_add(1);
+        }
     }
 
     fn add_vertical_gap(&mut self, gap_px: i32) {
@@ -530,6 +582,9 @@ impl LayoutState {
         self.page_no += 1;
         self.page = RenderPage::new(self.page_no);
         self.cursor_y = self.cfg.margin_top;
+        if self.in_paragraph {
+            self.lines_on_current_paragraph_page = 0;
+        }
     }
 
     fn flush_page_if_non_empty(&mut self) {
@@ -579,25 +634,32 @@ fn measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     if chars == 0.0 {
         return 0.0;
     }
-    // Width estimation tuned for mixed backends:
-    // - proportional EPUB faces (Bookerly/serif-like) need a wider estimate
-    // - mono fallback should remain denser
+    // Width estimation tuned for mixed backends.
+    // Large sizes get a slightly smaller width factor to avoid under-utilizing
+    // the right edge with conservative wrapping.
     let family = style.family.to_ascii_lowercase();
     let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let large_size_adjust = if style.size_px >= 24.0 {
+        0.03
+    } else if style.size_px >= 20.0 {
+        0.02
+    } else {
+        0.0
+    };
     let width_factor = if proportional {
         if style.weight >= 700 {
-            0.47
+            0.47 - large_size_adjust
         } else if style.italic {
-            0.44
+            0.44 - large_size_adjust
         } else {
-            0.45
+            0.45 - large_size_adjust
         }
     } else if style.weight >= 700 {
-        0.40
+        0.40 - (large_size_adjust * 0.5)
     } else if style.italic {
-        0.37
+        0.37 - (large_size_adjust * 0.5)
     } else {
-        0.38
+        0.38 - (large_size_adjust * 0.5)
     };
     let mut width = chars * style.size_px * width_factor;
     if chars > 1.0 {
@@ -612,6 +674,35 @@ fn line_height_px(style: &ResolvedTextStyle, cfg: &LayoutConfig) -> i32 {
     (style.size_px * style.line_height)
         .round()
         .clamp(min_lh as f32, max_lh as f32) as i32
+}
+
+fn line_ascent_px(style: &ResolvedTextStyle, line_height_px: i32) -> i32 {
+    let approx = (style.size_px * 0.78).round() as i32;
+    approx.clamp(1, line_height_px.saturating_sub(1).max(1))
+}
+
+fn trailing_hang_credit_px(word: &str, style: &ResolvedTextStyle) -> f32 {
+    let Some(last) = word.chars().last() else {
+        return 0.0;
+    };
+    if matches!(
+        last,
+        '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | ')' | ']' | '}' | '»'
+    ) {
+        (style.size_px * 0.18).clamp(1.0, 4.0)
+    } else {
+        0.0
+    }
+}
+
+fn ends_with_terminal_punctuation(line: &str) -> bool {
+    let Some(last) = line.trim_end().chars().last() else {
+        return false;
+    };
+    matches!(
+        last,
+        '.' | ';' | ':' | '!' | '?' | '"' | '\'' | ')' | ']' | '}'
+    )
 }
 
 fn strip_soft_hyphens(text: &str) -> String {
@@ -850,6 +941,106 @@ mod tests {
             chrome_kinds,
             vec![PageChromeKind::Footer, PageChromeKind::Progress]
         );
+    }
+
+    #[test]
+    fn explicit_line_break_line_is_not_justified() {
+        let cfg = LayoutConfig {
+            display_width: 640,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("one two three four five six seven eight nine ten"),
+            StyledEventOrRun::Event(StyledEvent::LineBreak),
+            body_run("eleven twelve thirteen fourteen fifteen sixteen"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let first_line = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(t) if t.text.starts_with("one two") => Some(t),
+                _ => None,
+            })
+            .expect("line-break line should exist");
+        assert_eq!(first_line.style.justify_mode, JustifyMode::None);
+    }
+
+    #[test]
+    fn widow_orphan_control_moves_new_paragraph_to_next_page_when_needed() {
+        let cfg = LayoutConfig {
+            display_width: 320,
+            display_height: 70,
+            margin_top: 8,
+            margin_bottom: 8,
+            paragraph_gap_px: 8,
+            line_gap_px: 0,
+            typography: TypographyConfig {
+                widow_orphan_control: crate::render_ir::WidowOrphanControl {
+                    enabled: true,
+                    min_lines: 2,
+                },
+                ..TypographyConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("alpha beta gamma"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("delta epsilon zeta"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        assert!(pages.len() >= 2);
+        let page1_text: Vec<String> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        let page2_text: Vec<String> = pages[1]
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(page1_text.iter().any(|t| t.contains("alpha")));
+        assert!(!page1_text.iter().any(|t| t.contains("delta")));
+        assert!(page2_text.iter().any(|t| t.contains("delta")));
+    }
+
+    #[test]
+    fn first_line_baseline_accounts_for_ascent() {
+        let cfg = LayoutConfig {
+            margin_top: 8,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("alpha"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let first_line = pages[0]
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("text command should exist");
+        assert!(first_line.baseline_y > cfg.margin_top);
     }
 
     #[test]

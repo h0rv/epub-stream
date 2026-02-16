@@ -21,6 +21,18 @@ struct Args {
     width: u32,
     height: u32,
     justify: bool,
+    font_size_px: f32,
+    line_gap_px: i32,
+    paragraph_gap_px: i32,
+    margin_left: i32,
+    margin_right: i32,
+    margin_top: i32,
+    margin_bottom: i32,
+    justify_min_words: usize,
+    justify_min_fill_ratio: f32,
+    widow_orphan: bool,
+    widow_orphan_min_lines: u8,
+    hanging_punctuation: bool,
 }
 
 fn main() -> ExitCode {
@@ -53,17 +65,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     let mut opts = RenderEngineOptions::for_display(cfg.width as i32, cfg.height as i32);
     // Xteink-like layout defaults so snapshots resemble on-device output.
-    opts.layout.margin_left = 10;
-    opts.layout.margin_right = 10;
-    opts.layout.margin_top = 4;
-    opts.layout.margin_bottom = 24;
+    opts.layout.margin_left = cfg.margin_left;
+    opts.layout.margin_right = cfg.margin_right;
+    opts.layout.margin_top = cfg.margin_top;
+    opts.layout.margin_bottom = cfg.margin_bottom;
     opts.layout.first_line_indent_px = 0;
-    opts.layout.paragraph_gap_px = 8;
-    opts.layout.line_gap_px = 4;
+    opts.layout.paragraph_gap_px = cfg.paragraph_gap_px;
+    opts.layout.line_gap_px = cfg.line_gap_px;
     opts.layout.typography.justification.enabled = cfg.justify;
-    opts.layout.typography.justification.min_words = 6;
-    opts.layout.typography.justification.min_fill_ratio = 0.78;
-    opts.prep.layout_hints.base_font_size_px = 22.0;
+    opts.layout.typography.justification.min_words = cfg.justify_min_words;
+    opts.layout.typography.justification.min_fill_ratio = cfg.justify_min_fill_ratio;
+    opts.layout.typography.widow_orphan_control.enabled = cfg.widow_orphan;
+    opts.layout.typography.widow_orphan_control.min_lines = cfg.widow_orphan_min_lines.max(1);
+    opts.layout.typography.hanging_punctuation.enabled = cfg.hanging_punctuation;
+    opts.prep.layout_hints.base_font_size_px = cfg.font_size_px;
     opts.prep.layout_hints.text_scale = 1.0;
     opts.prep.layout_hints.min_font_size_px = 14.0;
     opts.prep.layout_hints.max_font_size_px = 40.0;
@@ -178,6 +193,18 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         width: 480,
         height: 800,
         justify: false,
+        font_size_px: 22.0,
+        line_gap_px: 4,
+        paragraph_gap_px: 8,
+        margin_left: 10,
+        margin_right: 10,
+        margin_top: 8,
+        margin_bottom: 24,
+        justify_min_words: 6,
+        justify_min_fill_ratio: 0.78,
+        widow_orphan: true,
+        widow_orphan_min_lines: 2,
+        hanging_punctuation: true,
     };
 
     let mut i = if has_positional_epub { 2usize } else { 1usize };
@@ -239,6 +266,104 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                 cfg.justify = true;
                 i += 1;
             }
+            "--font-size" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--font-size requires a value".to_string())?;
+                cfg.font_size_px = v
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid --font-size value '{}'", v))?;
+                i += 2;
+            }
+            "--line-gap" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--line-gap requires a value".to_string())?;
+                cfg.line_gap_px = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --line-gap value '{}'", v))?;
+                i += 2;
+            }
+            "--paragraph-gap" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--paragraph-gap requires a value".to_string())?;
+                cfg.paragraph_gap_px = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --paragraph-gap value '{}'", v))?;
+                i += 2;
+            }
+            "--margin-left" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--margin-left requires a value".to_string())?;
+                cfg.margin_left = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --margin-left value '{}'", v))?;
+                i += 2;
+            }
+            "--margin-right" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--margin-right requires a value".to_string())?;
+                cfg.margin_right = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --margin-right value '{}'", v))?;
+                i += 2;
+            }
+            "--margin-top" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--margin-top requires a value".to_string())?;
+                cfg.margin_top = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --margin-top value '{}'", v))?;
+                i += 2;
+            }
+            "--margin-bottom" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--margin-bottom requires a value".to_string())?;
+                cfg.margin_bottom = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid --margin-bottom value '{}'", v))?;
+                i += 2;
+            }
+            "--justify-min-words" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--justify-min-words requires a value".to_string())?;
+                cfg.justify_min_words = v
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid --justify-min-words value '{}'", v))?;
+                i += 2;
+            }
+            "--justify-min-fill" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--justify-min-fill requires a value".to_string())?;
+                cfg.justify_min_fill_ratio = v
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid --justify-min-fill value '{}'", v))?;
+                i += 2;
+            }
+            "--no-widow-orphan" => {
+                cfg.widow_orphan = false;
+                i += 1;
+            }
+            "--widow-orphan-min-lines" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--widow-orphan-min-lines requires a value".to_string())?;
+                cfg.widow_orphan_min_lines = v
+                    .parse::<u8>()
+                    .map_err(|_| format!("invalid --widow-orphan-min-lines value '{}'", v))?;
+                i += 2;
+            }
+            "--no-hanging-punctuation" => {
+                cfg.hanging_punctuation = false;
+                i += 1;
+            }
             other => return Err(format!("unknown option '{}'", other)),
         }
     }
@@ -248,6 +373,12 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     }
     if cfg.width == 0 || cfg.height == 0 {
         return Err("--width and --height must be > 0".to_string());
+    }
+    if cfg.font_size_px <= 0.0 {
+        return Err("--font-size must be > 0".to_string());
+    }
+    if !(0.0..=1.0).contains(&cfg.justify_min_fill_ratio) {
+        return Err("--justify-min-fill must be between 0.0 and 1.0".to_string());
     }
 
     Ok(cfg)
@@ -267,6 +398,18 @@ OPTIONS:
   --width <px>        viewport width (default: 480)
   --height <px>       viewport height (default: 800)
   --justify           enable inter-word justification (default: off)
+  --font-size <px>    base font size in px (default: 22)
+  --line-gap <px>     extra line gap in px (default: 4)
+  --paragraph-gap <px> paragraph gap in px (default: 8)
+  --margin-left <px>  left margin (default: 10)
+  --margin-right <px> right margin (default: 10)
+  --margin-top <px>   top margin (default: 8)
+  --margin-bottom <px> bottom margin (default: 24)
+  --justify-min-words <n> minimum words for justification (default: 6)
+  --justify-min-fill <r> minimum fill ratio for justification (default: 0.78)
+  --no-widow-orphan   disable widow/orphan control
+  --widow-orphan-min-lines <n> min lines for widow/orphan (default: 2)
+  --no-hanging-punctuation disable hanging punctuation
 
 DEFAULT EPUB:
   tests/fixtures/bench/pg84-frankenstein.epub

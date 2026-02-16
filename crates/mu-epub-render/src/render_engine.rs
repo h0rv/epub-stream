@@ -188,8 +188,10 @@ impl RenderEngine {
             if let Some(pages) = cache.load_chapter_pages(profile, chapter_index) {
                 cached_hit = true;
                 let range = normalize_page_range(config.page_range.clone());
+                let total_pages = pages.len();
                 for (idx, mut page) in pages.into_iter().enumerate() {
                     Self::annotate_page_for_chapter(&mut page, chapter_index);
+                    Self::annotate_page_metrics(&mut page, total_pages);
                     if page_in_range(idx, &range) {
                         pending.push_back(page);
                     }
@@ -218,6 +220,20 @@ impl RenderEngine {
         page.metrics.chapter_page_index = page.page_number.saturating_sub(1);
     }
 
+    fn annotate_page_metrics(page: &mut RenderPage, chapter_page_count: usize) {
+        let chapter_page_count = chapter_page_count.max(1);
+        page.metrics.chapter_page_count = Some(chapter_page_count);
+        page.metrics.global_page_index = Some(page.metrics.chapter_page_index);
+        page.metrics.global_page_count_estimate = Some(chapter_page_count);
+        page.metrics.progress_chapter = if chapter_page_count <= 1 {
+            1.0
+        } else {
+            page.metrics.chapter_page_index as f32 / (chapter_page_count - 1) as f32
+        }
+        .clamp(0.0, 1.0);
+        page.metrics.progress_book = Some(page.metrics.progress_chapter);
+    }
+
     /// Prepare and layout a chapter into render pages.
     pub fn prepare_chapter<R: std::io::Read + std::io::Seek>(
         &self,
@@ -244,6 +260,13 @@ impl RenderEngine {
                 dropped_pages = dropped_pages.saturating_add(1);
             }
         })?;
+        let chapter_total = pages.len().max(1);
+        for page in pages.iter_mut() {
+            Self::annotate_page_for_chapter(page, chapter_index);
+            if page.metrics.chapter_page_count.is_none() {
+                Self::annotate_page_metrics(page, chapter_total);
+            }
+        }
         if dropped_pages > 0 {
             return Err(RenderEngineError::LimitExceeded {
                 kind: "max_pages_in_memory",
@@ -365,6 +388,7 @@ impl RenderEngine {
         F: FnMut(RenderPage),
     {
         let embedded_fonts = config.embedded_fonts;
+        let defer_emit_until_finish = config.page_range.is_some();
         let started = Instant::now();
         if cancel.is_cancelled() {
             self.emit_diagnostic(RenderDiagnostic::Cancelled);
@@ -389,7 +413,9 @@ impl RenderEngine {
                 saw_cancelled = true;
                 return;
             }
-            session.drain_pages(&mut on_page);
+            if !defer_emit_until_finish {
+                session.drain_pages(&mut on_page);
+            }
         })?;
         if saw_cancelled || cancel.is_cancelled() {
             self.emit_diagnostic(RenderDiagnostic::Cancelled);
@@ -417,6 +443,7 @@ impl RenderEngine {
         F: FnMut(RenderPage),
     {
         let embedded_fonts = config.embedded_fonts;
+        let defer_emit_until_finish = config.page_range.is_some();
         let started = Instant::now();
         if cancel.is_cancelled() {
             self.emit_diagnostic(RenderDiagnostic::Cancelled);
@@ -441,7 +468,9 @@ impl RenderEngine {
                 saw_cancelled = true;
                 return;
             }
-            session.drain_pages(&mut on_page);
+            if !defer_emit_until_finish {
+                session.drain_pages(&mut on_page);
+            }
         })?;
         if saw_cancelled || cancel.is_cancelled() {
             self.emit_diagnostic(RenderDiagnostic::Cancelled);
@@ -653,6 +682,13 @@ impl LayoutSession<'_> {
                 }
                 *page_index += 1;
             });
+        }
+        let chapter_total = self.page_index.max(1);
+        for page in self.pending_pages.iter_mut() {
+            RenderEngine::annotate_page_metrics(page, chapter_total);
+        }
+        for page in self.rendered_pages.iter_mut() {
+            RenderEngine::annotate_page_metrics(page, chapter_total);
         }
         if let Some(cache) = self.cfg.cache {
             if !self.rendered_pages.is_empty() {

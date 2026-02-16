@@ -159,6 +159,24 @@ visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5"
       --out {{out}} \
       --justify
 
+# Larger type profile for wrap/spacing validation.
+visualize-large epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="8" out="target/visualize-large":
+    cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+      {{epub}} \
+      --chapter {{chapter}} \
+      --start-page {{start}} \
+      --pages {{pages}} \
+      --out {{out}} \
+      --font-size 28 \
+      --line-gap 5 \
+      --paragraph-gap 10
+
+# Deterministic typography sweep for local golden-like visual review.
+visualize-matrix epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="6":
+    just visualize {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-default
+    just visualize-justify {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-justify
+    just visualize-large {{epub}} {{chapter}} {{start}} {{pages}} target/visualize-matrix-large
+
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:
     ./scripts/datasets/bootstrap.sh

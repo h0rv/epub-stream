@@ -453,8 +453,8 @@ pub struct WidowOrphanControl {
 impl Default for WidowOrphanControl {
     fn default() -> Self {
         Self {
-            min_lines: 1,
-            enabled: false,
+            min_lines: 2,
+            enabled: true,
         }
     }
 }
@@ -481,10 +481,16 @@ impl Default for JustificationConfig {
 }
 
 /// Hanging punctuation policy.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HangingPunctuationConfig {
     /// Enable hanging punctuation (currently informational).
     pub enabled: bool,
+}
+
+impl Default for HangingPunctuationConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Non-text object layout policy knobs.
