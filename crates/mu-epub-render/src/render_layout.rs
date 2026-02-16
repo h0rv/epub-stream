@@ -389,8 +389,8 @@ impl LayoutState {
         let sanitized_word = strip_soft_hyphens(word);
         let word_w = measure_text(&sanitized_word, &style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
-            - LINE_FIT_GUARD_PX)
-            .max(1.0);
+            - line_fit_guard_px(&style))
+        .max(1.0);
 
         let projected = line.width_px + space_w + word_w;
         let overflow = projected - max_width;
@@ -503,8 +503,8 @@ impl LayoutState {
             self.start_next_page();
         }
 
-        let available_width =
-            ((self.cfg.content_width() - line.left_inset_px) as f32 - LINE_FIT_GUARD_PX) as i32;
+        let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
+            - line_fit_guard_px(&line.style)) as i32;
         let words = line.text.split_whitespace().count();
         let spaces = line.text.chars().filter(|c| *c == ' ').count() as i32;
         let fill_ratio = if available_width > 0 {
@@ -674,6 +674,24 @@ fn line_height_px(style: &ResolvedTextStyle, cfg: &LayoutConfig) -> i32 {
     (style.size_px * style.line_height)
         .round()
         .clamp(min_lh as f32, max_lh as f32) as i32
+}
+
+fn line_fit_guard_px(style: &ResolvedTextStyle) -> f32 {
+    let family = style.family.to_ascii_lowercase();
+    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let mut guard = LINE_FIT_GUARD_PX;
+    // Proportional and larger sizes can have right-side overhangs in rendered
+    // glyph bitmaps; reserve a tiny extra safety band to avoid clipping.
+    if proportional {
+        guard += 1.0;
+    }
+    if style.size_px >= 24.0 {
+        guard += 1.0;
+    }
+    if style.weight >= 700 {
+        guard += 1.0;
+    }
+    guard
 }
 
 fn line_ascent_px(style: &ResolvedTextStyle, line_height_px: i32) -> i32 {
