@@ -59,10 +59,20 @@ impl RenderPage {
 
     /// Rebuild legacy merged `commands` from split layers.
     pub fn sync_commands(&mut self) {
+        #[cfg(target_os = "espidf")]
+        {
+            // On constrained targets, avoid duplicating command vectors.
+            // Embedded consumers render from split command layers directly.
+            self.commands.clear();
+            return;
+        }
+        #[cfg(not(target_os = "espidf"))]
+        {
         self.commands.clear();
         self.commands.extend(self.content_commands.iter().cloned());
         self.commands.extend(self.chrome_commands.iter().cloned());
         self.commands.extend(self.overlay_commands.iter().cloned());
+        }
     }
 
     /// Backward-compatible accessor alias for page metadata.

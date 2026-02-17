@@ -149,6 +149,12 @@ visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="
 visualize-default:
     just visualize
 
+# Render with a constrained virtual-memory budget to catch large transient
+# allocations locally before flashing firmware.
+visualize-lowmem epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-lowmem" vm_kib="180000":
+    RUSTC_WRAPPER= cargo build -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }}
+    bash -lc "ulimit -Sv {{vm_kib}}; target/{{host_target}}/debug/visualize {{epub}} --chapter {{chapter}} --start-page {{start}} --pages {{pages}} --out {{out}}"
+
 # Same as visualize, but with inter-word justification enabled.
 visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-justify":
     RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
