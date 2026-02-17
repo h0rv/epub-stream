@@ -440,6 +440,19 @@ pub struct StyledRun {
     pub resolved_family: String,
 }
 
+/// Styled inline image payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StyledImage {
+    /// OPF-relative image href.
+    pub src: String,
+    /// Optional caption/alt text.
+    pub alt: String,
+    /// Optional intrinsic width hint in CSS px.
+    pub width_px: Option<u16>,
+    /// Optional intrinsic height hint in CSS px.
+    pub height_px: Option<u16>,
+}
+
 /// Structured block/layout events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyledEvent {
@@ -466,6 +479,8 @@ pub enum StyledEventOrRun {
     Event(StyledEvent),
     /// Styled text run.
     Run(StyledRun),
+    /// Styled inline image.
+    Image(StyledImage),
 }
 
 /// Styled chapter output.
@@ -639,6 +654,11 @@ impl Styler {
                     }
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
+                    if ctx.tag == "img" {
+                        emit_image_event(&ctx, &mut on_item);
+                        buf.clear();
+                        continue;
+                    }
                     emit_start_event(&ctx.tag, &mut on_item);
                     stack.push(ctx);
                 }
@@ -650,6 +670,11 @@ impl Styler {
                     }
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
+                    if ctx.tag == "img" {
+                        emit_image_event(&ctx, &mut on_item);
+                        buf.clear();
+                        continue;
+                    }
                     emit_start_event(&ctx.tag, &mut on_item);
                     if ctx.tag == "br" {
                         on_item(StyledEventOrRun::Event(StyledEvent::LineBreak));
@@ -1542,6 +1567,10 @@ struct ElementCtx {
     tag: String,
     classes: Vec<String>,
     inline_style: Option<CssStyle>,
+    img_src: Option<String>,
+    img_alt: Option<String>,
+    img_width_px: Option<u16>,
+    img_height_px: Option<u16>,
 }
 
 fn reader_token_offset(reader: &Reader<&[u8]>) -> usize {
@@ -1586,6 +1615,10 @@ fn element_ctx_from_start(
     let tag = decode_tag_name(reader, e.name().as_ref())?;
     let mut classes = Vec::with_capacity(0);
     let mut inline_style = None;
+    let mut img_src: Option<String> = None;
+    let mut img_alt: Option<String> = None;
+    let mut img_width_px: Option<u16> = None;
+    let mut img_height_px: Option<u16> = None;
     for attr in e.attributes().flatten() {
         let key = match reader.decoder().decode(attr.key.as_ref()) {
             Ok(v) => v.to_ascii_lowercase(),
@@ -1640,13 +1673,51 @@ fn element_ctx_from_start(
                 prep_err
             })?;
             inline_style = Some(parsed);
+        } else if key == "src" {
+            if !val.is_empty() {
+                img_src = Some(val);
+            }
+        } else if key == "alt" {
+            img_alt = Some(val);
+        } else if key == "width" {
+            img_width_px = parse_dimension_hint_px(&val);
+        } else if key == "height" {
+            img_height_px = parse_dimension_hint_px(&val);
         }
     }
     Ok(ElementCtx {
         tag,
         classes,
         inline_style,
+        img_src,
+        img_alt,
+        img_width_px,
+        img_height_px,
     })
+}
+
+fn parse_dimension_hint_px(raw: &str) -> Option<u16> {
+    let trimmed = raw.trim().trim_end_matches("px").trim();
+    let parsed = trimmed.parse::<u32>().ok()?;
+    if parsed == 0 || parsed > u16::MAX as u32 {
+        return None;
+    }
+    Some(parsed as u16)
+}
+
+fn emit_image_event<F: FnMut(StyledEventOrRun)>(ctx: &ElementCtx, on_item: &mut F) {
+    if ctx.tag != "img" {
+        return;
+    }
+    let Some(src) = ctx.img_src.clone() else {
+        return;
+    };
+    on_item(StyledEventOrRun::Image(StyledImage {
+        src,
+        alt: ctx.img_alt.clone().unwrap_or_default(),
+        width_px: ctx.img_width_px,
+        height_px: ctx.img_height_px,
+    }));
 }
 
 fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
@@ -1758,6 +1829,7 @@ fn resolve_item_with_font(
             )
         }
         StyledEventOrRun::Event(event) => (StyledEventOrRun::Event(event), RenderPrepTrace::Event),
+        StyledEventOrRun::Image(image) => (StyledEventOrRun::Image(image), RenderPrepTrace::Event),
     }
 }
 
@@ -2089,6 +2161,52 @@ mod tests {
             })
             .expect("style_chapter_with should succeed");
         assert!(seen > 0);
+    }
+
+    #[test]
+    fn styler_emits_inline_image_event_with_dimension_hints() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<p>Intro</p><img src=\"images/cover.jpg\" alt=\"Cover\" width=\"320\" height=\"480\"/>")
+            .expect("style should succeed");
+
+        let image = chapter
+            .iter()
+            .find_map(|item| match item {
+                StyledEventOrRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("expected image event");
+        assert_eq!(image.src, "images/cover.jpg");
+        assert_eq!(image.alt, "Cover");
+        assert_eq!(image.width_px, Some(320));
+        assert_eq!(image.height_px, Some(480));
+    }
+
+    #[test]
+    fn styler_parses_px_dimension_hints_and_ignores_missing_src() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<img alt=\"No source\" width=\"80px\" height=\"60px\"/><img src=\"images/inline.png\" width=\"80px\" height=\"60px\"/>")
+            .expect("style should succeed");
+
+        let images: Vec<&StyledImage> = chapter
+            .iter()
+            .filter_map(|item| match item {
+                StyledEventOrRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].src, "images/inline.png");
+        assert_eq!(images[0].width_px, Some(80));
+        assert_eq!(images[0].height_px, Some(60));
     }
 
     #[test]

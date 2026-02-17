@@ -2508,6 +2508,9 @@ mod tests {
             StyledEventOrRun::Event(_) => {
                 assert!(matches!(trace, RenderPrepTrace::Event));
             }
+            StyledEventOrRun::Image(_) => {
+                assert!(matches!(trace, RenderPrepTrace::Event));
+            }
         })
         .expect("prepare_chapter_with_trace_context should succeed");
         assert!(saw_run);

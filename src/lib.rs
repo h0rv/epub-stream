@@ -93,7 +93,7 @@ pub use render_prep::{
     FontFallbackPolicy, FontLimits, FontPolicy, FontResolutionTrace, FontResolver, LayoutHints,
     MemoryBudget, PreparedChapter, RenderPrep, RenderPrepError, RenderPrepOptions, RenderPrepTrace,
     ResolvedFontFace, StyleConfig, StyleLimits, StyledChapter, StyledEvent, StyledEventOrRun,
-    StyledRun, Styler, StylesheetSource,
+    StyledImage, StyledRun, Styler, StylesheetSource,
 };
 pub use spine::Spine;
 pub use streaming::{

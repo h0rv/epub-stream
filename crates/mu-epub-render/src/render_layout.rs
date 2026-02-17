@@ -1,9 +1,12 @@
-use mu_epub::{BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledRun};
+use mu_epub::{
+    BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
+};
 use std::sync::Arc;
 
 use crate::render_ir::{
     DrawCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand, PageChromeConfig,
-    PageChromeKind, RenderIntent, RenderPage, ResolvedTextStyle, TextCommand, TypographyConfig,
+    PageChromeKind, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle, TextCommand,
+    TypographyConfig,
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
@@ -317,6 +320,12 @@ impl LayoutEngine {
             }
         }
     }
+
+    fn handle_image(&self, st: &mut LayoutState, _ctx: &mut BlockCtx, image: StyledImage) {
+        st.flush_buffered_paragraph(false, true);
+        st.flush_line(true, false);
+        st.place_inline_image_block(image);
+    }
 }
 
 impl LayoutSession {
@@ -325,6 +334,9 @@ impl LayoutSession {
             StyledEventOrRun::Run(run) => self.engine.handle_run(&mut self.st, &mut self.ctx, run),
             StyledEventOrRun::Event(ev) => {
                 self.engine.handle_event(&mut self.st, &mut self.ctx, ev);
+            }
+            StyledEventOrRun::Image(image) => {
+                self.engine.handle_image(&mut self.st, &mut self.ctx, image);
             }
         }
     }
@@ -462,6 +474,116 @@ impl LayoutState {
 
     fn set_pending_keep_with_next(&mut self, lines: u8) {
         self.pending_keep_with_next_lines = lines.max(1);
+    }
+
+    fn place_inline_image_block(&mut self, image: StyledImage) {
+        let content_w = self.cfg.content_width().max(8);
+        let content_h = (self.cfg.content_bottom() - self.cfg.margin_top).max(16);
+        let max_h = ((content_h as f32) * self.cfg.object_layout.max_inline_image_height_ratio)
+            .round()
+            .clamp(40.0, content_h as f32) as i32;
+
+        let (mut image_w, mut image_h) = match (image.width_px, image.height_px) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => {
+                let w = w as f32;
+                let h = h as f32;
+                let fit_w = content_w as f32 / w;
+                let fit_h = max_h as f32 / h;
+                let scale = fit_w.min(fit_h).min(1.0);
+                let out_w = (w * scale).round().max(24.0) as i32;
+                let out_h = (h * scale).round().max(18.0) as i32;
+                (out_w, out_h)
+            }
+            _ => {
+                let out_w = ((content_w as f32) * 0.72)
+                    .round()
+                    .clamp(60.0, content_w as f32) as i32;
+                let out_h = ((out_w as f32) * 0.62).round().clamp(36.0, max_h as f32) as i32;
+                (out_w, out_h)
+            }
+        };
+        image_w = image_w.min(content_w);
+        image_h = image_h.min(max_h).max(18);
+
+        let mut caption = String::new();
+        if self.cfg.object_layout.alt_text_fallback {
+            let alt = image.alt.trim();
+            if !alt.is_empty() {
+                caption = alt.to_string();
+            }
+        }
+        let caption_style = ResolvedTextStyle {
+            font_id: None,
+            family: "serif".to_string(),
+            weight: 400,
+            italic: true,
+            size_px: 14.0,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            role: BlockRole::Paragraph,
+            justify_mode: JustifyMode::None,
+        };
+        let caption_line_h = line_height_px(&caption_style, &self.cfg);
+        let caption_gap = if caption.is_empty() { 0 } else { 6 };
+        let block_h = image_h
+            + caption_gap
+            + if caption.is_empty() {
+                0
+            } else {
+                caption_line_h
+            };
+
+        if self.cursor_y + block_h > self.cfg.content_bottom() {
+            self.start_next_page();
+        }
+        let x = self.cfg.margin_left + ((content_w - image_w) / 2);
+        let y = self.cursor_y;
+        self.page
+            .push_content_command(DrawCommand::Rect(RectCommand {
+                x,
+                y,
+                width: image_w.max(1) as u32,
+                height: image_h.max(1) as u32,
+                fill: false,
+            }));
+        // Visual header strip to signal an image object block.
+        self.page
+            .push_content_command(DrawCommand::Rect(RectCommand {
+                x: x + 1,
+                y: y + 1,
+                width: (image_w - 2).max(1) as u32,
+                height: ((image_h as f32) * 0.08).round().max(2.0) as u32,
+                fill: true,
+            }));
+        // Keep src as structured annotation for debug/telemetry.
+        if !image.src.is_empty() {
+            self.page
+                .annotations
+                .push(crate::render_ir::PageAnnotation {
+                    kind: "inline_image_src".to_string(),
+                    value: Some(image.src),
+                });
+        }
+        self.page.sync_commands();
+        self.cursor_y += image_h;
+
+        if !caption.is_empty() {
+            self.cursor_y += caption_gap;
+            let max_caption_w = (content_w - 8).max(1) as f32;
+            let caption_text =
+                truncate_text_to_width(self, &caption, &caption_style, max_caption_w);
+            self.page
+                .push_content_command(DrawCommand::Text(TextCommand {
+                    x: self.cfg.margin_left + 4,
+                    baseline_y: self.cursor_y + line_ascent_px(&caption_style, caption_line_h),
+                    text: caption_text,
+                    font_id: caption_style.font_id,
+                    style: caption_style,
+                }));
+            self.page.sync_commands();
+            self.cursor_y += caption_line_h;
+        }
+        self.cursor_y += self.cfg.paragraph_gap_px.max(4);
     }
 
     fn measure_text(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
@@ -1239,6 +1361,29 @@ impl LayoutState {
     }
 }
 
+fn truncate_text_to_width(
+    st: &LayoutState,
+    text: &str,
+    style: &ResolvedTextStyle,
+    max_width: f32,
+) -> String {
+    if st.measure_text(text, style) <= max_width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let mut candidate = out.clone();
+        candidate.push(ch);
+        candidate.push('…');
+        if st.measure_text(&candidate, style) > max_width {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
     let family = style
         .family_stack
@@ -1585,6 +1730,20 @@ mod tests {
         })
     }
 
+    fn inline_image(
+        src: &str,
+        alt: &str,
+        width_px: Option<u16>,
+        height_px: Option<u16>,
+    ) -> StyledEventOrRun {
+        StyledEventOrRun::Image(StyledImage {
+            src: src.to_string(),
+            alt: alt.to_string(),
+            width_px,
+            height_px,
+        })
+    }
+
     #[test]
     fn layout_splits_into_multiple_pages() {
         let cfg = LayoutConfig {
@@ -1603,6 +1762,74 @@ mod tests {
 
         let pages = engine.layout_items(items);
         assert!(pages.len() > 1);
+    }
+
+    #[test]
+    fn inline_image_emits_rect_annotation_and_caption() {
+        let cfg = LayoutConfig {
+            display_width: 320,
+            display_height: 480,
+            margin_left: 20,
+            margin_right: 20,
+            margin_top: 20,
+            margin_bottom: 20,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("Before image"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+            inline_image("images/pic.jpg", "Picture caption", Some(600), Some(400)),
+        ];
+        let pages = engine.layout_items(items);
+        assert!(!pages.is_empty());
+        let first = &pages[0];
+        assert!(first
+            .annotations
+            .iter()
+            .any(|a| a.kind == "inline_image_src" && a.value.as_deref() == Some("images/pic.jpg")));
+        assert!(first
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Rect(_))));
+        assert!(first.commands.iter().any(|cmd| match cmd {
+            DrawCommand::Text(t) => t.text.contains("Picture caption"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn inline_image_moves_to_next_page_when_remaining_space_is_too_small() {
+        let cfg = LayoutConfig {
+            display_width: 320,
+            display_height: 120,
+            margin_left: 8,
+            margin_right: 8,
+            margin_top: 8,
+            margin_bottom: 8,
+            paragraph_gap_px: 8,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("This paragraph uses enough space to force an image page break."),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+            inline_image("images/diagram.png", "Diagram", Some(240), Some(180)),
+        ];
+        let pages = engine.layout_items(items);
+        assert!(pages.len() >= 2);
+        let page0_has_image_rect = pages[0]
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Rect(_)));
+        let page1_has_image_rect = pages[1]
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Rect(_)));
+        assert!(!page0_has_image_rect);
+        assert!(page1_has_image_rect);
     }
 
     #[test]
