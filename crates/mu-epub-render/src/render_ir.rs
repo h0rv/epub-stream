@@ -68,10 +68,10 @@ impl RenderPage {
         }
         #[cfg(not(target_os = "espidf"))]
         {
-        self.commands.clear();
-        self.commands.extend(self.content_commands.iter().cloned());
-        self.commands.extend(self.chrome_commands.iter().cloned());
-        self.commands.extend(self.overlay_commands.iter().cloned());
+            self.commands.clear();
+            self.commands.extend(self.content_commands.iter().cloned());
+            self.commands.extend(self.chrome_commands.iter().cloned());
+            self.commands.extend(self.overlay_commands.iter().cloned());
         }
     }
 

@@ -357,6 +357,14 @@ impl LayoutSession {
     {
         self.st.flush_buffered_paragraph(false, true);
         self.st.flush_line(true, false);
+        let chrome_cfg = self.engine.cfg.page_chrome;
+        if !chrome_cfg.header_enabled && !chrome_cfg.footer_enabled && !chrome_cfg.progress_enabled {
+            self.st.flush_page_if_non_empty();
+            for page in self.st.drain_emitted_pages() {
+                on_page(page);
+            }
+            return;
+        }
         let mut pages = core::mem::take(&mut self.st).into_pages();
         annotate_page_chrome(&mut pages, self.engine.cfg);
         for page in pages {
@@ -1780,6 +1788,28 @@ mod tests {
             chrome_kinds,
             vec![PageChromeKind::Footer, PageChromeKind::Progress]
         );
+    }
+
+    #[test]
+    fn finish_without_chrome_streams_pages_without_marker_commands() {
+        let engine = LayoutEngine::new(LayoutConfig::default());
+        let mut session = engine.start_session();
+        session.push_item(StyledEventOrRun::Event(StyledEvent::ParagraphStart));
+        session.push_item(body_run(
+            "A long enough paragraph to produce wrapped lines without any page chrome markers.",
+        ));
+        session.push_item(StyledEventOrRun::Event(StyledEvent::ParagraphEnd));
+        let mut pages = Vec::with_capacity(2);
+        session.finish(&mut |page| pages.push(page));
+        assert!(!pages.is_empty());
+        for page in pages {
+            assert!(!page.content_commands.is_empty());
+            let has_chrome = page
+                .commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCommand::PageChrome(_)));
+            assert!(!has_chrome);
+        }
     }
 
     #[test]

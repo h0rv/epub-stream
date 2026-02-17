@@ -155,6 +155,14 @@ visualize-lowmem epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" 
     RUSTC_WRAPPER= cargo build -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }}
     bash -lc "ulimit -Sv {{vm_kib}}; target/{{host_target}}/debug/visualize {{epub}} --chapter {{chapter}} --start-page {{start}} --pages {{pages}} --out {{out}}"
 
+# Low-memory smoke suite for EPUB stability validation prior to flashing.
+lowmem-confidence vm_kib="150000":
+    just visualize-lowmem tests/fixtures/bench/pg84-frankenstein.epub 5 0 16 target/visualize-lowmem/frankenstein {{vm_kib}}
+    just visualize-lowmem tests/fixtures/bench/pg1342-pride-and-prejudice.epub 7 0 16 target/visualize-lowmem/pride {{vm_kib}}
+    just visualize-lowmem tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 16 target/visualize-lowmem/sherlock {{vm_kib}}
+    just visualize-lowmem tests/fixtures/bench/pg2701-moby-dick.epub 10 0 16 target/visualize-lowmem/moby {{vm_kib}}
+    just visualize-lowmem tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub 1 0 10 target/visualize-lowmem/fundamental {{vm_kib}}
+
 # Same as visualize, but with inter-word justification enabled.
 visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-justify":
     RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
