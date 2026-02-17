@@ -506,6 +506,9 @@ impl LayoutState {
     }
 
     fn should_buffer_paragraph_word(&self, style: &ResolvedTextStyle, raw_word: &str) -> bool {
+        if cfg!(target_os = "espidf") {
+            return false;
+        }
         if self.replay_direct_mode {
             return false;
         }
@@ -593,6 +596,7 @@ impl LayoutState {
             {
                 return;
             }
+            #[cfg(not(target_os = "espidf"))]
             if let Some((left_text, right_text, left_w, right_w)) =
                 self.optimize_overflow_break(&line, word, &style, max_width)
             {
@@ -1026,6 +1030,7 @@ impl LayoutState {
             && !is_last_in_block
             && !hard_break
             && !self.buffered_flush_mode
+            && !cfg!(target_os = "espidf")
         {
             self.rebalance_line_for_quality(&mut line, available_width)
         } else {
@@ -1045,7 +1050,7 @@ impl LayoutState {
                 left_inset_px: continuation_inset,
             });
         }
-        if !self.buffered_flush_mode {
+        if !self.buffered_flush_mode && !cfg!(target_os = "espidf") {
             if let Some(overflow_word) =
                 self.rebalance_line_for_right_edge(&mut line, available_width)
             {

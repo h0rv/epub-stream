@@ -6,8 +6,8 @@
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use heapless::Vec as HeaplessVec;
 use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
