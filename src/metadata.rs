@@ -136,6 +136,64 @@ impl EpubMetadata {
     }
 }
 
+fn local_attr_name(name: &str) -> &str {
+    local_name(name)
+}
+
+fn is_supported_cover_ref(href: &str) -> bool {
+    let trimmed = href.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    !lower.starts_with("data:")
+}
+
+/// Extract the first cover image reference from cover XHTML content.
+///
+/// Supports common EPUB cover patterns:
+/// - `<img src="...">`
+/// - `<svg:image href="...">` / `xlink:href`
+///
+/// Returns the referenced href exactly as declared (relative path, absolute path,
+/// or fragment-stripped value), so callers can resolve it relative to the XHTML file.
+pub fn extract_cover_image_href_from_xhtml(content: &[u8]) -> Option<String> {
+    let mut reader = Reader::from_reader(content);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::with_capacity(0);
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = reader.decoder().decode(e.name().as_ref()).ok()?.to_string();
+                let local = local_name(&name);
+                if local != "img" && local != "image" {
+                    buf.clear();
+                    continue;
+                }
+
+                for attr in e.attributes() {
+                    let attr = attr.ok()?;
+                    let key = reader.decoder().decode(attr.key.as_ref()).ok()?.to_string();
+                    let key_local = local_attr_name(&key);
+                    if key_local != "src" && key_local != "href" {
+                        continue;
+                    }
+                    let value = reader.decoder().decode(&attr.value).ok()?.to_string();
+                    if is_supported_cover_ref(&value) {
+                        return Some(value);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+    None
+}
+
 /// Parse container.xml to find the OPF package file path
 ///
 /// Returns the full-path attribute from the rootfile element
@@ -1286,5 +1344,36 @@ mod tests {
         let metadata = extract_metadata(container, opf).unwrap();
         assert_eq!(metadata.title, "Another Book");
         assert_eq!(metadata.opf_path, Some("OEBPS/content.opf".to_string()));
+    }
+
+    #[test]
+    fn test_extract_cover_image_href_from_xhtml_img_src() {
+        let xhtml = br#"<?xml version="1.0"?>
+<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' 'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <body>
+    <div style="text-align: center">
+      <img src="7086129663063996408_cover.jpg" alt="" class="x-ebookmaker-cover" />
+    </div>
+  </body>
+</html>"#;
+        let href = extract_cover_image_href_from_xhtml(xhtml)
+            .expect("img src should be discovered from cover xhtml");
+        assert_eq!(href, "7086129663063996408_cover.jpg");
+    }
+
+    #[test]
+    fn test_extract_cover_image_href_from_xhtml_svg_image() {
+        let xhtml = br#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:svg="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <body>
+    <svg:svg viewBox="0 0 100 100">
+      <svg:image xlink:href="../images/cover.png" width="100" height="100"/>
+    </svg:svg>
+  </body>
+</html>"#;
+        let href = extract_cover_image_href_from_xhtml(xhtml)
+            .expect("svg image href should be discovered from cover xhtml");
+        assert_eq!(href, "../images/cover.png");
     }
 }
