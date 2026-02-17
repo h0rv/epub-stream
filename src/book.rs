@@ -101,6 +101,78 @@ impl Default for ChapterEventsOptions {
     }
 }
 
+/// Options for bounded image resource reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageReadOptions {
+    /// Hard cap on image payload bytes.
+    pub max_bytes: usize,
+    /// Whether SVG images are accepted.
+    pub allow_svg: bool,
+    /// Whether unknown/extension-only image resources are accepted.
+    pub allow_unknown_images: bool,
+}
+
+impl Default for ImageReadOptions {
+    fn default() -> Self {
+        Self {
+            max_bytes: 2 * 1024 * 1024,
+            allow_svg: true,
+            allow_unknown_images: false,
+        }
+    }
+}
+
+/// Strategy options for EPUB cover image discovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoverImageOptions {
+    /// Whether to prefer manifest-declared cover items before guide refs.
+    pub prefer_manifest_cover: bool,
+    /// Whether to inspect EPUB2 `<guide type="cover">` refs.
+    pub include_guide_refs: bool,
+    /// Whether to parse XHTML/HTML cover documents for nested `<img>`/`<svg:image>` refs.
+    pub parse_cover_documents: bool,
+    /// Hard cap for cover-document XHTML payload bytes.
+    pub max_cover_document_bytes: usize,
+    /// Image payload read options.
+    pub image: ImageReadOptions,
+}
+
+impl Default for CoverImageOptions {
+    fn default() -> Self {
+        Self {
+            prefer_manifest_cover: true,
+            include_guide_refs: true,
+            parse_cover_documents: true,
+            max_cover_document_bytes: 256 * 1024,
+            image: ImageReadOptions::default(),
+        }
+    }
+}
+
+/// Where a resolved cover image reference came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverImageSource {
+    /// Manifest `cover-image` / cover-id resource.
+    Manifest,
+    /// EPUB2 `<guide type="cover">` resource.
+    Guide,
+    /// Nested image inside a cover XHTML/HTML document.
+    CoverDocument,
+}
+
+/// Resolved cover image metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverImageRef {
+    /// Canonical ZIP path for the resolved resource.
+    pub zip_path: String,
+    /// OPF-relative href when available in manifest; otherwise the resolved path.
+    pub href: String,
+    /// Declared or inferred media type.
+    pub media_type: Option<String>,
+    /// Discovery source.
+    pub source: CoverImageSource,
+}
+
 /// Options for streaming chapter event processing without full materialization.
 ///
 /// This provides true streaming from ZIP with configurable chunk sizes and limits.
@@ -1064,6 +1136,167 @@ impl<R: Read + Seek> EpubBook<R> {
         self.read_resource(&href)
     }
 
+    /// Read an image resource with explicit media/size constraints.
+    ///
+    /// This is a bounded convenience API for consumers that need image bytes
+    /// (cover extraction, inline-image prefetch, etc.) while keeping policy
+    /// and limits in `mu-epub` rather than downstream crates.
+    pub fn read_image_resource_into_with_options(
+        &mut self,
+        href: &str,
+        out: &mut Vec<u8>,
+        options: ImageReadOptions,
+    ) -> Result<usize, EpubError> {
+        let zip_path = resolve_opf_relative_path(&self.opf_path, href);
+        let media_type = self
+            .manifest_item_by_zip_path(&zip_path)
+            .map(|item| item.media_type.as_str());
+        if !is_supported_image_resource(media_type, &zip_path, options) {
+            return Err(EpubError::Parse(format!(
+                "resource is not an allowed image: {}",
+                href
+            )));
+        }
+        read_entry_into_with_limit(&mut self.zip, &zip_path, out, options.max_bytes)
+    }
+
+    /// Resolve cover image metadata using manifest/guide/XHTML hints.
+    pub fn cover_image_ref(&mut self) -> Result<Option<CoverImageRef>, EpubError> {
+        self.cover_image_ref_with_options(CoverImageOptions::default())
+    }
+
+    /// Resolve cover image metadata using explicit options.
+    pub fn cover_image_ref_with_options(
+        &mut self,
+        options: CoverImageOptions,
+    ) -> Result<Option<CoverImageRef>, EpubError> {
+        #[derive(Clone)]
+        struct Candidate {
+            href: String,
+            media_type: Option<String>,
+            source: CoverImageSource,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(4);
+        if let Some(item) = self.metadata.get_cover_item() {
+            candidates.push(Candidate {
+                href: item.href.clone(),
+                media_type: Some(item.media_type.clone()),
+                source: CoverImageSource::Manifest,
+            });
+        }
+        if options.include_guide_refs {
+            for guide_ref in &self.metadata.guide {
+                if !guide_ref.guide_type.eq_ignore_ascii_case("cover") {
+                    continue;
+                }
+                if candidates
+                    .iter()
+                    .any(|existing| existing.href == guide_ref.href)
+                {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    href: guide_ref.href.clone(),
+                    media_type: None,
+                    source: CoverImageSource::Guide,
+                });
+            }
+        }
+        if !options.prefer_manifest_cover && !candidates.is_empty() {
+            candidates.rotate_left(1);
+        }
+
+        let mut doc_buf = Vec::with_capacity(0);
+        for candidate in candidates {
+            let zip_path = resolve_opf_relative_path(&self.opf_path, &candidate.href);
+            if is_supported_image_resource(
+                candidate.media_type.as_deref(),
+                &zip_path,
+                options.image,
+            ) {
+                let media_type =
+                    normalized_image_media_type(candidate.media_type.as_deref(), &zip_path);
+                return Ok(Some(CoverImageRef {
+                    zip_path,
+                    href: candidate.href,
+                    media_type,
+                    source: candidate.source,
+                }));
+            }
+            if !options.parse_cover_documents
+                || !is_cover_document(candidate.media_type.as_deref(), &zip_path)
+            {
+                continue;
+            }
+            doc_buf.clear();
+            if read_entry_into_with_limit(
+                &mut self.zip,
+                &zip_path,
+                &mut doc_buf,
+                options.max_cover_document_bytes,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let Some(nested_href) =
+                crate::metadata::extract_cover_image_href_from_xhtml(doc_buf.as_slice())
+            else {
+                continue;
+            };
+            let nested_zip_path = resolve_opf_relative_path(&zip_path, &nested_href);
+            let nested_manifest_item = self.manifest_item_by_zip_path(&nested_zip_path);
+            let nested_media = nested_manifest_item.map(|item| item.media_type.as_str());
+            if !is_supported_image_resource(nested_media, &nested_zip_path, options.image) {
+                continue;
+            }
+            let media_type = normalized_image_media_type(nested_media, &nested_zip_path);
+            let href = nested_manifest_item
+                .map(|item| item.href.clone())
+                .unwrap_or_else(|| nested_zip_path.clone());
+            return Ok(Some(CoverImageRef {
+                zip_path: nested_zip_path,
+                href,
+                media_type,
+                source: CoverImageSource::CoverDocument,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    /// Read resolved cover image bytes into caller-owned buffer.
+    ///
+    /// Returns `Ok(None)` when no supported cover image could be resolved.
+    pub fn read_cover_image_into_with_options(
+        &mut self,
+        out: &mut Vec<u8>,
+        options: CoverImageOptions,
+    ) -> Result<Option<CoverImageRef>, EpubError> {
+        let Some(cover) = self.cover_image_ref_with_options(options)? else {
+            return Ok(None);
+        };
+        out.clear();
+        read_entry_into_with_limit(&mut self.zip, &cover.zip_path, out, options.image.max_bytes)?;
+        Ok(Some(cover))
+    }
+
+    /// Read resolved cover image bytes with default options.
+    pub fn read_cover_image_into(
+        &mut self,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<CoverImageRef>, EpubError> {
+        self.read_cover_image_into_with_options(out, CoverImageOptions::default())
+    }
+
+    fn manifest_item_by_zip_path(&self, zip_path: &str) -> Option<&crate::metadata::ManifestItem> {
+        self.metadata.manifest.iter().find(|item| {
+            let item_zip_path = resolve_opf_relative_path(&self.opf_path, &item.href);
+            item_zip_path == zip_path
+        })
+    }
+
     /// Read a spine chapter as UTF-8 HTML/XHTML text by index.
     ///
     /// # Allocation behavior
@@ -1860,6 +2093,59 @@ fn normalize_path(path: &str) -> String {
     parts.join("/")
 }
 
+fn is_cover_document(media_type: Option<&str>, path: &str) -> bool {
+    if let Some(media_type) = media_type {
+        let lower = media_type.trim().to_ascii_lowercase();
+        if lower.contains("xhtml") || lower.contains("html") {
+            return true;
+        }
+    }
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".xhtml") || lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
+fn infer_image_media_type_from_path(path: &str) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if lower.ends_with(".png") {
+        Some("image/png")
+    } else if lower.ends_with(".gif") {
+        Some("image/gif")
+    } else if lower.ends_with(".bmp") {
+        Some("image/bmp")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
+    } else if lower.ends_with(".svg") || lower.ends_with(".svgz") {
+        Some("image/svg+xml")
+    } else {
+        None
+    }
+}
+
+fn normalized_image_media_type(media_type: Option<&str>, path: &str) -> Option<String> {
+    media_type
+        .map(|value| value.trim().to_ascii_lowercase())
+        .or_else(|| infer_image_media_type_from_path(path).map(ToString::to_string))
+}
+
+fn is_supported_image_resource(
+    media_type: Option<&str>,
+    path: &str,
+    options: ImageReadOptions,
+) -> bool {
+    let Some(media) = normalized_image_media_type(media_type, path) else {
+        return options.allow_unknown_images;
+    };
+    if !media.starts_with("image/") {
+        return false;
+    }
+    if !options.allow_svg && media == "image/svg+xml" {
+        return false;
+    }
+    true
+}
+
 fn should_skip_text_tag(name: &str) -> bool {
     matches!(
         name,
@@ -2113,6 +2399,83 @@ mod tests {
             .expect("limit should allow nav payload");
         assert_eq!(n, out.len());
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_cover_image_ref_fundamental_fixture() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let cover = book
+            .cover_image_ref()
+            .expect("cover resolution should succeed")
+            .expect("cover should resolve");
+        assert_eq!(cover.source, CoverImageSource::Manifest);
+        assert_eq!(cover.media_type.as_deref(), Some("image/jpeg"));
+        assert!(cover.zip_path.ends_with("images/cover.jpg"));
+    }
+
+    #[test]
+    fn test_cover_image_ref_frankenstein_fixture() {
+        let file = std::fs::File::open("tests/fixtures/bench/pg84-frankenstein.epub")
+            .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let cover = book
+            .cover_image_ref()
+            .expect("cover resolution should succeed")
+            .expect("cover should resolve");
+        assert_eq!(cover.source, CoverImageSource::Manifest);
+        assert_eq!(cover.media_type.as_deref(), Some("image/jpeg"));
+        assert!(cover.zip_path.ends_with("_cover.jpg"));
+    }
+
+    #[test]
+    fn test_read_cover_image_into_respects_limit() {
+        let file = std::fs::File::open("tests/fixtures/bench/pg84-frankenstein.epub")
+            .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let mut out = Vec::with_capacity(0);
+        let err = book
+            .read_cover_image_into_with_options(
+                &mut out,
+                CoverImageOptions {
+                    image: ImageReadOptions {
+                        max_bytes: 1024,
+                        ..ImageReadOptions::default()
+                    },
+                    ..CoverImageOptions::default()
+                },
+            )
+            .expect_err("oversized cover should fail under hard cap");
+        assert!(matches!(err, EpubError::Zip(ZipError::FileTooLarge)));
+    }
+
+    #[test]
+    fn test_read_image_resource_into_rejects_non_image_payload() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+        let mut out = Vec::with_capacity(0);
+        let err = book
+            .read_image_resource_into_with_options(
+                "xhtml/nav.xhtml",
+                &mut out,
+                ImageReadOptions::default(),
+            )
+            .expect_err("non-image resources should be rejected");
+        match err {
+            EpubError::Parse(msg) => {
+                assert!(msg.contains("not an allowed image"));
+            }
+            other => panic!("expected parse error, got {:?}", other),
+        }
     }
 
     #[test]

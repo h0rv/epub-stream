@@ -76,8 +76,9 @@ pub use async_api::{open_epub_file_async, open_epub_file_async_with_options};
 #[cfg(feature = "std")]
 pub use book::{
     parse_epub_file, parse_epub_file_with_options, parse_epub_reader,
-    parse_epub_reader_with_options, ChapterRef, ChapterStreamResult, EpubBook, EpubBookBuilder,
-    EpubBookOptions, EpubSummary, Locator, PaginationSession, ReadingPosition, ReadingSession,
+    parse_epub_reader_with_options, ChapterRef, ChapterStreamResult, CoverImageOptions,
+    CoverImageRef, CoverImageSource, EpubBook, EpubBookBuilder, EpubBookOptions, EpubSummary,
+    ImageReadOptions, Locator, PaginationSession, ReadingPosition, ReadingSession,
     ResolvedLocation, ValidationMode,
 };
 pub use css::{CssStyle, Stylesheet};
