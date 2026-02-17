@@ -358,7 +358,8 @@ impl LayoutSession {
         self.st.flush_buffered_paragraph(false, true);
         self.st.flush_line(true, false);
         let chrome_cfg = self.engine.cfg.page_chrome;
-        if !chrome_cfg.header_enabled && !chrome_cfg.footer_enabled && !chrome_cfg.progress_enabled {
+        if !chrome_cfg.header_enabled && !chrome_cfg.footer_enabled && !chrome_cfg.progress_enabled
+        {
             self.st.flush_page_if_non_empty();
             for page in self.st.drain_emitted_pages() {
                 on_page(page);

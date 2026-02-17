@@ -77,6 +77,8 @@ const SIG_ZIP64_EOCD_LOCATOR: u32 = 0x07064b50;
 const EOCD_MIN_SIZE: usize = 22;
 /// Maximum EOCD search window (EOCD + max comment length)
 const MAX_EOCD_SCAN: usize = EOCD_MIN_SIZE + u16::MAX as usize;
+/// Fixed chunk size for EOCD tail scanning.
+const EOCD_SCAN_CHUNK_BYTES: usize = 2048;
 
 /// Compression methods
 const METHOD_STORED: u16 = 0;
@@ -227,24 +229,44 @@ impl<F: Read + Seek> StreamingZip<F> {
             return Err(ZipError::InvalidFormat);
         }
 
-        // Scan last (EOCD + max comment) bytes for EOCD signature.
-        let scan_range = file_size.min(max_eocd_scan as u64) as usize;
-        let mut buffer = alloc::vec![0u8; scan_range];
+        // Scan tail in fixed-size chunks to avoid a large contiguous allocation.
+        let scan_range = file_size.min(max_eocd_scan as u64);
+        let scan_base = file_size - scan_range;
+        let mut remaining = scan_range;
+        let mut chunk_end = file_size;
+        let mut suffix = [0u8; EOCD_MIN_SIZE - 1];
+        let mut suffix_len = 0usize;
+        let mut window = [0u8; EOCD_SCAN_CHUNK_BYTES + (EOCD_MIN_SIZE - 1)];
 
-        file.seek(SeekFrom::Start(file_size - scan_range as u64))
-            .map_err(|_| ZipError::IoError)?;
-        let bytes_read = file.read(&mut buffer).map_err(|_| ZipError::IoError)?;
-        let scan_base = file_size - bytes_read as u64;
+        while remaining > 0 {
+            let read_len_u64 = remaining.min(EOCD_SCAN_CHUNK_BYTES as u64);
+            let read_len = read_len_u64 as usize;
+            let chunk_start = chunk_end - read_len_u64;
 
-        // Scan backwards for EOCD signature
-        for i in (0..=bytes_read.saturating_sub(EOCD_MIN_SIZE)).rev() {
-            if Self::read_u32_le(&buffer, i) == SIG_EOCD {
-                // Found EOCD, extract info
-                let num_entries = Self::read_u16_le(&buffer, i + 8);
-                let cd_size_32 = Self::read_u32_le(&buffer, i + 12);
-                let cd_offset_32 = Self::read_u32_le(&buffer, i + 16) as u64;
-                let comment_len = Self::read_u16_le(&buffer, i + 20) as u64;
-                let eocd_pos = scan_base + i as u64;
+            file.seek(SeekFrom::Start(chunk_start))
+                .map_err(|_| ZipError::IoError)?;
+            file.read_exact(&mut window[..read_len])
+                .map_err(|_| ZipError::IoError)?;
+
+            if suffix_len > 0 {
+                window[read_len..read_len + suffix_len].copy_from_slice(&suffix[..suffix_len]);
+            }
+            let search_len = read_len + suffix_len;
+
+            for i in (0..=search_len.saturating_sub(EOCD_MIN_SIZE)).rev() {
+                if Self::read_u32_le(&window, i) != SIG_EOCD {
+                    continue;
+                }
+
+                let eocd_pos = chunk_start + i as u64;
+                if eocd_pos < scan_base {
+                    continue;
+                }
+
+                let num_entries = Self::read_u16_le(&window, i + 8);
+                let cd_size_32 = Self::read_u32_le(&window, i + 12);
+                let cd_offset_32 = Self::read_u32_le(&window, i + 16) as u64;
+                let comment_len = Self::read_u16_le(&window, i + 20) as u64;
                 let eocd_end = eocd_pos + EOCD_MIN_SIZE as u64 + comment_len;
                 if eocd_end != file_size {
                     continue;
@@ -323,6 +345,12 @@ impl<F: Read + Seek> StreamingZip<F> {
                     num_entries: num_entries as u64,
                 });
             }
+
+            let new_suffix_len = core::cmp::min(EOCD_MIN_SIZE - 1, read_len);
+            suffix[..new_suffix_len].copy_from_slice(&window[..new_suffix_len]);
+            suffix_len = new_suffix_len;
+            chunk_end = chunk_start;
+            remaining -= read_len_u64;
         }
 
         Err(ZipError::InvalidFormat)
