@@ -8,6 +8,9 @@ use crate::render_ir::{
 
 const SOFT_HYPHEN: char = '\u{00AD}';
 const LINE_FIT_GUARD_PX: f32 = 6.0;
+#[cfg(target_os = "espidf")]
+const MAX_BUFFERED_PARAGRAPH_WORDS: usize = 0;
+#[cfg(not(target_os = "espidf"))]
 const MAX_BUFFERED_PARAGRAPH_WORDS: usize = 64;
 const MAX_BUFFERED_PARAGRAPH_CHARS: usize = 1200;
 
