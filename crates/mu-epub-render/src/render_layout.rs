@@ -4,9 +4,9 @@ use mu_epub::{
 use std::sync::Arc;
 
 use crate::render_ir::{
-    DrawCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand, PageChromeConfig,
-    PageChromeKind, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle, TextCommand,
-    TypographyConfig,
+    DrawCommand, ImageObjectCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand,
+    PageChromeConfig, PageChromeKind, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle,
+    TextCommand, TypographyConfig,
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
@@ -242,6 +242,12 @@ impl LayoutEngine {
         }
         if ctx.in_list {
             style.role = BlockRole::ListItem;
+        }
+        if matches!(style.role, BlockRole::FigureCaption) {
+            style.italic = true;
+            style.size_px = (style.size_px * 0.92).max(12.0);
+            style.line_height = style.line_height.max(1.3);
+            style.justify_mode = JustifyMode::None;
         }
 
         for word in run.text.split_whitespace() {
@@ -505,7 +511,7 @@ impl LayoutState {
         image_w = image_w.min(content_w);
         image_h = image_h.min(max_h).max(18);
 
-        let mut caption = String::new();
+        let mut caption = String::with_capacity(0);
         if self.cfg.object_layout.alt_text_fallback {
             let alt = image.alt.trim();
             if !alt.is_empty() {
@@ -525,19 +531,34 @@ impl LayoutState {
         };
         let caption_line_h = line_height_px(&caption_style, &self.cfg);
         let caption_gap = if caption.is_empty() { 0 } else { 6 };
+        let reserve_caption_h = if image.in_figure && caption.is_empty() {
+            caption_line_h + 4
+        } else {
+            0
+        };
         let block_h = image_h
             + caption_gap
             + if caption.is_empty() {
                 0
             } else {
                 caption_line_h
-            };
+            }
+            + reserve_caption_h;
 
         if self.cursor_y + block_h > self.cfg.content_bottom() {
             self.start_next_page();
         }
         let x = self.cfg.margin_left + ((content_w - image_w) / 2);
         let y = self.cursor_y;
+        self.page
+            .push_content_command(DrawCommand::ImageObject(ImageObjectCommand {
+                src: image.src.clone(),
+                alt: image.alt.clone(),
+                x,
+                y,
+                width: image_w.max(1) as u32,
+                height: image_h.max(1) as u32,
+            }));
         self.page
             .push_content_command(DrawCommand::Rect(RectCommand {
                 x,
@@ -1370,7 +1391,7 @@ fn truncate_text_to_width(
     if st.measure_text(text, style) <= max_width {
         return text.to_string();
     }
-    let mut out = String::new();
+    let mut out = String::with_capacity(text.len().min(64));
     for ch in text.chars() {
         let mut candidate = out.clone();
         candidate.push(ch);
@@ -1741,6 +1762,24 @@ mod tests {
             alt: alt.to_string(),
             width_px,
             height_px,
+            in_figure: false,
+        })
+    }
+
+    fn caption_run(text: &str) -> StyledEventOrRun {
+        StyledEventOrRun::Run(StyledRun {
+            text: text.to_string(),
+            style: ComputedTextStyle {
+                family_stack: vec!["serif".to_string()],
+                weight: 400,
+                italic: false,
+                size_px: 16.0,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                block_role: BlockRole::FigureCaption,
+            },
+            font_id: 0,
+            resolved_family: "serif".to_string(),
         })
     }
 
@@ -1793,6 +1832,10 @@ mod tests {
             .commands
             .iter()
             .any(|cmd| matches!(cmd, DrawCommand::Rect(_))));
+        assert!(first
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_))));
         assert!(first.commands.iter().any(|cmd| match cmd {
             DrawCommand::Text(t) => t.text.contains("Picture caption"),
             _ => false,
@@ -1830,6 +1873,31 @@ mod tests {
             .any(|cmd| matches!(cmd, DrawCommand::Rect(_)));
         assert!(!page0_has_image_rect);
         assert!(page1_has_image_rect);
+    }
+
+    #[test]
+    fn figure_caption_runs_render_unjustified_and_italic() {
+        let cfg = LayoutConfig {
+            display_width: 360,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            caption_run("This is a figure caption line that should not be justified."),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let first_text = pages[0]
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("caption text expected");
+        assert_eq!(first_text.style.justify_mode, JustifyMode::None);
+        assert!(first_text.style.italic);
     }
 
     #[test]

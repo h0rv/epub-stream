@@ -28,8 +28,8 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use mu_epub_render::{
-    DrawCommand, JustifyMode, PageChromeCommand, PageChromeConfig, PageChromeKind,
-    PageChromeTextStyle, RenderPage, ResolvedTextStyle, TextCommand,
+    DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeConfig,
+    PageChromeKind, PageChromeTextStyle, RenderPage, ResolvedTextStyle, TextCommand,
 };
 use std::borrow::Cow;
 
@@ -610,8 +610,26 @@ where
                 }
                 Ok(())
             }
+            DrawCommand::ImageObject(image) => self.draw_image_fallback(display, image),
             DrawCommand::PageChrome(chrome) => self.draw_page_chrome(display, chrome),
         }
+    }
+
+    fn draw_image_fallback<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        Rectangle::new(
+            Point::new(image.x, image.y),
+            Size::new(image.width.max(1), image.height.max(1)),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(display)?;
+        Ok(())
     }
 
     fn draw_text<D>(&self, display: &mut D, cmd: &TextCommand) -> Result<(), D::Error>

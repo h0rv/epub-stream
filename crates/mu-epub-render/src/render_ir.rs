@@ -200,6 +200,8 @@ pub enum DrawCommand {
     Text(TextCommand),
     /// Draw a line rule.
     Rule(RuleCommand),
+    /// Draw an inline image object box.
+    ImageObject(ImageObjectCommand),
     /// Draw rectangle.
     Rect(RectCommand),
     /// Draw page metadata/chrome.
@@ -315,6 +317,23 @@ pub struct RectCommand {
     pub height: u32,
     /// Fill rectangle when true.
     pub fill: bool,
+}
+
+/// Inline image object command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageObjectCommand {
+    /// Resource href (OPF-relative).
+    pub src: String,
+    /// Optional alt/caption text.
+    pub alt: String,
+    /// Left x.
+    pub x: i32,
+    /// Top y.
+    pub y: i32,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
 }
 
 /// Page-level metadata/chrome marker.

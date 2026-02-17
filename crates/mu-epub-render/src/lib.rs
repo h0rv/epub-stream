@@ -25,10 +25,11 @@ pub use render_engine::{
 };
 pub use render_ir::{
     DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HangingPunctuationConfig,
-    HyphenationConfig, HyphenationMode, JustificationConfig, JustifyMode, ObjectLayoutConfig,
-    OverlayComposer, OverlayContent, OverlayItem, OverlayRect, OverlaySize, OverlaySlot,
-    PageAnnotation, PageChromeCommand, PageChromeConfig, PageChromeKind, PageChromeTextStyle,
-    PageMeta, PageMetrics, PaginationProfileId, RectCommand, RenderIntent, RenderPage,
-    ResolvedTextStyle, RuleCommand, SvgMode, TextCommand, TypographyConfig, WidowOrphanControl,
+    HyphenationConfig, HyphenationMode, ImageObjectCommand, JustificationConfig, JustifyMode,
+    ObjectLayoutConfig, OverlayComposer, OverlayContent, OverlayItem, OverlayRect, OverlaySize,
+    OverlaySlot, PageAnnotation, PageChromeCommand, PageChromeConfig, PageChromeKind,
+    PageChromeTextStyle, PageMeta, PageMetrics, PaginationProfileId, RectCommand, RenderIntent,
+    RenderPage, ResolvedTextStyle, RuleCommand, SvgMode, TextCommand, TypographyConfig,
+    WidowOrphanControl,
 };
 pub use render_layout::{LayoutConfig, LayoutEngine, SoftHyphenPolicy, TextMeasurer};

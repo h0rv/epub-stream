@@ -406,6 +406,8 @@ pub enum BlockRole {
     Heading(u8),
     /// List item block.
     ListItem,
+    /// Figure caption block.
+    FigureCaption,
 }
 
 /// Cascaded and normalized text style for rendering.
@@ -451,6 +453,8 @@ pub struct StyledImage {
     pub width_px: Option<u16>,
     /// Optional intrinsic height hint in CSS px.
     pub height_px: Option<u16>,
+    /// Whether image appears inside a `<figure>` container.
+    pub in_figure: bool,
 }
 
 /// Structured block/layout events.
@@ -655,7 +659,8 @@ impl Styler {
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
                     if ctx.tag == "img" {
-                        emit_image_event(&ctx, &mut on_item);
+                        let in_figure = stack.iter().any(|parent| parent.tag == "figure");
+                        emit_image_event(&ctx, in_figure, &mut on_item);
                         buf.clear();
                         continue;
                     }
@@ -671,7 +676,8 @@ impl Styler {
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
                     if ctx.tag == "img" {
-                        emit_image_event(&ctx, &mut on_item);
+                        let in_figure = stack.iter().any(|parent| parent.tag == "figure");
+                        emit_image_event(&ctx, in_figure, &mut on_item);
                         buf.clear();
                         continue;
                     }
@@ -843,6 +849,8 @@ impl Styler {
             None => {
                 if matches!(role, BlockRole::Heading(1 | 2)) {
                     self.config.hints.base_font_size_px * 1.25
+                } else if matches!(role, BlockRole::FigureCaption) {
+                    self.config.hints.base_font_size_px * 0.90
                 } else {
                     self.config.hints.base_font_size_px
                 }
@@ -857,7 +865,13 @@ impl Styler {
         let mut line_height = match resolved.line_height {
             Some(LineHeight::Px(px)) => (px / size_px).max(1.0),
             Some(LineHeight::Multiplier(m)) => m,
-            None => 1.4,
+            None => {
+                if matches!(role, BlockRole::FigureCaption) {
+                    1.3
+                } else {
+                    1.4
+                }
+            }
         };
         line_height = line_height.clamp(
             self.config.hints.min_line_height,
@@ -873,7 +887,7 @@ impl Styler {
             FontStyle::Italic
         );
         let final_weight = if bold_tag { 700 } else { weight };
-        let final_italic = italic || italic_tag;
+        let final_italic = italic || italic_tag || matches!(role, BlockRole::FigureCaption);
 
         let family_stack = resolved
             .font_family
@@ -1401,7 +1415,9 @@ impl RenderPrep {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
+        let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(&html, |item| {
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1447,7 +1463,9 @@ impl RenderPrep {
         }
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, html)?;
         let font_resolver = &self.font_resolver;
+        let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1499,7 +1517,9 @@ impl RenderPrep {
             stylesheet_scratch,
         )?;
         let font_resolver = &self.font_resolver;
+        let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1518,7 +1538,9 @@ impl RenderPrep {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
+        let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(&html, |item| {
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
             let (item, trace) = resolve_item_with_font(font_resolver, item);
             on_item(item, trace);
         })
@@ -1705,7 +1727,11 @@ fn parse_dimension_hint_px(raw: &str) -> Option<u16> {
     Some(parsed as u16)
 }
 
-fn emit_image_event<F: FnMut(StyledEventOrRun)>(ctx: &ElementCtx, on_item: &mut F) {
+fn emit_image_event<F: FnMut(StyledEventOrRun)>(
+    ctx: &ElementCtx,
+    in_figure: bool,
+    on_item: &mut F,
+) {
     if ctx.tag != "img" {
         return;
     }
@@ -1717,12 +1743,15 @@ fn emit_image_event<F: FnMut(StyledEventOrRun)>(ctx: &ElementCtx, on_item: &mut 
         alt: ctx.img_alt.clone().unwrap_or_default(),
         width_px: ctx.img_width_px,
         height_px: ctx.img_height_px,
+        in_figure,
     }));
 }
 
 fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" => on_item(StyledEventOrRun::Event(StyledEvent::ParagraphStart)),
+        "p" | "div" | "figure" | "figcaption" => {
+            on_item(StyledEventOrRun::Event(StyledEvent::ParagraphStart))
+        }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemStart)),
         "h1" => on_item(StyledEventOrRun::Event(StyledEvent::HeadingStart(1))),
         "h2" => on_item(StyledEventOrRun::Event(StyledEvent::HeadingStart(2))),
@@ -1736,7 +1765,9 @@ fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
 
 fn emit_end_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" => on_item(StyledEventOrRun::Event(StyledEvent::ParagraphEnd)),
+        "p" | "div" | "figure" | "figcaption" => {
+            on_item(StyledEventOrRun::Event(StyledEvent::ParagraphEnd))
+        }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemEnd)),
         "h1" => on_item(StyledEventOrRun::Event(StyledEvent::HeadingEnd(1))),
         "h2" => on_item(StyledEventOrRun::Event(StyledEvent::HeadingEnd(2))),
@@ -1752,6 +1783,7 @@ fn role_from_tag(tag: &str) -> Option<BlockRole> {
     match tag {
         "p" | "div" => Some(BlockRole::Paragraph),
         "li" => Some(BlockRole::ListItem),
+        "figcaption" => Some(BlockRole::FigureCaption),
         "h1" => Some(BlockRole::Heading(1)),
         "h2" => Some(BlockRole::Heading(2)),
         "h3" => Some(BlockRole::Heading(3)),
@@ -1831,6 +1863,16 @@ fn resolve_item_with_font(
         StyledEventOrRun::Event(event) => (StyledEventOrRun::Event(event), RenderPrepTrace::Event),
         StyledEventOrRun::Image(image) => (StyledEventOrRun::Image(image), RenderPrepTrace::Event),
     }
+}
+
+fn resolve_item_assets_for_chapter(
+    chapter_href: &str,
+    mut item: StyledEventOrRun,
+) -> StyledEventOrRun {
+    if let StyledEventOrRun::Image(image) = &mut item {
+        image.src = resolve_relative(chapter_href, &image.src);
+    }
+    item
 }
 
 fn split_family_stack(value: &str) -> Vec<String> {
@@ -2207,6 +2249,37 @@ mod tests {
         assert_eq!(images[0].src, "images/inline.png");
         assert_eq!(images[0].width_px, Some(80));
         assert_eq!(images[0].height_px, Some(60));
+    }
+
+    #[test]
+    fn styler_marks_images_inside_figure_and_figcaption_role() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter(
+                "<figure><img src=\"images/inline.png\"/><figcaption>Figure caption</figcaption></figure>",
+            )
+            .expect("style should succeed");
+
+        let image = chapter
+            .iter()
+            .find_map(|item| match item {
+                StyledEventOrRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("expected image");
+        assert!(image.in_figure);
+
+        let caption_run = chapter
+            .runs()
+            .find(|run| run.text.contains("Figure caption"))
+            .expect("caption text run expected");
+        assert!(matches!(
+            caption_run.style.block_role,
+            BlockRole::FigureCaption
+        ));
     }
 
     #[test]
