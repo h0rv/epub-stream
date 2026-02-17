@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use alloc::string::{String, ToString};
+use alloc::boxed::Box;
 use heapless::Vec as HeaplessVec;
 use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
@@ -141,6 +142,8 @@ pub struct StreamingZip<F: Read + Seek> {
     num_entries: usize,
     /// Optional configurable resource/safety limits.
     limits: Option<ZipLimits>,
+    /// Reusable DEFLATE state to avoid large hot-path allocations on embedded.
+    inflate_state: Box<miniz_oxide::inflate::stream::InflateState>,
 }
 
 impl<F: Read + Seek> StreamingZip<F> {
@@ -209,6 +212,9 @@ impl<F: Read + Seek> StreamingZip<F> {
             entries,
             num_entries: core::cmp::min(eocd.num_entries, usize::MAX as u64) as usize,
             limits,
+            inflate_state: Box::new(miniz_oxide::inflate::stream::InflateState::new(
+                DataFormat::Raw,
+            )),
         })
     }
 
@@ -581,9 +587,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(size)
             }
             METHOD_DEFLATED => {
-                // Keep inflate state on stack to avoid large transient heap
-                // allocations (~tens of KB) on constrained targets.
-                let mut state = miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw);
+                self.inflate_state.reset(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
@@ -604,7 +608,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                     }
 
                     let result = miniz_oxide::inflate::stream::inflate(
-                        &mut state,
+                        &mut self.inflate_state,
                         pending,
                         &mut buf[written..],
                         MZFlush::None,
@@ -714,9 +718,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(written)
             }
             METHOD_DEFLATED => {
-                // Keep inflate state on stack to avoid large transient heap
-                // allocations (~tens of KB) on constrained targets.
-                let mut state = miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw);
+                self.inflate_state.reset(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
@@ -734,7 +736,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                     }
 
                     let result = miniz_oxide::inflate::stream::inflate(
-                        &mut state,
+                        &mut self.inflate_state,
                         pending,
                         output_buf,
                         MZFlush::None,
