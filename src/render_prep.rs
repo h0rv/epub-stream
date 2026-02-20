@@ -1240,6 +1240,12 @@ impl RenderPrep {
         self
     }
 
+    /// Override fallback font policy used during style-to-face resolution.
+    pub fn with_font_policy(mut self, policy: FontPolicy) -> Self {
+        self.font_resolver = FontResolver::new(policy).with_limits(self.opts.fonts);
+        self
+    }
+
     /// Register all embedded fonts from a book.
     pub fn with_embedded_fonts_from_book<R: std::io::Read + std::io::Seek>(
         self,

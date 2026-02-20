@@ -91,6 +91,7 @@ Rendering is split into:
 
 1. `mu-epub-render`: render IR + layout engine + chapter-to-pages orchestration
 2. `mu-epub-embedded-graphics`: `embedded-graphics` backend executor for render commands
+3. `mu-epub-render-web`: self-contained HTML preview generator for rapid layout/font/TOC validation
 
 Add local workspace deps:
 
@@ -99,6 +100,7 @@ Add local workspace deps:
 mu_epub = { path = "." }
 mu-epub-render = { path = "crates/mu-epub-render" }
 mu-epub-embedded-graphics = { path = "crates/mu-epub-embedded-graphics" }
+mu-epub-render-web = { path = "crates/mu-epub-render-web" }
 ```
 
 Prepare a chapter into backend-agnostic render pages:
@@ -130,6 +132,19 @@ let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
 let renderer = EgRenderer::default();
 renderer.render_page(&pages[0], &mut display)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Generate a web preview with TOC navigation, image embedding, embedded-font loading,
+and runtime font/layout controls:
+
+```bash
+just web-preview tests/fixtures/bench/pg84-frankenstein.epub
+```
+
+Or export a standalone HTML snapshot:
+
+```bash
+just web-preview-export tests/fixtures/bench/pg84-frankenstein.epub target/web-preview/index.html
 ```
 
 ### CLI (Unix-Friendly)

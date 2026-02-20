@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/mu-epub-render",
     "crates/mu-epub-embedded-graphics",
+    "crates/mu-epub-render-web",
 ]
 resolver = "2"
 

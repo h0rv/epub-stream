@@ -5,6 +5,7 @@ This document tracks completed renderer work and defines the active generic rend
 - `mu-epub`
 - `mu-epub-render`
 - `mu-epub-embedded-graphics`
+- `mu-epub-render-web` (preview tooling backend)
 
 No app/device/project-specific behavior is part of this contract.
 
@@ -29,6 +30,9 @@ No app/device/project-specific behavior is part of this contract.
 4. Backend naming and references are complete:
 - Backend crate renamed to `mu-epub-embedded-graphics`.
 - README/justfile/docs references updated.
+
+5. Web-preview backend is available:
+- `mu-epub-render-web` provides an interactive web UI + local render API for TOC/image/font/layout validation with live option re-rendering.
 
 5. Validation gates are passing:
 - `just all` (format/lint/check/tests/docs/cli).
@@ -78,6 +82,10 @@ No app/device/project-specific behavior in this spec.
 3. `mu-epub-embedded-graphics`:
 
 - Draw IR execution on embedded-graphics targets with pluggable font backend.
+
+4. `mu-epub-render-web`:
+
+- Web-preview tooling that executes render IR into a browser-facing, self-contained HTML artifact.
 
 ## Required APIs
 

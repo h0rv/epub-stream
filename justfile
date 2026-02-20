@@ -68,15 +68,15 @@ lint-memory-render:
 
 # Check split render crates
 render-check:
-    cargo check -p mu-epub-render -p mu-epub-embedded-graphics
+    cargo check -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web
 
 # Lint split render crates
 render-lint:
-    cargo clippy -p mu-epub-render -p mu-epub-embedded-graphics --all-targets -- -D warnings -A clippy::disallowed_methods
+    cargo clippy -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web --all-targets -- -D warnings -A clippy::disallowed_methods
 
 # Test split render crates
 render-test:
-    cargo test -p mu-epub-render -p mu-epub-embedded-graphics
+    cargo test -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web
 
 # Run all split render crate checks
 render-all:
@@ -143,6 +143,27 @@ visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="
       --chapter {{chapter}} \
       --start-page {{start}} \
       --pages {{pages}} \
+      --out {{out}}
+
+# Launch interactive web preview with live re-render API.
+web-preview epub="tests/fixtures/bench/pg84-frankenstein.epub" port="42817":
+    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+      {{epub}} \
+      --serve \
+      --open \
+      --port {{port}}
+
+# Export standalone HTML preview snapshot (non-interactive reflow).
+web-preview-export epub="tests/fixtures/bench/pg84-frankenstein.epub" out="target/web-preview/index.html":
+    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+      {{epub}} \
+      --out {{out}}
+
+# Chapter-scoped web preview variant.
+web-preview-chapter epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" out="target/web-preview/chapter.html":
+    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+      {{epub}} \
+      --chapter {{chapter}} \
       --out {{out}}
 
 # One-command sane default render pass for local layout iteration.

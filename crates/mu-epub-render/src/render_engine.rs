@@ -1,4 +1,6 @@
-use mu_epub::{EpubBook, RenderPrep, RenderPrepError, RenderPrepOptions, StyledEventOrRun};
+use mu_epub::{
+    EpubBook, FontPolicy, RenderPrep, RenderPrepError, RenderPrepOptions, StyledEventOrRun,
+};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -85,6 +87,7 @@ pub struct RenderConfig<'a> {
     cache: Option<&'a dyn RenderCacheStore>,
     cancel: Option<&'a dyn CancelToken>,
     embedded_fonts: bool,
+    forced_font_family: Option<String>,
     text_measurer: Option<Arc<dyn TextMeasurer>>,
 }
 
@@ -95,6 +98,7 @@ impl<'a> Default for RenderConfig<'a> {
             cache: None,
             cancel: None,
             embedded_fonts: true,
+            forced_font_family: None,
             text_measurer: None,
         }
     }
@@ -125,6 +129,22 @@ impl<'a> RenderConfig<'a> {
     /// and rely on fallback font policy.
     pub fn with_embedded_fonts(mut self, enabled: bool) -> Self {
         self.embedded_fonts = enabled;
+        self
+    }
+
+    /// Force a single fallback family for all text shaping/layout.
+    ///
+    /// This disables embedded font matching to keep measurement/rendering consistent
+    /// with the requested family.
+    pub fn with_forced_font_family(mut self, family: impl Into<String>) -> Self {
+        let family = family.into();
+        let trimmed = family.trim();
+        if trimmed.is_empty() {
+            self.forced_font_family = None;
+            return self;
+        }
+        self.forced_font_family = Some(trimmed.to_string());
+        self.embedded_fonts = false;
         self
     }
 
@@ -399,6 +419,7 @@ impl RenderEngine {
         F: FnMut(RenderPage),
     {
         let embedded_fonts = config.embedded_fonts;
+        let forced_font_family = config.forced_font_family.clone();
         let defer_emit_until_finish = config.page_range.is_some();
         let started = Instant::now();
         if cancel.is_cancelled() {
@@ -411,7 +432,11 @@ impl RenderEngine {
             session.drain_pages(&mut on_page);
             return Ok(());
         }
-        let mut prep = RenderPrep::new(self.opts.prep).with_serif_default();
+        let mut prep = if let Some(family) = forced_font_family.as_deref() {
+            RenderPrep::new(self.opts.prep).with_font_policy(forced_font_policy(family))
+        } else {
+            RenderPrep::new(self.opts.prep).with_serif_default()
+        };
         if embedded_fonts {
             prep = prep.with_embedded_fonts_from_book(book)?;
         }
@@ -455,6 +480,7 @@ impl RenderEngine {
         F: FnMut(RenderPage),
     {
         let embedded_fonts = config.embedded_fonts;
+        let forced_font_family = config.forced_font_family.clone();
         let defer_emit_until_finish = config.page_range.is_some();
         let started = Instant::now();
         if cancel.is_cancelled() {
@@ -467,7 +493,11 @@ impl RenderEngine {
             session.drain_pages(&mut on_page);
             return Ok(());
         }
-        let mut prep = RenderPrep::new(self.opts.prep).with_serif_default();
+        let mut prep = if let Some(family) = forced_font_family.as_deref() {
+            RenderPrep::new(self.opts.prep).with_font_policy(forced_font_policy(family))
+        } else {
+            RenderPrep::new(self.opts.prep).with_serif_default()
+        };
         if embedded_fonts {
             prep = prep.with_embedded_fonts_from_book(book)?;
         }
@@ -736,6 +766,21 @@ fn page_in_range(idx: usize, range: &Option<PageRange>) -> bool {
     range.as_ref().map(|r| r.contains(&idx)).unwrap_or(true)
 }
 
+fn forced_font_policy(family: &str) -> FontPolicy {
+    let mut policy = FontPolicy::serif_default();
+    let normalized = family
+        .split(',')
+        .next()
+        .map(str::trim)
+        .map(|part| part.trim_matches('"').trim_matches('\''))
+        .filter(|part| !part.is_empty())
+        .unwrap_or("serif");
+    policy.preferred_families = vec![normalized.to_string()];
+    policy.default_family = normalized.to_string();
+    policy.allow_embedded_fonts = false;
+    policy
+}
+
 /// Stable page iterator wrapper returned by `RenderEngine::prepare_chapter_iter`.
 #[derive(Debug)]
 pub struct RenderPageIter {
@@ -888,5 +933,27 @@ mod tests {
         }
         assert_eq!(streamed, expected);
         assert!(streamed.iter().all(|page| page.metrics.chapter_index == 3));
+    }
+
+    #[test]
+    fn forced_font_family_config_disables_embedded_fonts() {
+        let cfg = RenderConfig::default().with_forced_font_family("  monospace ");
+        assert_eq!(cfg.forced_font_family.as_deref(), Some("monospace"));
+        assert!(!cfg.embedded_fonts);
+    }
+
+    #[test]
+    fn empty_forced_font_family_is_ignored() {
+        let cfg = RenderConfig::default().with_forced_font_family("   ");
+        assert!(cfg.forced_font_family.is_none());
+        assert!(cfg.embedded_fonts);
+    }
+
+    #[test]
+    fn forced_font_policy_uses_first_family_entry() {
+        let policy = forced_font_policy("Alegreya, serif");
+        assert_eq!(policy.default_family, "Alegreya");
+        assert_eq!(policy.preferred_families, vec!["Alegreya".to_string()]);
+        assert!(!policy.allow_embedded_fonts);
     }
 }
