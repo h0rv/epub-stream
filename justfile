@@ -228,6 +228,12 @@ typography-confidence:
     just visualize-justify tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 8 target/visualize-confidence/sherlock/justify
     just visualize-large tests/fixtures/bench/pg1661-sherlock-holmes.epub 3 0 6 target/visualize-confidence/sherlock/large
 
+# Deterministic reflow/config regression harness for reader controls.
+render-regression:
+    cargo test -p mu-epub-render --test typography_regression
+    cargo test -p mu-epub-render --test docs
+    cargo test -p mu-epub-render-web --bin web-preview
+
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:
     ./scripts/datasets/bootstrap.sh

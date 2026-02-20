@@ -212,6 +212,13 @@ In `mu-epub-embedded-graphics`:
 - non-overlapping line baselines
 - deterministic output across repeated runs.
 
+5. Web-preview regression harness:
+
+- config-to-engine mapping coverage for exposed reader knobs
+- dynamic reflow matrix (font size/scale, spacing, justification, family override)
+- text-boundary safety assertions (no visible right-edge clipping in sampled pages)
+- chapter page-number/progress monotonicity checks after each reflow scenario.
+
 ## Deliverables
 
 1. API docs for all new public types/options/errors.

@@ -122,6 +122,17 @@ struct RenderUiConfig {
     embedded_fonts: bool,
     max_image_bytes: usize,
     max_font_bytes: usize,
+    style_max_selectors: usize,
+    style_max_css_bytes: usize,
+    style_max_nesting: usize,
+    font_limit_max_faces: usize,
+    font_limit_max_bytes_per_font: usize,
+    font_limit_max_total_font_bytes: usize,
+    memory_max_entry_bytes: usize,
+    memory_max_css_bytes: usize,
+    memory_max_nav_bytes: usize,
+    memory_max_inline_style_bytes: usize,
+    memory_max_pages_in_memory: usize,
 
     ui_font_family: String,
     ui_font_scale: f32,
@@ -185,6 +196,17 @@ impl Default for RenderUiConfig {
             embedded_fonts: true,
             max_image_bytes: 16 * 1024 * 1024,
             max_font_bytes: 24 * 1024 * 1024,
+            style_max_selectors: 4096,
+            style_max_css_bytes: 512 * 1024,
+            style_max_nesting: 32,
+            font_limit_max_faces: 64,
+            font_limit_max_bytes_per_font: 8 * 1024 * 1024,
+            font_limit_max_total_font_bytes: 64 * 1024 * 1024,
+            memory_max_entry_bytes: 4 * 1024 * 1024,
+            memory_max_css_bytes: 512 * 1024,
+            memory_max_nav_bytes: 512 * 1024,
+            memory_max_inline_style_bytes: 16 * 1024,
+            memory_max_pages_in_memory: 128,
             ui_font_family: "auto".to_string(),
             ui_font_scale: 1.0,
         }
@@ -256,6 +278,17 @@ impl RenderUiConfig {
         self.page_chrome_progress_stroke_width = self.page_chrome_progress_stroke_width.max(1);
         self.max_image_bytes = self.max_image_bytes.max(1024);
         self.max_font_bytes = self.max_font_bytes.max(1024);
+        self.style_max_selectors = self.style_max_selectors.max(1);
+        self.style_max_css_bytes = self.style_max_css_bytes.max(1024);
+        self.style_max_nesting = self.style_max_nesting.max(1);
+        self.font_limit_max_faces = self.font_limit_max_faces.max(1);
+        self.font_limit_max_bytes_per_font = self.font_limit_max_bytes_per_font.max(1024);
+        self.font_limit_max_total_font_bytes = self.font_limit_max_total_font_bytes.max(1024);
+        self.memory_max_entry_bytes = self.memory_max_entry_bytes.max(1024);
+        self.memory_max_css_bytes = self.memory_max_css_bytes.max(1024);
+        self.memory_max_nav_bytes = self.memory_max_nav_bytes.max(1024);
+        self.memory_max_inline_style_bytes = self.memory_max_inline_style_bytes.max(256);
+        self.memory_max_pages_in_memory = self.memory_max_pages_in_memory.max(1);
         self.ui_font_scale = self.ui_font_scale.clamp(0.25, 4.0);
         self.ui_font_family = if self.ui_font_family.trim().is_empty() {
             "auto".to_string()
@@ -331,7 +364,18 @@ impl RenderUiConfig {
         opts.prep.layout_hints.max_line_height = self.prep_max_line_height;
         let effective_text_scale = (self.prep_text_scale * self.ui_font_scale).clamp(0.25, 8.0);
         opts.prep.layout_hints.text_scale = effective_text_scale;
+        opts.prep.style.limits.max_selectors = self.style_max_selectors;
+        opts.prep.style.limits.max_css_bytes = self.style_max_css_bytes;
+        opts.prep.style.limits.max_nesting = self.style_max_nesting;
         opts.prep.style.hints = opts.prep.layout_hints;
+        opts.prep.fonts.max_faces = self.font_limit_max_faces;
+        opts.prep.fonts.max_bytes_per_font = self.font_limit_max_bytes_per_font;
+        opts.prep.fonts.max_total_font_bytes = self.font_limit_max_total_font_bytes;
+        opts.prep.memory.max_entry_bytes = self.memory_max_entry_bytes;
+        opts.prep.memory.max_css_bytes = self.memory_max_css_bytes;
+        opts.prep.memory.max_nav_bytes = self.memory_max_nav_bytes;
+        opts.prep.memory.max_inline_style_bytes = self.memory_max_inline_style_bytes;
+        opts.prep.memory.max_pages_in_memory = self.memory_max_pages_in_memory;
 
         opts
     }
@@ -2968,6 +3012,8 @@ DEFAULT EPUB:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     #[test]
     fn normalize_rel_path_collapses_dot_segments() {
@@ -3003,6 +3049,8 @@ mod tests {
             justify_min_words: 0,
             justify_min_fill_ratio: 9.0,
             ui_font_scale: 0.01,
+            style_max_selectors: 0,
+            memory_max_pages_in_memory: 0,
             ..RenderUiConfig::default()
         }
         .normalized();
@@ -3010,5 +3058,293 @@ mod tests {
         assert_eq!(cfg.justify_min_words, 1);
         assert_eq!(cfg.justify_min_fill_ratio, 1.0);
         assert_eq!(cfg.ui_font_scale, 0.25);
+        assert_eq!(cfg.style_max_selectors, 1);
+        assert_eq!(cfg.memory_max_pages_in_memory, 1);
+    }
+
+    #[test]
+    fn to_engine_options_maps_extended_render_prep_limits() {
+        let cfg = RenderUiConfig {
+            display_width: 777,
+            display_height: 999,
+            justify_enabled: false,
+            prep_text_scale: 1.2,
+            ui_font_scale: 1.4,
+            style_max_selectors: 123,
+            style_max_css_bytes: 222_222,
+            style_max_nesting: 9,
+            font_limit_max_faces: 7,
+            font_limit_max_bytes_per_font: 333_333,
+            font_limit_max_total_font_bytes: 444_444,
+            memory_max_entry_bytes: 555_555,
+            memory_max_css_bytes: 666_666,
+            memory_max_nav_bytes: 777_777,
+            memory_max_inline_style_bytes: 8_888,
+            memory_max_pages_in_memory: 11,
+            ..RenderUiConfig::default()
+        };
+
+        let opts = cfg.to_engine_options();
+        assert_eq!(opts.layout.display_width, 777);
+        assert_eq!(opts.layout.display_height, 999);
+        assert!(!opts.layout.typography.justification.enabled);
+        assert!((opts.prep.layout_hints.text_scale - 1.68).abs() < 0.0001);
+        assert_eq!(opts.prep.style.limits.max_selectors, 123);
+        assert_eq!(opts.prep.style.limits.max_css_bytes, 222_222);
+        assert_eq!(opts.prep.style.limits.max_nesting, 9);
+        assert_eq!(opts.prep.fonts.max_faces, 7);
+        assert_eq!(opts.prep.fonts.max_bytes_per_font, 333_333);
+        assert_eq!(opts.prep.fonts.max_total_font_bytes, 444_444);
+        assert_eq!(opts.prep.memory.max_entry_bytes, 555_555);
+        assert_eq!(opts.prep.memory.max_css_bytes, 666_666);
+        assert_eq!(opts.prep.memory.max_nav_bytes, 777_777);
+        assert_eq!(opts.prep.memory.max_inline_style_bytes, 8_888);
+        assert_eq!(opts.prep.memory.max_pages_in_memory, 11);
+    }
+
+    #[test]
+    fn render_ui_config_json_exposes_reader_and_budget_knobs() {
+        let value =
+            serde_json::to_value(RenderUiConfig::default()).expect("config should serialize");
+        let obj = value
+            .as_object()
+            .expect("config should serialize to JSON object");
+        let required = [
+            "display_width",
+            "display_height",
+            "margin_left",
+            "margin_right",
+            "line_gap_px",
+            "paragraph_gap_px",
+            "justify_enabled",
+            "prep_base_font_size_px",
+            "prep_text_scale",
+            "ui_font_scale",
+            "ui_font_family",
+            "embedded_fonts",
+            "style_max_selectors",
+            "style_max_css_bytes",
+            "style_max_nesting",
+            "font_limit_max_faces",
+            "font_limit_max_bytes_per_font",
+            "font_limit_max_total_font_bytes",
+            "memory_max_entry_bytes",
+            "memory_max_css_bytes",
+            "memory_max_nav_bytes",
+            "memory_max_inline_style_bytes",
+            "memory_max_pages_in_memory",
+            "page_chrome_progress_enabled",
+            "render_grayscale_mode",
+            "render_dither_mode",
+            "render_contrast_boost",
+        ];
+        for key in required {
+            assert!(obj.contains_key(key), "missing config key '{}'", key);
+        }
+    }
+
+    fn fixture_path(name: &str) -> String {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../tests/fixtures/bench");
+        path.push(name);
+        path.to_string_lossy().into_owned()
+    }
+
+    fn payload_text_right_px(text: &str, style: &TextStylePayload) -> f32 {
+        let chars = text.chars().count();
+        if chars == 0 {
+            return 0.0;
+        }
+        let family = style.family.to_ascii_lowercase();
+        let proportional = !(family.contains("mono") || family.contains("fixed"));
+        let mut em_sum = 0.0f32;
+        if proportional {
+            for ch in text.chars() {
+                em_sum += match ch {
+                    ' ' | '\u{00A0}' => 0.32,
+                    '\t' => 1.28,
+                    'i' | 'l' | 'I' | '|' | '!' => 0.24,
+                    '.' | ',' | ':' | ';' | '\'' | '"' | '`' => 0.23,
+                    '-' | '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' => 0.34,
+                    '(' | ')' | '[' | ']' | '{' | '}' => 0.30,
+                    'f' | 't' | 'j' | 'r' => 0.34,
+                    'm' | 'w' | 'M' | 'W' | '@' | '%' | '&' | '#' => 0.74,
+                    c if c.is_ascii_digit() => 0.52,
+                    c if c.is_ascii_uppercase() => 0.61,
+                    c if c.is_ascii_lowercase() => 0.50,
+                    c if c.is_whitespace() => 0.32,
+                    c if c.is_ascii_punctuation() => 0.42,
+                    _ => 0.56,
+                };
+            }
+        } else {
+            for ch in text.chars() {
+                em_sum += if ch == ' ' { 0.52 } else { 0.58 };
+            }
+        }
+        let mut scale = if proportional { 1.05 } else { 1.02 };
+        if style.weight >= 700 {
+            scale += 0.02;
+        }
+        if style.italic {
+            scale += 0.01;
+        }
+        if style.size_px >= 24.0 {
+            scale += 0.01;
+        }
+        let mut width = em_sum * style.size_px * scale;
+        if chars > 1 {
+            width += (chars as f32 - 1.0) * style.letter_spacing.max(0.0);
+        }
+        width
+    }
+
+    fn assert_payload_text_bounds(payload: &PreviewPayload, max_pages: usize) {
+        let content_right =
+            (payload.config.display_width as i32 - payload.config.margin_right).max(1) as f32;
+        let mut sampled = 0usize;
+        for page in payload.pages.iter().take(max_pages) {
+            for cmd in &page.commands {
+                let CommandPayload::Text { x, text, style, .. } = cmd else {
+                    continue;
+                };
+                if !matches!(style.role.as_str(), "body" | "paragraph" | "list-item") {
+                    continue;
+                }
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let right = *x as f32 + payload_text_right_px(text, style);
+                assert!(
+                    right <= content_right + 2.0,
+                    "text likely clipped: '{}' right={} content_right={}",
+                    text,
+                    right,
+                    content_right
+                );
+                sampled += 1;
+            }
+        }
+        assert!(sampled > 0, "expected to sample body text lines");
+    }
+
+    fn assert_payload_single_chapter_metrics(payload: &PreviewPayload) {
+        assert!(
+            !payload.pages.is_empty(),
+            "expected non-empty payload pages"
+        );
+        let chapter_index = payload.pages[0].chapter_index;
+        let mut last_progress = 0.0f32;
+        for (idx, page) in payload.pages.iter().enumerate() {
+            assert_eq!(page.chapter_index, chapter_index);
+            assert_eq!(page.page_index, idx);
+            assert_eq!(page.page_number, idx + 1);
+            assert_eq!(page.metrics.chapter_page_index, idx);
+            assert_eq!(page.metrics.chapter_page_count, Some(payload.pages.len()));
+            assert!(page.metrics.progress_chapter >= last_progress);
+            last_progress = page.metrics.progress_chapter;
+        }
+        assert!(
+            payload
+                .pages
+                .last()
+                .expect("pages should include last")
+                .metrics
+                .progress_chapter
+                >= 0.90
+        );
+    }
+
+    fn inter_word_count(payload: &PreviewPayload) -> usize {
+        payload
+            .pages
+            .iter()
+            .flat_map(|page| page.commands.iter())
+            .filter_map(|cmd| match cmd {
+                CommandPayload::Text { style, .. } => Some(style.justify.mode.as_str()),
+                _ => None,
+            })
+            .filter(|mode| *mode == "inter-word")
+            .count()
+    }
+
+    fn families_in_payload(payload: &PreviewPayload) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for cmd in payload.pages.iter().flat_map(|page| page.commands.iter()) {
+            if let CommandPayload::Text { style, .. } = cmd {
+                out.insert(style.family.clone());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn preview_reflow_matrix_validates_dynamic_reader_knobs() {
+        let epub = fixture_path("pg84-frankenstein.epub");
+        let mut baseline_cfg = RenderUiConfig::default();
+        baseline_cfg.chapter = Some(4);
+        baseline_cfg.justify_enabled = true;
+        baseline_cfg.ui_font_family = "auto".to_string();
+        let baseline =
+            render_preview_payload(&epub, &baseline_cfg).expect("baseline render should succeed");
+        assert_payload_text_bounds(&baseline, 3);
+        assert_payload_single_chapter_metrics(&baseline);
+        let baseline_pages = baseline.meta.page_count;
+        let baseline_inter_word = inter_word_count(&baseline);
+        assert!(
+            baseline_inter_word > 0,
+            "expected baseline inter-word justification"
+        );
+
+        let mut scaled_cfg = baseline_cfg.clone();
+        scaled_cfg.ui_font_scale = 1.35;
+        let scaled =
+            render_preview_payload(&epub, &scaled_cfg).expect("scaled render should succeed");
+        assert!(
+            scaled.meta.page_count >= baseline_pages,
+            "larger reader scale should not reduce page count"
+        );
+        assert_payload_text_bounds(&scaled, 3);
+        assert_payload_single_chapter_metrics(&scaled);
+
+        let mut spaced_cfg = baseline_cfg.clone();
+        spaced_cfg.line_gap_px = 8;
+        spaced_cfg.paragraph_gap_px = 14;
+        let spaced =
+            render_preview_payload(&epub, &spaced_cfg).expect("spaced render should succeed");
+        assert!(
+            spaced.meta.page_count >= baseline_pages,
+            "larger line/paragraph spacing should not reduce page count"
+        );
+        assert_payload_text_bounds(&spaced, 3);
+        assert_payload_single_chapter_metrics(&spaced);
+
+        let mut no_justify_cfg = baseline_cfg.clone();
+        no_justify_cfg.justify_enabled = false;
+        let no_justify = render_preview_payload(&epub, &no_justify_cfg)
+            .expect("no-justify render should succeed");
+        assert_eq!(inter_word_count(&no_justify), 0);
+        assert_payload_text_bounds(&no_justify, 3);
+        assert_payload_single_chapter_metrics(&no_justify);
+
+        let mut mono_cfg = baseline_cfg.clone();
+        mono_cfg.ui_font_family = "monospace".to_string();
+        let mono = render_preview_payload(&epub, &mono_cfg)
+            .expect("forced monospace render should succeed");
+        assert!(
+            families_in_payload(&mono)
+                .iter()
+                .any(|family| family.to_ascii_lowercase().contains("mono")),
+            "expected monospace family in text payload"
+        );
+        assert_payload_single_chapter_metrics(&mono);
+
+        let mut constrained_cfg = baseline_cfg.clone();
+        constrained_cfg.memory_max_pages_in_memory = 1;
+        let constrained = render_preview_payload(&epub, &constrained_cfg);
+        assert!(
+            constrained.is_err(),
+            "tight page memory limit should fail for multi-page chapter"
+        );
     }
 }

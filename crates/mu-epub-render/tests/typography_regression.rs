@@ -70,17 +70,37 @@ fn build_engine(width: i32, height: i32, font_size_px: f32, justify: bool) -> Re
     RenderEngine::new(opts)
 }
 
-fn chapter_with_pages(
+fn chapter_with_text_pages_min(
     engine: &RenderEngine,
     book: &mut EpubBook<std::fs::File>,
+    min_pages: usize,
 ) -> Option<(usize, Vec<mu_epub_render::RenderPage>)> {
     for chapter in 0..book.chapter_count() {
         let pages = engine.prepare_chapter(book, chapter).ok()?;
-        if !pages.is_empty() {
+        if pages.len() < min_pages {
+            continue;
+        }
+        let has_text = pages.iter().any(page_has_meaningful_text);
+        if has_text {
             return Some((chapter, pages));
         }
     }
     None
+}
+
+fn page_has_meaningful_text(page: &mu_epub_render::RenderPage) -> bool {
+    page.commands
+        .iter()
+        .any(|cmd| matches!(cmd, DrawCommand::Text(text) if !text.text.trim().is_empty()))
+}
+
+fn chapter_pages_with_text(
+    engine: &RenderEngine,
+    book: &mut EpubBook<std::fs::File>,
+    chapter: usize,
+) -> Option<Vec<mu_epub_render::RenderPage>> {
+    let pages = engine.prepare_chapter(book, chapter).ok()?;
+    pages.iter().any(page_has_meaningful_text).then_some(pages)
 }
 
 #[test]
@@ -98,10 +118,10 @@ fn corpus_large_font_increases_page_count_and_keeps_top_padding() {
         let engine_default = build_engine(480, 800, 22.0, false);
         let engine_large = build_engine(480, 800, 30.0, false);
 
-        let (_, default_pages) =
-            chapter_with_pages(&engine_default, &mut book_default).expect("chapter should render");
-        let (chapter, large_pages) =
-            chapter_with_pages(&engine_large, &mut book_large).expect("chapter should render");
+        let (_, default_pages) = chapter_with_text_pages_min(&engine_default, &mut book_default, 1)
+            .expect("fixture should contain a text-bearing chapter");
+        let (chapter, large_pages) = chapter_with_text_pages_min(&engine_large, &mut book_large, 1)
+            .expect("fixture should contain a text-bearing chapter");
 
         assert!(
             large_pages.len() >= default_pages.len(),
@@ -117,7 +137,7 @@ fn corpus_large_font_increases_page_count_and_keeps_top_padding() {
             .iter()
             .flat_map(|p| p.commands.iter())
             .find_map(|cmd| match cmd {
-                DrawCommand::Text(t) => Some(t),
+                DrawCommand::Text(t) if !t.text.trim().is_empty() => Some(t),
                 _ => None,
             })
             .expect("rendered page should contain text");
@@ -138,8 +158,8 @@ fn corpus_justification_does_not_collapse_to_single_page() {
     for fixture in fixtures {
         let mut book = EpubBook::open(fixture_path(fixture)).expect("fixture should open");
         let engine = build_engine(480, 800, 24.0, true);
-        let (chapter, pages) =
-            chapter_with_pages(&engine, &mut book).expect("chapter should render");
+        let (chapter, pages) = chapter_with_text_pages_min(&engine, &mut book, 1)
+            .expect("fixture should contain a text-bearing chapter");
         assert!(
             !pages.is_empty(),
             "fixture={} chapter={} expected non-empty output",
@@ -286,6 +306,7 @@ fn assert_no_screen_edge_overrun(
     max_pages: usize,
 ) {
     let right_limit = (display_width - 2) as f32;
+    let mut sampled = 0usize;
     for (page_idx, page) in pages.iter().enumerate().take(max_pages) {
         for cmd in &page.commands {
             let DrawCommand::Text(text) = cmd else {
@@ -310,8 +331,10 @@ fn assert_no_screen_edge_overrun(
                 est_right,
                 right_limit
             );
+            sampled += 1;
         }
     }
+    assert!(sampled > 0, "expected to sample body text lines");
 }
 
 fn assert_nonterminal_body_lines_are_well_filled(
@@ -389,7 +412,8 @@ fn justified_corpus_non_terminal_lines_remain_well_filled() {
         opts.prep.layout_hints.base_font_size_px = 24.0;
         opts.prep.style.hints = opts.prep.layout_hints;
         let engine = RenderEngine::new(opts);
-        let (_, pages) = chapter_with_pages(&engine, &mut book).expect("chapter should render");
+        let (_, pages) = chapter_with_text_pages_min(&engine, &mut book, 2)
+            .expect("fixture should contain a multi-page text chapter");
         assert_nonterminal_body_lines_are_well_filled(&pages, 480, 10, 3);
     }
 }
@@ -430,9 +454,10 @@ fn right_edge_safety_matrix_across_sizes_margins_and_justify() {
                     let (_, pages) = (0..book.chapter_count())
                         .find_map(|idx| {
                             let pages = engine.prepare_chapter(&mut book, idx).ok()?;
-                            (pages.len() >= 2).then_some((idx, pages))
+                            (pages.len() >= 2 && pages.iter().any(page_has_meaningful_text))
+                                .then_some((idx, pages))
                         })
-                        .expect("expected multi-page chapter");
+                        .expect("expected multi-page chapter with text");
 
                     assert_no_screen_edge_overrun(&pages, display_width, 3);
                 }
@@ -546,12 +571,8 @@ fn tiny_viewport_large_font_still_produces_bounded_lines() {
     opts.prep.style.hints = opts.prep.layout_hints;
     let engine = RenderEngine::new(opts);
 
-    let (_, pages) = (0..book.chapter_count())
-        .find_map(|idx| {
-            let pages = engine.prepare_chapter(&mut book, idx).ok()?;
-            (!pages.is_empty()).then_some((idx, pages))
-        })
-        .expect("expected renderable chapter");
+    let (_, pages) = chapter_with_text_pages_min(&engine, &mut book, 1)
+        .expect("expected renderable text chapter");
     assert_no_screen_edge_overrun(&pages, 320, 2);
 }
 
@@ -573,7 +594,129 @@ fn gutenberg_corpus_sample_has_no_body_right_edge_overrun() {
         opts.prep.layout_hints.base_font_size_px = 24.0;
         opts.prep.style.hints = opts.prep.layout_hints;
         let engine = RenderEngine::new(opts);
-        let (_, pages) = chapter_with_pages(&engine, &mut book).expect("chapter should render");
+        let (_, pages) = chapter_with_text_pages_min(&engine, &mut book, 1)
+            .expect("sample should contain a text-bearing chapter");
         assert_no_screen_edge_overrun(&pages, 480, 2);
+    }
+}
+
+fn assert_single_chapter_pagination_invariants(
+    pages: &[mu_epub_render::RenderPage],
+    chapter_index: usize,
+) {
+    assert!(!pages.is_empty(), "expected non-empty pages");
+    let expected_count = pages.len();
+    let mut last_progress = 0.0f32;
+    for (idx, page) in pages.iter().enumerate() {
+        assert_eq!(page.page_number, idx + 1);
+        let metrics = &page.metrics;
+        assert_eq!(metrics.chapter_index, chapter_index);
+        assert_eq!(metrics.chapter_page_index, idx);
+        assert_eq!(metrics.chapter_page_count, Some(expected_count));
+        assert!(metrics.progress_chapter >= last_progress);
+        last_progress = metrics.progress_chapter;
+    }
+    let last = pages.last().expect("pages should have last element");
+    assert!(
+        last.metrics.progress_chapter >= 0.90,
+        "last page should report near-complete chapter progress"
+    );
+}
+
+#[test]
+fn dynamic_reflow_matrix_updates_pagination_and_keeps_text_bounded() {
+    let fixture = fixture_path("pg84-frankenstein.epub");
+    let baseline_engine = build_engine(480, 800, 22.0, true);
+    let mut baseline_book = EpubBook::open(&fixture).expect("fixture should open");
+    let (chapter, baseline_pages) =
+        chapter_with_text_pages_min(&baseline_engine, &mut baseline_book, 2)
+            .expect("fixture should contain a multi-page text chapter");
+    let baseline_count = baseline_pages.len();
+    assert_no_screen_edge_overrun(&baseline_pages, 480, 3);
+    assert_single_chapter_pagination_invariants(&baseline_pages, chapter);
+
+    struct Scenario {
+        label: &'static str,
+        base_font_size_px: f32,
+        text_scale: f32,
+        line_gap_px: i32,
+        paragraph_gap_px: i32,
+        justify: bool,
+    }
+
+    let scenarios = [
+        Scenario {
+            label: "larger-font",
+            base_font_size_px: 28.0,
+            text_scale: 1.0,
+            line_gap_px: 4,
+            paragraph_gap_px: 8,
+            justify: true,
+        },
+        Scenario {
+            label: "reader-text-scale",
+            base_font_size_px: 22.0,
+            text_scale: 1.35,
+            line_gap_px: 4,
+            paragraph_gap_px: 8,
+            justify: true,
+        },
+        Scenario {
+            label: "expanded-spacing",
+            base_font_size_px: 22.0,
+            text_scale: 1.0,
+            line_gap_px: 8,
+            paragraph_gap_px: 14,
+            justify: true,
+        },
+        Scenario {
+            label: "justify-off",
+            base_font_size_px: 22.0,
+            text_scale: 1.0,
+            line_gap_px: 4,
+            paragraph_gap_px: 8,
+            justify: false,
+        },
+    ];
+
+    for scenario in scenarios {
+        let mut opts = RenderEngineOptions::for_display(480, 800);
+        opts.layout.margin_left = 10;
+        opts.layout.margin_right = 10;
+        opts.layout.margin_top = 10;
+        opts.layout.margin_bottom = 24;
+        opts.layout.first_line_indent_px = 0;
+        opts.layout.line_gap_px = scenario.line_gap_px;
+        opts.layout.paragraph_gap_px = scenario.paragraph_gap_px;
+        opts.layout.typography.justification.enabled = scenario.justify;
+        opts.layout.typography.justification.min_words = 6;
+        opts.layout.typography.justification.min_fill_ratio = 0.78;
+        opts.prep.layout_hints.base_font_size_px = scenario.base_font_size_px;
+        opts.prep.layout_hints.text_scale = scenario.text_scale;
+        opts.prep.layout_hints.min_font_size_px = 14.0;
+        opts.prep.layout_hints.max_font_size_px = 72.0;
+        opts.prep.style.hints = opts.prep.layout_hints;
+        let engine = RenderEngine::new(opts);
+
+        let mut book = EpubBook::open(&fixture).expect("fixture should open");
+        let pages = chapter_pages_with_text(&engine, &mut book, chapter)
+            .expect("target chapter should contain text under scenario");
+        assert!(
+            !pages.is_empty(),
+            "scenario={} should render non-empty chapter output",
+            scenario.label
+        );
+        assert_no_screen_edge_overrun(&pages, 480, 3);
+        assert_single_chapter_pagination_invariants(&pages, chapter);
+
+        if scenario.label != "justify-off" {
+            assert!(
+                pages.len() >= baseline_count,
+                "scenario={} expected page_count >= baseline ({} >= {})",
+                scenario.label,
+                pages.len(),
+                baseline_count
+            );
+        }
     }
 }

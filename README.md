@@ -147,6 +147,12 @@ Or export a standalone HTML snapshot:
 just web-preview-export tests/fixtures/bench/pg84-frankenstein.epub target/web-preview/index.html
 ```
 
+Run the full reader-control regression harness (dynamic reflow + pagination + config mapping):
+
+```bash
+just render-regression
+```
+
 ### CLI (Unix-Friendly)
 
 Install from crates.io:
