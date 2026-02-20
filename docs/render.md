@@ -48,6 +48,7 @@ No app/device/project-specific behavior is part of this contract.
 
 1. Complete remaining items in `API_ISSUES.md` under "Additional API Gaps (Requested)".
 2. Align docs/spec status with implemented vs planned APIs before release.
+3. Drive embedded production blockers in `docs/embedded-render-tracker.md`.
 
 ## MU-EPUB Renderer Spec (Generic Only)
 

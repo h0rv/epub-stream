@@ -1,13 +1,23 @@
 use mu_epub::{
-    EpubBook, FontPolicy, RenderPrep, RenderPrepError, RenderPrepOptions, StyledEventOrRun,
+    BlockRole, EpubBook, FontPolicy, RenderPrep, RenderPrepError, RenderPrepOptions,
+    StyledEventOrRun,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::render_ir::{OverlayContent, OverlaySize, PaginationProfileId, RenderPage};
+use crate::render_ir::{
+    DrawCommand, ImageObjectCommand, JustifyMode, OverlayContent, OverlayItem, OverlayRect,
+    OverlaySize, OverlaySlot, PageAnnotation, PageChromeCommand, PageChromeKind, PageMetrics,
+    PaginationProfileId, RectCommand, RenderPage, ResolvedTextStyle, RuleCommand, TextCommand,
+};
 use crate::render_layout::{
     LayoutConfig, LayoutEngine, LayoutSession as CoreLayoutSession, TextMeasurer,
 };
@@ -32,6 +42,18 @@ impl CancelToken for NeverCancel {
 pub enum RenderDiagnostic {
     ReflowTimeMs(u32),
     Cancelled,
+    MemoryLimitExceeded {
+        kind: &'static str,
+        actual: usize,
+        limit: usize,
+    },
+    CacheHit {
+        chapter_index: usize,
+        page_count: usize,
+    },
+    CacheMiss {
+        chapter_index: usize,
+    },
 }
 
 type DiagnosticCallback = Arc<Mutex<Box<dyn FnMut(RenderDiagnostic) + Send + 'static>>>;
@@ -77,6 +99,920 @@ pub trait RenderCacheStore {
         _chapter_index: usize,
         _pages: &[RenderPage],
     ) {
+    }
+}
+
+const CACHE_SCHEMA_VERSION: u8 = 1;
+const DEFAULT_MAX_CACHE_FILE_BYTES: usize = 4 * 1024 * 1024;
+static CACHE_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// File-backed render-page cache store.
+///
+/// Cache paths are deterministic by pagination profile and chapter index:
+/// `<root>/<profile-hex>/chapter-<index>.json`.
+///
+/// The store uses a JSON envelope with a schema version and enforces
+/// `max_file_bytes` on both reads and writes. When I/O, decode, or size checks
+/// fail, operations return `None`/no-op instead of bubbling errors.
+#[derive(Clone, Debug)]
+pub struct FileRenderCacheStore {
+    root: PathBuf,
+    max_file_bytes: usize,
+}
+
+impl FileRenderCacheStore {
+    /// Create a new cache store rooted at `root`.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            max_file_bytes: DEFAULT_MAX_CACHE_FILE_BYTES,
+        }
+    }
+
+    /// Set the maximum allowed cache file size in bytes.
+    ///
+    /// Values of `0` are treated as `1` to keep the cap explicit.
+    pub fn with_max_file_bytes(mut self, max_file_bytes: usize) -> Self {
+        self.max_file_bytes = max_file_bytes.max(1);
+        self
+    }
+
+    /// Root directory for cache files.
+    pub fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Maximum allowed cache file size in bytes.
+    pub fn max_file_bytes(&self) -> usize {
+        self.max_file_bytes
+    }
+
+    /// Deterministic cache path for profile/chapter payload.
+    pub fn chapter_cache_path(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+    ) -> PathBuf {
+        let profile_dir = profile_hex(profile);
+        self.root
+            .join(profile_dir)
+            .join(format!("chapter-{}.json", chapter_index))
+    }
+}
+
+impl RenderCacheStore for FileRenderCacheStore {
+    fn load_chapter_pages(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+    ) -> Option<Vec<RenderPage>> {
+        let path = self.chapter_cache_path(profile, chapter_index);
+        let max_file_bytes = self.max_file_bytes as u64;
+        if fs::metadata(&path).ok()?.len() > max_file_bytes {
+            return None;
+        }
+
+        let file = File::open(path).ok()?;
+        let mut reader = file.take(max_file_bytes.saturating_add(1));
+        let mut payload = Vec::with_capacity(0);
+        if reader.read_to_end(&mut payload).is_err() {
+            return None;
+        }
+        if payload.len() > self.max_file_bytes {
+            return None;
+        }
+        let envelope: PersistedCacheEnvelope = serde_json::from_slice(&payload).ok()?;
+        envelope.into_render_pages()
+    }
+
+    fn store_chapter_pages(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+        pages: &[RenderPage],
+    ) {
+        let final_path = self.chapter_cache_path(profile, chapter_index);
+        let Some(parent) = final_path.parent() else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+
+        let nonce = CACHE_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(
+            "chapter-{}.json.tmp-{}-{}",
+            chapter_index,
+            std::process::id(),
+            nonce
+        ));
+
+        let envelope = PersistedCacheEnvelope::from_pages(pages);
+        let file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        let writer = BufWriter::new(file);
+        let mut writer = CappedWriter::new(writer, self.max_file_bytes);
+        if serde_json::to_writer(&mut writer, &envelope).is_err() {
+            remove_file_quiet(&temp_path);
+            return;
+        }
+        if writer.flush().is_err() {
+            remove_file_quiet(&temp_path);
+            return;
+        }
+        let mut writer = writer.into_inner();
+        if writer.flush().is_err() {
+            remove_file_quiet(&temp_path);
+            return;
+        }
+        let file = match writer.into_inner() {
+            Ok(file) => file,
+            Err(_) => {
+                remove_file_quiet(&temp_path);
+                return;
+            }
+        };
+        if file.sync_all().is_err() {
+            remove_file_quiet(&temp_path);
+            return;
+        }
+        drop(file);
+        if fs::rename(&temp_path, &final_path).is_err() {
+            remove_file_quiet(&temp_path);
+            return;
+        }
+        sync_directory(parent);
+    }
+}
+
+/// Resolve a page index in `new_pages` by chapter progress carried by
+/// `old_pages[old_page_index]`.
+pub fn remap_page_index_by_chapter_progress(
+    old_pages: &[RenderPage],
+    old_page_index: usize,
+    new_pages: &[RenderPage],
+) -> Option<usize> {
+    let target = chapter_progress_for_index(old_pages, old_page_index);
+    resolve_page_index_for_chapter_progress(target, new_pages)
+}
+
+/// Resolve a chapter progress value (`[0, 1]`) into a valid page index.
+///
+/// Returns `None` when `pages` is empty.
+pub fn resolve_page_index_for_chapter_progress(
+    chapter_progress: f32,
+    pages: &[RenderPage],
+) -> Option<usize> {
+    if pages.is_empty() {
+        return None;
+    }
+    let target = normalize_progress(chapter_progress);
+    let mut best_idx = 0usize;
+    let mut best_distance = f32::INFINITY;
+    let mut prev_progress = 0.0f32;
+
+    for (idx, page) in pages.iter().enumerate() {
+        let mut page_progress = page_progress_for_index(page, idx, pages.len());
+        if idx > 0 && page_progress < prev_progress {
+            page_progress = prev_progress;
+        }
+        prev_progress = page_progress;
+
+        let distance = (page_progress - target).abs();
+        if distance < best_distance {
+            best_distance = distance;
+            best_idx = idx;
+            continue;
+        }
+        if (distance - best_distance).abs() <= f32::EPSILON && idx < best_idx {
+            best_idx = idx;
+            continue;
+        }
+        if page_progress > target && distance > best_distance {
+            break;
+        }
+    }
+
+    Some(best_idx)
+}
+
+fn normalize_progress(progress: f32) -> f32 {
+    if progress.is_finite() {
+        return progress.clamp(0.0, 1.0);
+    }
+    0.0
+}
+
+fn chapter_progress_for_index(pages: &[RenderPage], page_index: usize) -> f32 {
+    if pages.is_empty() {
+        return 0.0;
+    }
+    let clamped_index = page_index.min(pages.len().saturating_sub(1));
+    page_progress_for_index(&pages[clamped_index], clamped_index, pages.len())
+}
+
+fn page_progress_for_index(page: &RenderPage, fallback_index: usize, fallback_total: usize) -> f32 {
+    if let Some(chapter_page_count) = page.metrics.chapter_page_count {
+        if chapter_page_count <= 1 {
+            return 1.0;
+        }
+        let chapter_page_index = page
+            .metrics
+            .chapter_page_index
+            .min(chapter_page_count.saturating_sub(1));
+        return (chapter_page_index as f32 / (chapter_page_count - 1) as f32).clamp(0.0, 1.0);
+    }
+    if page.metrics.progress_chapter.is_finite() {
+        return page.metrics.progress_chapter.clamp(0.0, 1.0);
+    }
+    if fallback_total <= 1 {
+        return 1.0;
+    }
+    (fallback_index as f32 / (fallback_total - 1) as f32).clamp(0.0, 1.0)
+}
+
+fn profile_hex(profile: PaginationProfileId) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in profile.0 {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn remove_file_quiet(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn sync_directory(path: &Path) {
+    if let Ok(dir) = File::open(path) {
+        let _ = dir.sync_all();
+    }
+}
+
+struct CappedWriter<W> {
+    inner: W,
+    max_bytes: usize,
+    written: usize,
+}
+
+impl<W> CappedWriter<W> {
+    fn new(inner: W, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            max_bytes: max_bytes.max(1),
+            written: 0,
+        }
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for CappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let remaining = self.max_bytes.saturating_sub(self.written);
+        if buf.len() > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cache file exceeds max_file_bytes",
+            ));
+        }
+        self.inner.write_all(buf)?;
+        self.written = self.written.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedCacheEnvelope {
+    version: u8,
+    pages: Vec<PersistedRenderPage>,
+}
+
+impl PersistedCacheEnvelope {
+    fn from_pages(pages: &[RenderPage]) -> Self {
+        Self {
+            version: CACHE_SCHEMA_VERSION,
+            pages: pages.iter().map(PersistedRenderPage::from).collect(),
+        }
+    }
+
+    fn into_render_pages(self) -> Option<Vec<RenderPage>> {
+        if self.version != CACHE_SCHEMA_VERSION {
+            return None;
+        }
+        Some(self.pages.into_iter().map(RenderPage::from).collect())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedRenderPage {
+    page_number: usize,
+    commands: Vec<PersistedDrawCommand>,
+    content_commands: Vec<PersistedDrawCommand>,
+    chrome_commands: Vec<PersistedDrawCommand>,
+    overlay_commands: Vec<PersistedDrawCommand>,
+    overlay_items: Vec<PersistedOverlayItem>,
+    annotations: Vec<PersistedPageAnnotation>,
+    metrics: PersistedPageMetrics,
+}
+
+impl From<&RenderPage> for PersistedRenderPage {
+    fn from(page: &RenderPage) -> Self {
+        Self {
+            page_number: page.page_number,
+            commands: page
+                .commands
+                .iter()
+                .map(PersistedDrawCommand::from)
+                .collect(),
+            content_commands: page
+                .content_commands
+                .iter()
+                .map(PersistedDrawCommand::from)
+                .collect(),
+            chrome_commands: page
+                .chrome_commands
+                .iter()
+                .map(PersistedDrawCommand::from)
+                .collect(),
+            overlay_commands: page
+                .overlay_commands
+                .iter()
+                .map(PersistedDrawCommand::from)
+                .collect(),
+            overlay_items: page
+                .overlay_items
+                .iter()
+                .map(PersistedOverlayItem::from)
+                .collect(),
+            annotations: page
+                .annotations
+                .iter()
+                .map(PersistedPageAnnotation::from)
+                .collect(),
+            metrics: page.metrics.into(),
+        }
+    }
+}
+
+impl From<PersistedRenderPage> for RenderPage {
+    fn from(value: PersistedRenderPage) -> Self {
+        Self {
+            page_number: value.page_number,
+            commands: value.commands.into_iter().map(DrawCommand::from).collect(),
+            content_commands: value
+                .content_commands
+                .into_iter()
+                .map(DrawCommand::from)
+                .collect(),
+            chrome_commands: value
+                .chrome_commands
+                .into_iter()
+                .map(DrawCommand::from)
+                .collect(),
+            overlay_commands: value
+                .overlay_commands
+                .into_iter()
+                .map(DrawCommand::from)
+                .collect(),
+            overlay_items: value
+                .overlay_items
+                .into_iter()
+                .map(OverlayItem::from)
+                .collect(),
+            annotations: value
+                .annotations
+                .into_iter()
+                .map(PageAnnotation::from)
+                .collect(),
+            metrics: value.metrics.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedOverlayItem {
+    slot: PersistedOverlaySlot,
+    z: i32,
+    content: PersistedOverlayContent,
+}
+
+impl From<&OverlayItem> for PersistedOverlayItem {
+    fn from(value: &OverlayItem) -> Self {
+        Self {
+            slot: (&value.slot).into(),
+            z: value.z,
+            content: (&value.content).into(),
+        }
+    }
+}
+
+impl From<PersistedOverlayItem> for OverlayItem {
+    fn from(value: PersistedOverlayItem) -> Self {
+        Self {
+            slot: value.slot.into(),
+            z: value.z,
+            content: value.content.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum PersistedOverlaySlot {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+    Custom(PersistedOverlayRect),
+}
+
+impl From<&OverlaySlot> for PersistedOverlaySlot {
+    fn from(value: &OverlaySlot) -> Self {
+        match value {
+            OverlaySlot::TopLeft => Self::TopLeft,
+            OverlaySlot::TopCenter => Self::TopCenter,
+            OverlaySlot::TopRight => Self::TopRight,
+            OverlaySlot::BottomLeft => Self::BottomLeft,
+            OverlaySlot::BottomCenter => Self::BottomCenter,
+            OverlaySlot::BottomRight => Self::BottomRight,
+            OverlaySlot::Custom(rect) => Self::Custom((*rect).into()),
+        }
+    }
+}
+
+impl From<PersistedOverlaySlot> for OverlaySlot {
+    fn from(value: PersistedOverlaySlot) -> Self {
+        match value {
+            PersistedOverlaySlot::TopLeft => Self::TopLeft,
+            PersistedOverlaySlot::TopCenter => Self::TopCenter,
+            PersistedOverlaySlot::TopRight => Self::TopRight,
+            PersistedOverlaySlot::BottomLeft => Self::BottomLeft,
+            PersistedOverlaySlot::BottomCenter => Self::BottomCenter,
+            PersistedOverlaySlot::BottomRight => Self::BottomRight,
+            PersistedOverlaySlot::Custom(rect) => Self::Custom(rect.into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct PersistedOverlayRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl From<OverlayRect> for PersistedOverlayRect {
+    fn from(value: OverlayRect) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<PersistedOverlayRect> for OverlayRect {
+    fn from(value: PersistedOverlayRect) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum PersistedOverlayContent {
+    Text(String),
+    Command(PersistedDrawCommand),
+}
+
+impl From<&OverlayContent> for PersistedOverlayContent {
+    fn from(value: &OverlayContent) -> Self {
+        match value {
+            OverlayContent::Text(text) => Self::Text(text.clone()),
+            OverlayContent::Command(cmd) => Self::Command(cmd.into()),
+        }
+    }
+}
+
+impl From<PersistedOverlayContent> for OverlayContent {
+    fn from(value: PersistedOverlayContent) -> Self {
+        match value {
+            PersistedOverlayContent::Text(text) => Self::Text(text),
+            PersistedOverlayContent::Command(cmd) => Self::Command(cmd.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedPageAnnotation {
+    kind: String,
+    value: Option<String>,
+}
+
+impl From<&PageAnnotation> for PersistedPageAnnotation {
+    fn from(value: &PageAnnotation) -> Self {
+        Self {
+            kind: value.kind.clone(),
+            value: value.value.clone(),
+        }
+    }
+}
+
+impl From<PersistedPageAnnotation> for PageAnnotation {
+    fn from(value: PersistedPageAnnotation) -> Self {
+        Self {
+            kind: value.kind,
+            value: value.value,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct PersistedPageMetrics {
+    chapter_index: usize,
+    chapter_page_index: usize,
+    chapter_page_count: Option<usize>,
+    global_page_index: Option<usize>,
+    global_page_count_estimate: Option<usize>,
+    progress_chapter: f32,
+    progress_book: Option<f32>,
+}
+
+impl From<PageMetrics> for PersistedPageMetrics {
+    fn from(value: PageMetrics) -> Self {
+        Self {
+            chapter_index: value.chapter_index,
+            chapter_page_index: value.chapter_page_index,
+            chapter_page_count: value.chapter_page_count,
+            global_page_index: value.global_page_index,
+            global_page_count_estimate: value.global_page_count_estimate,
+            progress_chapter: normalize_progress(value.progress_chapter),
+            progress_book: value.progress_book.map(normalize_progress),
+        }
+    }
+}
+
+impl From<PersistedPageMetrics> for PageMetrics {
+    fn from(value: PersistedPageMetrics) -> Self {
+        Self {
+            chapter_index: value.chapter_index,
+            chapter_page_index: value.chapter_page_index,
+            chapter_page_count: value.chapter_page_count,
+            global_page_index: value.global_page_index,
+            global_page_count_estimate: value.global_page_count_estimate,
+            progress_chapter: normalize_progress(value.progress_chapter),
+            progress_book: value.progress_book.map(normalize_progress),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum PersistedDrawCommand {
+    Text(PersistedTextCommand),
+    Rule(PersistedRuleCommand),
+    ImageObject(PersistedImageObjectCommand),
+    Rect(PersistedRectCommand),
+    PageChrome(PersistedPageChromeCommand),
+}
+
+impl From<&DrawCommand> for PersistedDrawCommand {
+    fn from(value: &DrawCommand) -> Self {
+        match value {
+            DrawCommand::Text(cmd) => Self::Text(cmd.into()),
+            DrawCommand::Rule(cmd) => Self::Rule((*cmd).into()),
+            DrawCommand::ImageObject(cmd) => Self::ImageObject(cmd.into()),
+            DrawCommand::Rect(cmd) => Self::Rect((*cmd).into()),
+            DrawCommand::PageChrome(cmd) => Self::PageChrome(cmd.into()),
+        }
+    }
+}
+
+impl From<PersistedDrawCommand> for DrawCommand {
+    fn from(value: PersistedDrawCommand) -> Self {
+        match value {
+            PersistedDrawCommand::Text(cmd) => Self::Text(cmd.into()),
+            PersistedDrawCommand::Rule(cmd) => Self::Rule(cmd.into()),
+            PersistedDrawCommand::ImageObject(cmd) => Self::ImageObject(cmd.into()),
+            PersistedDrawCommand::Rect(cmd) => Self::Rect(cmd.into()),
+            PersistedDrawCommand::PageChrome(cmd) => Self::PageChrome(cmd.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedTextCommand {
+    x: i32,
+    baseline_y: i32,
+    text: String,
+    font_id: Option<u32>,
+    style: PersistedResolvedTextStyle,
+}
+
+impl From<&TextCommand> for PersistedTextCommand {
+    fn from(value: &TextCommand) -> Self {
+        Self {
+            x: value.x,
+            baseline_y: value.baseline_y,
+            text: value.text.clone(),
+            font_id: value.font_id,
+            style: (&value.style).into(),
+        }
+    }
+}
+
+impl From<PersistedTextCommand> for TextCommand {
+    fn from(value: PersistedTextCommand) -> Self {
+        Self {
+            x: value.x,
+            baseline_y: value.baseline_y,
+            text: value.text,
+            font_id: value.font_id,
+            style: value.style.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedResolvedTextStyle {
+    font_id: Option<u32>,
+    family: String,
+    weight: u16,
+    italic: bool,
+    size_px: f32,
+    line_height: f32,
+    letter_spacing: f32,
+    role: PersistedBlockRole,
+    justify_mode: PersistedJustifyMode,
+}
+
+impl From<&ResolvedTextStyle> for PersistedResolvedTextStyle {
+    fn from(value: &ResolvedTextStyle) -> Self {
+        Self {
+            font_id: value.font_id,
+            family: value.family.clone(),
+            weight: value.weight,
+            italic: value.italic,
+            size_px: value.size_px,
+            line_height: value.line_height,
+            letter_spacing: value.letter_spacing,
+            role: value.role.into(),
+            justify_mode: value.justify_mode.into(),
+        }
+    }
+}
+
+impl From<PersistedResolvedTextStyle> for ResolvedTextStyle {
+    fn from(value: PersistedResolvedTextStyle) -> Self {
+        Self {
+            font_id: value.font_id,
+            family: value.family,
+            weight: value.weight,
+            italic: value.italic,
+            size_px: value.size_px,
+            line_height: value.line_height,
+            letter_spacing: value.letter_spacing,
+            role: value.role.into(),
+            justify_mode: value.justify_mode.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum PersistedBlockRole {
+    Body,
+    Paragraph,
+    Heading(u8),
+    ListItem,
+    FigureCaption,
+}
+
+impl From<BlockRole> for PersistedBlockRole {
+    fn from(value: BlockRole) -> Self {
+        match value {
+            BlockRole::Body => Self::Body,
+            BlockRole::Paragraph => Self::Paragraph,
+            BlockRole::Heading(level) => Self::Heading(level),
+            BlockRole::ListItem => Self::ListItem,
+            BlockRole::FigureCaption => Self::FigureCaption,
+        }
+    }
+}
+
+impl From<PersistedBlockRole> for BlockRole {
+    fn from(value: PersistedBlockRole) -> Self {
+        match value {
+            PersistedBlockRole::Body => Self::Body,
+            PersistedBlockRole::Paragraph => Self::Paragraph,
+            PersistedBlockRole::Heading(level) => Self::Heading(level),
+            PersistedBlockRole::ListItem => Self::ListItem,
+            PersistedBlockRole::FigureCaption => Self::FigureCaption,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum PersistedJustifyMode {
+    None,
+    InterWord { extra_px_total: i32 },
+}
+
+impl From<JustifyMode> for PersistedJustifyMode {
+    fn from(value: JustifyMode) -> Self {
+        match value {
+            JustifyMode::None => Self::None,
+            JustifyMode::InterWord { extra_px_total } => Self::InterWord { extra_px_total },
+        }
+    }
+}
+
+impl From<PersistedJustifyMode> for JustifyMode {
+    fn from(value: PersistedJustifyMode) -> Self {
+        match value {
+            PersistedJustifyMode::None => Self::None,
+            PersistedJustifyMode::InterWord { extra_px_total } => {
+                Self::InterWord { extra_px_total }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct PersistedRuleCommand {
+    x: i32,
+    y: i32,
+    length: u32,
+    thickness: u32,
+    horizontal: bool,
+}
+
+impl From<RuleCommand> for PersistedRuleCommand {
+    fn from(value: RuleCommand) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            length: value.length,
+            thickness: value.thickness,
+            horizontal: value.horizontal,
+        }
+    }
+}
+
+impl From<PersistedRuleCommand> for RuleCommand {
+    fn from(value: PersistedRuleCommand) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            length: value.length,
+            thickness: value.thickness,
+            horizontal: value.horizontal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedImageObjectCommand {
+    src: String,
+    alt: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl From<&ImageObjectCommand> for PersistedImageObjectCommand {
+    fn from(value: &ImageObjectCommand) -> Self {
+        Self {
+            src: value.src.clone(),
+            alt: value.alt.clone(),
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<PersistedImageObjectCommand> for ImageObjectCommand {
+    fn from(value: PersistedImageObjectCommand) -> Self {
+        Self {
+            src: value.src,
+            alt: value.alt,
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct PersistedRectCommand {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    fill: bool,
+}
+
+impl From<RectCommand> for PersistedRectCommand {
+    fn from(value: RectCommand) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+            fill: value.fill,
+        }
+    }
+}
+
+impl From<PersistedRectCommand> for RectCommand {
+    fn from(value: PersistedRectCommand) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+            fill: value.fill,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedPageChromeCommand {
+    kind: PersistedPageChromeKind,
+    text: Option<String>,
+    current: Option<usize>,
+    total: Option<usize>,
+}
+
+impl From<&PageChromeCommand> for PersistedPageChromeCommand {
+    fn from(value: &PageChromeCommand) -> Self {
+        Self {
+            kind: value.kind.into(),
+            text: value.text.clone(),
+            current: value.current,
+            total: value.total,
+        }
+    }
+}
+
+impl From<PersistedPageChromeCommand> for PageChromeCommand {
+    fn from(value: PersistedPageChromeCommand) -> Self {
+        Self {
+            kind: value.kind.into(),
+            text: value.text,
+            current: value.current,
+            total: value.total,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum PersistedPageChromeKind {
+    Header,
+    Footer,
+    Progress,
+}
+
+impl From<PageChromeKind> for PersistedPageChromeKind {
+    fn from(value: PageChromeKind) -> Self {
+        match value {
+            PageChromeKind::Header => Self::Header,
+            PageChromeKind::Footer => Self::Footer,
+            PageChromeKind::Progress => Self::Progress,
+        }
+    }
+}
+
+impl From<PersistedPageChromeKind> for PageChromeKind {
+    fn from(value: PersistedPageChromeKind) -> Self {
+        match value {
+            PersistedPageChromeKind::Header => Self::Header,
+            PersistedPageChromeKind::Footer => Self::Footer,
+            PersistedPageChromeKind::Progress => Self::Progress,
+        }
     }
 }
 
@@ -218,6 +1154,10 @@ impl RenderEngine {
         if let Some(cache) = config.cache {
             if let Some(pages) = cache.load_chapter_pages(profile, chapter_index) {
                 cached_hit = true;
+                self.emit_diagnostic(RenderDiagnostic::CacheHit {
+                    chapter_index,
+                    page_count: pages.len(),
+                });
                 let range = normalize_page_range(config.page_range.clone());
                 let total_pages = pages.len();
                 for (idx, mut page) in pages.into_iter().enumerate() {
@@ -228,6 +1168,9 @@ impl RenderEngine {
                     }
                 }
             }
+        }
+        if config.cache.is_some() && !cached_hit {
+            self.emit_diagnostic(RenderDiagnostic::CacheMiss { chapter_index });
         }
         LayoutSession {
             engine: self,
@@ -299,6 +1242,11 @@ impl RenderEngine {
             }
         }
         if dropped_pages > 0 {
+            self.emit_diagnostic(RenderDiagnostic::MemoryLimitExceeded {
+                kind: "max_pages_in_memory",
+                actual: pages.len().saturating_add(dropped_pages),
+                limit: page_limit,
+            });
             return Err(RenderEngineError::LimitExceeded {
                 kind: "max_pages_in_memory",
                 actual: pages.len().saturating_add(dropped_pages),
@@ -885,7 +1833,14 @@ impl From<RenderPrepError> for RenderEngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_ir::{
+        DrawCommand, ImageObjectCommand, JustifyMode, OverlayItem, OverlayRect, OverlaySlot,
+        PageAnnotation, PageChromeCommand, PageChromeKind, RectCommand, ResolvedTextStyle,
+        RuleCommand, TextCommand,
+    };
     use mu_epub::{BlockRole, ComputedTextStyle, StyledEvent, StyledRun};
+    use std::fs;
+    use std::path::PathBuf;
 
     fn body_run(text: &str) -> StyledEventOrRun {
         StyledEventOrRun::Run(StyledRun {
@@ -902,6 +1857,118 @@ mod tests {
             font_id: 0,
             resolved_family: "serif".to_string(),
         })
+    }
+
+    fn cache_fixture_page(page_number: usize, chapter_page_count: usize) -> RenderPage {
+        let mut page = RenderPage::new(page_number);
+        page.push_content_command(DrawCommand::Text(TextCommand {
+            x: 12,
+            baseline_y: 24,
+            text: format!("page-{page_number}"),
+            font_id: Some(3),
+            style: ResolvedTextStyle {
+                font_id: Some(3),
+                family: "serif".to_string(),
+                weight: 400,
+                italic: false,
+                size_px: 16.0,
+                line_height: 1.4,
+                letter_spacing: 0.0,
+                role: BlockRole::Body,
+                justify_mode: JustifyMode::InterWord { extra_px_total: 6 },
+            },
+        }));
+        page.push_content_command(DrawCommand::Rule(RuleCommand {
+            x: 10,
+            y: 28,
+            length: 100,
+            thickness: 1,
+            horizontal: true,
+        }));
+        page.push_content_command(DrawCommand::ImageObject(ImageObjectCommand {
+            src: "images/pic.png".to_string(),
+            alt: "diagram".to_string(),
+            x: 10,
+            y: 40,
+            width: 64,
+            height: 48,
+        }));
+        page.push_chrome_command(DrawCommand::PageChrome(PageChromeCommand {
+            kind: PageChromeKind::Footer,
+            text: Some(format!("{page_number}/{chapter_page_count}")),
+            current: Some(page_number),
+            total: Some(chapter_page_count),
+        }));
+        page.push_overlay_command(DrawCommand::Rect(RectCommand {
+            x: 6,
+            y: 6,
+            width: 18,
+            height: 8,
+            fill: true,
+        }));
+        page.overlay_items.push(OverlayItem {
+            slot: OverlaySlot::TopRight,
+            z: 1,
+            content: OverlayContent::Text("bookmark".to_string()),
+        });
+        page.overlay_items.push(OverlayItem {
+            slot: OverlaySlot::Custom(OverlayRect {
+                x: 4,
+                y: 5,
+                width: 10,
+                height: 11,
+            }),
+            z: 2,
+            content: OverlayContent::Command(DrawCommand::Rule(RuleCommand {
+                x: 2,
+                y: 3,
+                length: 12,
+                thickness: 1,
+                horizontal: false,
+            })),
+        });
+        page.annotations.push(PageAnnotation {
+            kind: "note".to_string(),
+            value: Some(format!("a{page_number}")),
+        });
+        page.metrics.chapter_index = 4;
+        page.metrics.chapter_page_index = page_number.saturating_sub(1);
+        page.metrics.chapter_page_count = Some(chapter_page_count);
+        page.metrics.global_page_index = Some(page_number.saturating_sub(1));
+        page.metrics.global_page_count_estimate = Some(chapter_page_count);
+        page.metrics.progress_chapter = if chapter_page_count <= 1 {
+            1.0
+        } else {
+            page.metrics.chapter_page_index as f32 / (chapter_page_count - 1) as f32
+        };
+        page.metrics.progress_book = Some(page.metrics.progress_chapter);
+        page.sync_commands();
+        page
+    }
+
+    fn progress_pages(count: usize) -> Vec<RenderPage> {
+        let mut pages = Vec::with_capacity(count);
+        for idx in 0..count {
+            let mut page = RenderPage::new(idx + 1);
+            page.metrics.chapter_page_index = idx;
+            page.metrics.chapter_page_count = Some(count);
+            page.metrics.progress_chapter = if count <= 1 {
+                1.0
+            } else {
+                idx as f32 / (count - 1) as f32
+            };
+            page.metrics.progress_book = Some(page.metrics.progress_chapter);
+            pages.push(page);
+        }
+        pages
+    }
+
+    fn temp_cache_root(label: &str) -> PathBuf {
+        let nonce = CACHE_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "mu-epub-render-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -955,5 +2022,73 @@ mod tests {
         assert_eq!(policy.default_family, "Alegreya");
         assert_eq!(policy.preferred_families, vec!["Alegreya".to_string()]);
         assert!(!policy.allow_embedded_fonts);
+    }
+
+    #[test]
+    fn cache_roundtrip_load_store() {
+        let root = temp_cache_root("cache-roundtrip");
+        let store = FileRenderCacheStore::new(&root).with_max_file_bytes(256 * 1024);
+        let profile = PaginationProfileId::from_bytes(b"profile-a");
+        let chapter_index = 9;
+        let pages = vec![cache_fixture_page(1, 2), cache_fixture_page(2, 2)];
+
+        store.store_chapter_pages(profile, chapter_index, &pages);
+        let cache_path = store.chapter_cache_path(profile, chapter_index);
+        assert!(cache_path.exists());
+
+        let loaded = store.load_chapter_pages(profile, chapter_index);
+        assert_eq!(loaded, Some(pages.clone()));
+
+        let tiny_cap = FileRenderCacheStore::new(&root).with_max_file_bytes(48);
+        tiny_cap.store_chapter_pages(profile, chapter_index + 1, &pages);
+        assert!(tiny_cap
+            .load_chapter_pages(profile, chapter_index + 1)
+            .is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remap_helpers_monotonicity_and_bounds() {
+        let old_pages = progress_pages(7);
+        let new_pages = progress_pages(11);
+
+        let mut prev = 0usize;
+        for old_idx in 0..old_pages.len() {
+            let mapped = remap_page_index_by_chapter_progress(&old_pages, old_idx, &new_pages)
+                .expect("new pages should resolve");
+            assert!(mapped < new_pages.len());
+            assert!(mapped >= prev);
+            prev = mapped;
+        }
+
+        assert_eq!(
+            remap_page_index_by_chapter_progress(&old_pages, usize::MAX, &new_pages),
+            Some(new_pages.len() - 1)
+        );
+
+        let mut prev_resolved = 0usize;
+        for step in 0..=50 {
+            let progress = step as f32 / 50.0;
+            let mapped = resolve_page_index_for_chapter_progress(progress, &new_pages)
+                .expect("new pages should resolve");
+            assert!(mapped < new_pages.len());
+            assert!(mapped >= prev_resolved);
+            prev_resolved = mapped;
+        }
+
+        assert_eq!(
+            resolve_page_index_for_chapter_progress(-10.0, &new_pages),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_page_index_for_chapter_progress(10.0, &new_pages),
+            Some(new_pages.len() - 1)
+        );
+        assert_eq!(
+            resolve_page_index_for_chapter_progress(f32::NAN, &new_pages),
+            Some(0)
+        );
+        assert_eq!(resolve_page_index_for_chapter_progress(0.5, &[]), None);
     }
 }

@@ -2354,7 +2354,7 @@ mod tests {
                 continue;
             }
             let available =
-                ((cfg.content_width() - 0).max(1) as f32 - line_fit_guard_px(&line.style)).max(1.0);
+                ((cfg.content_width()).max(1) as f32 - line_fit_guard_px(&line.style)).max(1.0);
             let ratio = heuristic_measure_text(&line.text, &line.style) / available;
             assert!(
                 ratio >= 0.60,

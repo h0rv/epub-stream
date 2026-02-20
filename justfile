@@ -231,8 +231,13 @@ typography-confidence:
 # Deterministic reflow/config regression harness for reader controls.
 render-regression:
     cargo test -p mu-epub-render --test typography_regression
+    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression
     cargo test -p mu-epub-render --test docs
     cargo test -p mu-epub-render-web --bin web-preview
+
+# Focused embedded reflow regression harness.
+embedded-reflow-regression:
+    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression -- --nocapture
 
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:

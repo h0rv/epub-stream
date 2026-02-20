@@ -3281,10 +3281,12 @@ mod tests {
     #[test]
     fn preview_reflow_matrix_validates_dynamic_reader_knobs() {
         let epub = fixture_path("pg84-frankenstein.epub");
-        let mut baseline_cfg = RenderUiConfig::default();
-        baseline_cfg.chapter = Some(4);
-        baseline_cfg.justify_enabled = true;
-        baseline_cfg.ui_font_family = "auto".to_string();
+        let baseline_cfg = RenderUiConfig {
+            chapter: Some(4),
+            justify_enabled: true,
+            ui_font_family: "auto".to_string(),
+            ..RenderUiConfig::default()
+        };
         let baseline =
             render_preview_payload(&epub, &baseline_cfg).expect("baseline render should succeed");
         assert_payload_text_bounds(&baseline, 3);

@@ -2,6 +2,11 @@
 
 This guide documents the embedded-focused API surface in the `mu_epub` stack.
 
+## Production Tracker
+
+For production-readiness gaps and priorities, see
+`docs/embedded-render-tracker.md`.
+
 ## Open Lazily and Bound Navigation
 
 ```rust,no_run

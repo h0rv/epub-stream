@@ -19,7 +19,8 @@ mod render_layout;
 
 pub use mu_epub::BlockRole;
 pub use render_engine::{
-    CancelToken, LayoutSession, NeverCancel, PageRange, RenderCacheStore, RenderConfig,
+    remap_page_index_by_chapter_progress, resolve_page_index_for_chapter_progress, CancelToken,
+    FileRenderCacheStore, LayoutSession, NeverCancel, PageRange, RenderCacheStore, RenderConfig,
     RenderDiagnostic, RenderEngine, RenderEngineError, RenderEngineOptions, RenderPageIter,
     RenderPageStreamIter,
 };
