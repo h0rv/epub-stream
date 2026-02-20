@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::render_ir::{
     DrawCommand, ImageObjectCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand,
-    PageChromeConfig, PageChromeKind, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle,
-    TextCommand, TypographyConfig,
+    PageChromeConfig, PageChromeKind, RenderIntent, RenderPage, ResolvedTextStyle, TextCommand,
+    TypographyConfig,
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
@@ -559,23 +559,6 @@ impl LayoutState {
                 width: image_w.max(1) as u32,
                 height: image_h.max(1) as u32,
             }));
-        self.page
-            .push_content_command(DrawCommand::Rect(RectCommand {
-                x,
-                y,
-                width: image_w.max(1) as u32,
-                height: image_h.max(1) as u32,
-                fill: false,
-            }));
-        // Visual header strip to signal an image object block.
-        self.page
-            .push_content_command(DrawCommand::Rect(RectCommand {
-                x: x + 1,
-                y: y + 1,
-                width: (image_w - 2).max(1) as u32,
-                height: ((image_h as f32) * 0.08).round().max(2.0) as u32,
-                fill: true,
-            }));
         // Keep src as structured annotation for debug/telemetry.
         if !image.src.is_empty() {
             self.page
@@ -989,6 +972,7 @@ impl LayoutState {
         Some(out)
     }
 
+    #[cfg(not(target_os = "espidf"))]
     fn optimize_overflow_break(
         &self,
         line: &CurrentLine,
@@ -1831,10 +1815,6 @@ mod tests {
         assert!(first
             .commands
             .iter()
-            .any(|cmd| matches!(cmd, DrawCommand::Rect(_))));
-        assert!(first
-            .commands
-            .iter()
             .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_))));
         assert!(first.commands.iter().any(|cmd| match cmd {
             DrawCommand::Text(t) => t.text.contains("Picture caption"),
@@ -1863,16 +1843,16 @@ mod tests {
         ];
         let pages = engine.layout_items(items);
         assert!(pages.len() >= 2);
-        let page0_has_image_rect = pages[0]
+        let page0_has_image_object = pages[0]
             .commands
             .iter()
-            .any(|cmd| matches!(cmd, DrawCommand::Rect(_)));
-        let page1_has_image_rect = pages[1]
+            .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_)));
+        let page1_has_image_object = pages[1]
             .commands
             .iter()
-            .any(|cmd| matches!(cmd, DrawCommand::Rect(_)));
-        assert!(!page0_has_image_rect);
-        assert!(page1_has_image_rect);
+            .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_)));
+        assert!(!page0_has_image_object);
+        assert!(page1_has_image_object);
     }
 
     #[test]
