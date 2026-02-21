@@ -86,13 +86,13 @@ Every item below must follow `docs/memory-management.md`.
   Memory constraints: streaming encode/decode, bounded entry sizes, bounded in-memory page windows.
   Required tests: reopen latency sanity, cache-hit equivalence tests, invalidation tests.
 
-- [ ] `EMB-007` TOC/locator to rendered page mapping (`partial`)
-  Current: `RenderBookPageMap` now provides compact chapter page spans plus `resolve_href`/`resolve_toc_href` APIs with deterministic chapter-start fallback for unresolved fragments.
+- [x] `EMB-007` TOC/locator to rendered page mapping (`done`)
+  Current: `RenderBookPageMap` provides compact chapter page spans plus `resolve_href`/`resolve_toc_href` APIs and optional fragment-progress mapping for anchor-aware page targeting.
   Done when: jump-to-TOC lands on deterministic page offsets and remains stable after bounded reflow.
   Memory constraints: compact index structure and bounded locator table.
   Required tests: TOC jump accuracy, chapter boundary transitions, reflow remap correctness.
 
-- [ ] `EMB-008` Reflow-safe reading position retention (`partial`)
+- [x] `EMB-008` Reflow-safe reading position retention (`done`)
   Current: `RenderReadingPositionToken` APIs (`reading_position_token_for_page_index` + `remap_reading_position_token`) preserve chapter/global progress with chapter-href hints across reflow profile changes.
   Done when: nearest logical position survives re-render and resumes on equivalent content.
   Memory constraints: compact persisted locator representation.
