@@ -894,6 +894,7 @@ impl Styler {
             .as_ref()
             .map(|fam| split_family_stack(fam))
             .unwrap_or_else(|| vec!["serif".to_string()]);
+        let letter_spacing = resolved.letter_spacing.unwrap_or(0.0);
 
         ComputedTextStyle {
             family_stack,
@@ -901,7 +902,7 @@ impl Styler {
             italic: final_italic,
             size_px,
             line_height,
-            letter_spacing: 0.0,
+            letter_spacing,
             block_role: role,
         }
     }
@@ -2305,6 +2306,42 @@ mod tests {
         let first = chapter.runs().next().expect("expected run");
         assert_eq!(first.style.size_px, 20.0);
         assert!(first.style.italic);
+    }
+
+    #[test]
+    fn styler_propagates_stylesheet_letter_spacing_px() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets {
+                sources: vec![StylesheetSource {
+                    href: "main.css".to_string(),
+                    css: "p { letter-spacing: 1.5px; }".to_string(),
+                }],
+            })
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<p>Hello</p>")
+            .expect("style should succeed");
+        let first = chapter.runs().next().expect("expected run");
+        assert_eq!(first.style.letter_spacing, 1.5);
+    }
+
+    #[test]
+    fn styler_inline_letter_spacing_normal_overrides_parent() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets {
+                sources: vec![StylesheetSource {
+                    href: "main.css".to_string(),
+                    css: "p { letter-spacing: 2px; }".to_string(),
+                }],
+            })
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<p style=\"letter-spacing: normal\">Hello</p>")
+            .expect("style should succeed");
+        let first = chapter.runs().next().expect("expected run");
+        assert_eq!(first.style.letter_spacing, 0.0);
     }
 
     #[test]

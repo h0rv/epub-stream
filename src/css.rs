@@ -2,7 +2,7 @@
 //!
 //! Parses a minimal subset of CSS sufficient for EPUB rendering:
 //! - Font properties: `font-size`, `font-family`, `font-weight`, `font-style`
-//! - Text: `text-align`, `line-height`
+//! - Text: `text-align`, `line-height`, `letter-spacing`
 //! - Spacing: `margin-top`, `margin-bottom`
 //! - Selectors: tag, class, and inline `style` attributes
 //!
@@ -90,6 +90,8 @@ pub struct CssStyle {
     pub text_align: Option<TextAlign>,
     /// Line height
     pub line_height: Option<LineHeight>,
+    /// Letter spacing in pixels
+    pub letter_spacing: Option<f32>,
     /// Top margin in pixels
     pub margin_top: Option<f32>,
     /// Bottom margin in pixels
@@ -110,6 +112,7 @@ impl CssStyle {
             && self.font_style.is_none()
             && self.text_align.is_none()
             && self.line_height.is_none()
+            && self.letter_spacing.is_none()
             && self.margin_top.is_none()
             && self.margin_bottom.is_none()
     }
@@ -133,6 +136,9 @@ impl CssStyle {
         }
         if other.line_height.is_some() {
             self.line_height = other.line_height.clone();
+        }
+        if other.letter_spacing.is_some() {
+            self.letter_spacing = other.letter_spacing;
         }
         if other.margin_top.is_some() {
             self.margin_top = other.margin_top;
@@ -372,6 +378,11 @@ fn parse_declarations(declarations: &str) -> Result<CssStyle, EpubError> {
             "line-height" => {
                 style.line_height = parse_line_height(value);
             }
+            "letter-spacing" => {
+                if let Some(letter_spacing) = parse_letter_spacing(value) {
+                    style.letter_spacing = Some(letter_spacing);
+                }
+            }
             "margin-top" => {
                 style.margin_top = parse_px_value(value);
             }
@@ -419,6 +430,18 @@ fn parse_line_height(value: &str) -> Option<LineHeight> {
     }
 }
 
+/// Parse a letter-spacing value (`normal` or `<number>px`)
+fn parse_letter_spacing(value: &str) -> Option<f32> {
+    let value = value.trim().to_lowercase();
+    if value == "normal" {
+        Some(0.0)
+    } else if let Some(px_str) = value.strip_suffix("px") {
+        px_str.trim().parse::<f32>().ok()
+    } else {
+        None
+    }
+}
+
 /// Parse a pixel value (e.g., "10px" -> Some(10.0))
 fn parse_px_value(value: &str) -> Option<f32> {
     let value = value.trim().to_lowercase();
@@ -442,6 +465,15 @@ mod tests {
     fn test_css_style_default_is_empty() {
         let style = CssStyle::new();
         assert!(style.is_empty());
+    }
+
+    #[test]
+    fn test_css_style_with_letter_spacing_is_not_empty() {
+        let style = CssStyle {
+            letter_spacing: Some(0.0),
+            ..Default::default()
+        };
+        assert!(!style.is_empty());
     }
 
     #[test]
@@ -663,6 +695,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_letter_spacing_px() {
+        let css = "p { letter-spacing: 1.25px; }";
+        let ss = parse_stylesheet(css).unwrap();
+        assert_eq!(ss.rules[0].style.letter_spacing, Some(1.25));
+    }
+
+    #[test]
+    fn test_parse_letter_spacing_normal() {
+        let css = "p { letter-spacing: normal; font-weight: bold; }";
+        let ss = parse_stylesheet(css).unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss.rules[0].style.letter_spacing, Some(0.0));
+        assert_eq!(ss.rules[0].style.font_weight, Some(FontWeight::Bold));
+    }
+
+    #[test]
+    fn test_parse_letter_spacing_unsupported_unit_ignored() {
+        let css = "p { letter-spacing: 0.2em; font-weight: bold; }";
+        let ss = parse_stylesheet(css).unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss.rules[0].style.letter_spacing, None);
+        assert_eq!(ss.rules[0].style.font_weight, Some(FontWeight::Bold));
+    }
+
+    #[test]
+    fn test_parse_letter_spacing_invalid_does_not_clear_previous_valid_value() {
+        let css = "p { letter-spacing: 1px; letter-spacing: 0.2em; }";
+        let ss = parse_stylesheet(css).unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss.rules[0].style.letter_spacing, Some(1.0));
+    }
+
+    #[test]
     fn test_parse_zero_margin() {
         let css = "p { margin-top: 0; }";
         let ss = parse_stylesheet(css).unwrap();
@@ -784,6 +849,7 @@ mod tests {
             font_size: Some(FontSize::Px(16.0)),
             font_family: Some("Arial".into()),
             line_height: Some(LineHeight::Px(20.0)),
+            letter_spacing: Some(0.5),
             margin_bottom: Some(5.0),
         };
         let overlay = CssStyle {
@@ -794,6 +860,7 @@ mod tests {
             font_size: Some(FontSize::Em(1.5)),
             font_family: Some("Georgia".into()),
             line_height: Some(LineHeight::Multiplier(1.5)),
+            letter_spacing: Some(2.0),
             margin_bottom: Some(15.0),
         };
         base.merge(&overlay);
@@ -806,6 +873,7 @@ mod tests {
         assert_eq!(base.font_size, Some(FontSize::Em(1.5)));
         assert_eq!(base.font_family, Some("Georgia".into()));
         assert_eq!(base.line_height, Some(LineHeight::Multiplier(1.5)));
+        assert_eq!(base.letter_spacing, Some(2.0));
         assert_eq!(base.margin_bottom, Some(15.0));
     }
 
