@@ -20,9 +20,10 @@ mod render_layout;
 pub use mu_epub::BlockRole;
 pub use render_engine::{
     remap_page_index_by_chapter_progress, resolve_page_index_for_chapter_progress, CancelToken,
-    FileRenderCacheStore, LayoutSession, NeverCancel, PageRange, RenderCacheStore, RenderConfig,
-    RenderDiagnostic, RenderEngine, RenderEngineError, RenderEngineOptions, RenderPageIter,
-    RenderPageStreamIter,
+    FileRenderCacheStore, LayoutSession, NeverCancel, PageRange, RenderBookPageMap,
+    RenderBookPageMapEntry, RenderCacheStore, RenderConfig, RenderDiagnostic, RenderEngine,
+    RenderEngineError, RenderEngineOptions, RenderLocatorPageTarget, RenderLocatorTargetKind,
+    RenderPageIter, RenderPageStreamIter, RenderReadingPositionToken,
 };
 pub use render_ir::{
     DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HangingPunctuationConfig,

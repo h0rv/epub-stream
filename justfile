@@ -100,9 +100,10 @@ test-verbose:
 test-alloc:
     cargo test --all-features --test allocation_tests -- --ignored --nocapture --test-threads=1
 
-# Run embedded mode tests with tiny budgets
+# Run embedded-focused suites (tiny budgets + reflow regression matrix).
 test-embedded:
     cargo test --all-features --test embedded_mode_tests -- --ignored --nocapture
+    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression -- --nocapture
 
 # Verify benchmark fixture corpus integrity
 bench-fixtures-check:
@@ -230,6 +231,7 @@ typography-confidence:
 
 # Deterministic reflow/config regression harness for reader controls.
 render-regression:
+    cargo test -p mu-epub-render --test corpus_regression_harness
     cargo test -p mu-epub-render --test typography_regression
     cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression
     cargo test -p mu-epub-render --test docs
@@ -238,6 +240,14 @@ render-regression:
 # Focused embedded reflow regression harness.
 embedded-reflow-regression:
     cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression -- --nocapture
+
+# Focused low-RAM loop verification inside the embedded regression harness.
+embedded-low-ram-matrix:
+    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression embedded_low_ram_reflow_and_page_turn_loops_are_stable -- --nocapture
+
+# Focused budget/telemetry coverage inside the embedded regression harness.
+embedded-budget-telemetry:
+    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths -- --nocapture
 
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:

@@ -1,6 +1,7 @@
+use mu_epub::navigation::NavPoint;
 use mu_epub::{
-    BlockRole, EpubBook, FontPolicy, RenderPrep, RenderPrepError, RenderPrepOptions,
-    StyledEventOrRun,
+    BlockRole, ChapterRef, EpubBook, FontPolicy, Locator, Navigation, RenderPrep, RenderPrepError,
+    RenderPrepOptions, StyledEventOrRun,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -80,6 +81,381 @@ impl RenderEngineOptions {
 
 /// Alias used for chapter page slicing.
 pub type PageRange = core::ops::Range<usize>;
+
+/// Compact chapter-level page span used by `RenderBookPageMap`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderBookPageMapEntry {
+    /// Chapter index in spine order (0-based).
+    pub chapter_index: usize,
+    /// Chapter href in OPF-relative form.
+    pub chapter_href: String,
+    /// First global rendered page index for this chapter.
+    pub first_page_index: usize,
+    /// Rendered page count for this chapter.
+    pub page_count: usize,
+}
+
+impl RenderBookPageMapEntry {
+    fn contains_global_page(&self, global_page_index: usize) -> bool {
+        if self.page_count == 0 {
+            return false;
+        }
+        let start = self.first_page_index;
+        let end = start.saturating_add(self.page_count);
+        global_page_index >= start && global_page_index < end
+    }
+}
+
+/// Deterministic locator resolution kind for rendered page targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderLocatorTargetKind {
+    /// Locator mapped directly to the chapter start page.
+    ChapterStart,
+    /// Locator fragment mapped to a chapter start fallback.
+    FragmentFallbackChapterStart,
+    /// Locator fragment matched to an explicit anchor page.
+    ///
+    /// Reserved for future anchor-index integration.
+    FragmentAnchor,
+}
+
+/// Resolved rendered page target for locator/href operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderLocatorPageTarget {
+    /// Resolved global page index.
+    pub page_index: usize,
+    /// Resolved chapter index.
+    pub chapter_index: usize,
+    /// Resolved chapter href.
+    pub chapter_href: String,
+    /// Optional fragment payload (without leading '#').
+    pub fragment: Option<String>,
+    /// Resolution strategy used for this target.
+    pub kind: RenderLocatorTargetKind,
+}
+
+/// Persisted rendered reading position token.
+///
+/// The token stores chapter identity hints plus normalized chapter/global progress
+/// so callers can remap positions after reflow/profile changes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RenderReadingPositionToken {
+    /// Chapter index hint from the source pagination profile.
+    pub chapter_index: usize,
+    /// Optional chapter href hint for robust remap across index shifts.
+    pub chapter_href: Option<String>,
+    /// Page offset within the chapter in the source pagination profile.
+    pub chapter_page_index: usize,
+    /// Total pages in the source chapter.
+    pub chapter_page_count: usize,
+    /// Chapter progress ratio in `[0.0, 1.0]`.
+    pub chapter_progress: f32,
+    /// Global page index in the source rendered sequence.
+    pub global_page_index: usize,
+    /// Total global pages in the source rendered sequence.
+    pub global_page_count: usize,
+}
+
+impl RenderReadingPositionToken {
+    fn normalized_chapter_progress(&self) -> f32 {
+        if self.chapter_page_count > 1 {
+            return page_progress_from_count(self.chapter_page_index, self.chapter_page_count);
+        }
+        normalize_progress(self.chapter_progress)
+    }
+
+    fn normalized_global_progress(&self) -> f32 {
+        page_progress_from_count(self.global_page_index, self.global_page_count)
+    }
+}
+
+/// Compact chapter-level rendered page index for locator and remap operations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RenderBookPageMap {
+    entries: Vec<RenderBookPageMapEntry>,
+    total_pages: usize,
+}
+
+impl RenderBookPageMap {
+    /// Build a compact page map from spine chapters and rendered page counts.
+    ///
+    /// `chapter_page_counts` is interpreted in spine-index space.
+    /// Missing entries are treated as `0` pages.
+    pub fn from_chapter_page_counts(
+        chapters: &[ChapterRef],
+        chapter_page_counts: &[usize],
+    ) -> Self {
+        let mut entries = Vec::with_capacity(chapters.len());
+        let mut first_page_index = 0usize;
+
+        for (order_index, chapter) in chapters.iter().enumerate() {
+            let page_count = chapter_page_counts
+                .get(chapter.index)
+                .copied()
+                .or_else(|| chapter_page_counts.get(order_index).copied())
+                .unwrap_or(0);
+            entries.push(RenderBookPageMapEntry {
+                chapter_index: chapter.index,
+                chapter_href: chapter.href.clone(),
+                first_page_index,
+                page_count,
+            });
+            first_page_index = first_page_index.saturating_add(page_count);
+        }
+
+        Self {
+            entries,
+            total_pages: first_page_index,
+        }
+    }
+
+    /// Chapter-level entries in spine order.
+    pub fn entries(&self) -> &[RenderBookPageMapEntry] {
+        &self.entries
+    }
+
+    /// Total rendered page count represented by this map.
+    pub fn total_pages(&self) -> usize {
+        self.total_pages
+    }
+
+    /// Resolve the first rendered page for `chapter_index`.
+    ///
+    /// Returns `None` if the chapter has zero rendered pages or is absent.
+    pub fn chapter_start_page_index(&self, chapter_index: usize) -> Option<usize> {
+        self.chapter_entry_with_pages(chapter_index)
+            .map(|entry| entry.first_page_index)
+    }
+
+    /// Resolve the rendered global page range for `chapter_index`.
+    ///
+    /// Returns `None` if the chapter has zero rendered pages or is absent.
+    pub fn chapter_page_range(&self, chapter_index: usize) -> Option<PageRange> {
+        self.chapter_entry_with_pages(chapter_index).map(|entry| {
+            entry.first_page_index..entry.first_page_index.saturating_add(entry.page_count)
+        })
+    }
+
+    /// Resolve a chapter/fragment href into a rendered page target.
+    ///
+    /// Fragment mapping is best-effort. Until anchor-level mappings are available,
+    /// fragment hrefs deterministically fall back to chapter start.
+    pub fn resolve_href(&self, href: &str) -> Option<RenderLocatorPageTarget> {
+        let (base_href, fragment) = split_href_fragment(href);
+        if base_href.is_empty() {
+            return None;
+        }
+
+        let chapter_index = self.find_chapter_index_for_href(base_href)?;
+        let chapter = self.chapter_entry_with_pages(chapter_index)?;
+        let kind = if fragment.is_some() {
+            RenderLocatorTargetKind::FragmentFallbackChapterStart
+        } else {
+            RenderLocatorTargetKind::ChapterStart
+        };
+
+        Some(RenderLocatorPageTarget {
+            page_index: chapter.first_page_index,
+            chapter_index: chapter.chapter_index,
+            chapter_href: chapter.chapter_href.clone(),
+            fragment: fragment.map(ToOwned::to_owned),
+            kind,
+        })
+    }
+
+    /// Alias for resolving TOC href targets.
+    pub fn resolve_toc_href(&self, href: &str) -> Option<RenderLocatorPageTarget> {
+        self.resolve_href(href)
+    }
+
+    /// Resolve a `mu_epub::Locator` into a rendered page target.
+    ///
+    /// Pass `navigation` when resolving `Locator::TocId`.
+    pub fn resolve_locator(
+        &self,
+        locator: &Locator,
+        navigation: Option<&Navigation>,
+    ) -> Option<RenderLocatorPageTarget> {
+        match locator {
+            Locator::Chapter(chapter_index) => self.resolve_chapter_start(*chapter_index, None),
+            Locator::Href(href) => self.resolve_href(href),
+            Locator::Fragment(_) => None,
+            Locator::TocId(id) => {
+                let navigation = navigation?;
+                let href = find_toc_href(navigation, id)?;
+                self.resolve_href(&href)
+            }
+            Locator::Position(pos) => self.resolve_position_locator(pos),
+        }
+    }
+
+    /// Build a persisted reading-position token from a rendered global page index.
+    ///
+    /// Out-of-range indices are clamped to the nearest valid page.
+    pub fn reading_position_token_for_page_index(
+        &self,
+        global_page_index: usize,
+    ) -> Option<RenderReadingPositionToken> {
+        if self.total_pages == 0 {
+            return None;
+        }
+
+        let clamped = global_page_index.min(self.total_pages.saturating_sub(1));
+        let chapter = self.entry_for_global_page(clamped)?;
+        let chapter_offset = clamped.saturating_sub(chapter.first_page_index);
+
+        Some(RenderReadingPositionToken {
+            chapter_index: chapter.chapter_index,
+            chapter_href: Some(chapter.chapter_href.clone()),
+            chapter_page_index: chapter_offset,
+            chapter_page_count: chapter.page_count.max(1),
+            chapter_progress: page_progress_from_count(chapter_offset, chapter.page_count.max(1)),
+            global_page_index: clamped,
+            global_page_count: self.total_pages.max(1),
+        })
+    }
+
+    /// Remap a persisted reading-position token into this page map.
+    ///
+    /// Remap keeps chapter identity when the chapter is still present and has
+    /// rendered pages; otherwise it falls back to global progress remap.
+    pub fn remap_reading_position_token(
+        &self,
+        token: &RenderReadingPositionToken,
+    ) -> Option<usize> {
+        if self.total_pages == 0 {
+            return None;
+        }
+
+        if let Some(chapter) = self.chapter_entry_for_token(token) {
+            let local_index =
+                progress_to_page_index(token.normalized_chapter_progress(), chapter.page_count);
+            return Some(chapter.first_page_index.saturating_add(local_index));
+        }
+
+        Some(progress_to_page_index(
+            token.normalized_global_progress(),
+            self.total_pages,
+        ))
+    }
+
+    fn resolve_position_locator(
+        &self,
+        position: &mu_epub::ReadingPosition,
+    ) -> Option<RenderLocatorPageTarget> {
+        if let Some(href) = position.chapter_href.as_deref() {
+            if let Some(anchor) = position
+                .anchor
+                .as_deref()
+                .filter(|anchor| !anchor.is_empty())
+            {
+                let mut href_with_fragment = String::with_capacity(
+                    href.len().saturating_add(anchor.len()).saturating_add(1),
+                );
+                href_with_fragment.push_str(href);
+                href_with_fragment.push('#');
+                href_with_fragment.push_str(anchor);
+                if let Some(target) = self.resolve_href(&href_with_fragment) {
+                    return Some(target);
+                }
+            }
+            if let Some(target) = self.resolve_href(href) {
+                return Some(target);
+            }
+        }
+        self.resolve_chapter_start(position.chapter_index, position.anchor.as_deref())
+    }
+
+    fn resolve_chapter_start(
+        &self,
+        chapter_index: usize,
+        anchor: Option<&str>,
+    ) -> Option<RenderLocatorPageTarget> {
+        let chapter = self.chapter_entry_with_pages(chapter_index)?;
+        let has_anchor = anchor.is_some_and(|value| !value.is_empty());
+        let kind = if has_anchor {
+            RenderLocatorTargetKind::FragmentFallbackChapterStart
+        } else {
+            RenderLocatorTargetKind::ChapterStart
+        };
+
+        Some(RenderLocatorPageTarget {
+            page_index: chapter.first_page_index,
+            chapter_index: chapter.chapter_index,
+            chapter_href: chapter.chapter_href.clone(),
+            fragment: anchor.map(ToOwned::to_owned),
+            kind,
+        })
+    }
+
+    fn chapter_entry_for_token(
+        &self,
+        token: &RenderReadingPositionToken,
+    ) -> Option<&RenderBookPageMapEntry> {
+        if let Some(href) = token.chapter_href.as_deref() {
+            let (base_href, _) = split_href_fragment(href);
+            if let Some(chapter_index) = self.find_chapter_index_for_href(base_href) {
+                if let Some(chapter) = self.chapter_entry_with_pages(chapter_index) {
+                    return Some(chapter);
+                }
+            }
+        }
+        self.chapter_entry_with_pages(token.chapter_index)
+    }
+
+    fn chapter_entry_with_pages(&self, chapter_index: usize) -> Option<&RenderBookPageMapEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.chapter_index == chapter_index && entry.page_count > 0)
+    }
+
+    fn entry_for_global_page(&self, global_page_index: usize) -> Option<&RenderBookPageMapEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.contains_global_page(global_page_index))
+    }
+
+    fn find_chapter_index_for_href(&self, base_href: &str) -> Option<usize> {
+        if base_href.is_empty() {
+            return None;
+        }
+
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.chapter_href == base_href)
+        {
+            return Some(entry.chapter_index);
+        }
+
+        let normalized_target = normalize_rel_path(base_href);
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| normalize_rel_path(&entry.chapter_href) == normalized_target)
+        {
+            return Some(entry.chapter_index);
+        }
+
+        let target_basename = basename_of(&normalized_target);
+        if target_basename.is_empty() {
+            return None;
+        }
+        let mut candidate: Option<usize> = None;
+        for entry in &self.entries {
+            let normalized_entry = normalize_rel_path(&entry.chapter_href);
+            let entry_basename = basename_of(&normalized_entry);
+            if entry_basename != target_basename {
+                continue;
+            }
+            if candidate.is_some() {
+                return None;
+            }
+            candidate = Some(entry.chapter_index);
+        }
+        candidate
+    }
+}
 
 /// Storage hooks for render-page caches.
 pub trait RenderCacheStore {
@@ -307,6 +683,78 @@ fn normalize_progress(progress: f32) -> f32 {
         return progress.clamp(0.0, 1.0);
     }
     0.0
+}
+
+fn page_progress_from_count(page_index: usize, page_count: usize) -> f32 {
+    if page_count <= 1 {
+        return 1.0;
+    }
+    let clamped = page_index.min(page_count.saturating_sub(1));
+    (clamped as f32 / (page_count - 1) as f32).clamp(0.0, 1.0)
+}
+
+fn progress_to_page_index(progress: f32, page_count: usize) -> usize {
+    if page_count <= 1 {
+        return 0;
+    }
+    let max_index = page_count.saturating_sub(1);
+    let scaled = normalize_progress(progress) * max_index as f32;
+    let rounded = scaled.round();
+    if !rounded.is_finite() || rounded <= 0.0 {
+        return 0;
+    }
+    let index = rounded as usize;
+    index.min(max_index)
+}
+
+fn split_href_fragment(href: &str) -> (&str, Option<&str>) {
+    let (base, fragment) = match href.split_once('#') {
+        Some((base, fragment)) => (base, Some(fragment)),
+        None => (href, None),
+    };
+    let fragment = fragment.filter(|value| !value.is_empty());
+    (base, fragment)
+}
+
+fn normalize_rel_path(path: &str) -> String {
+    let base = path
+        .split_once('?')
+        .map_or(path, |(without_query, _)| without_query);
+    let slash_normalized = base.replace('\\', "/");
+    let mut out_parts: Vec<&str> = Vec::with_capacity(0);
+
+    for part in slash_normalized.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            let _ = out_parts.pop();
+            continue;
+        }
+        out_parts.push(part);
+    }
+
+    out_parts.join("/")
+}
+
+fn basename_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn find_toc_href(navigation: &Navigation, id: &str) -> Option<String> {
+    fn visit(points: &[NavPoint], id: &str) -> Option<String> {
+        for point in points {
+            let (_, fragment) = split_href_fragment(&point.href);
+            if point.label == id || fragment == Some(id) {
+                return Some(point.href.clone());
+            }
+            if let Some(hit) = visit(&point.children, id) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    visit(&navigation.toc, id)
 }
 
 fn chapter_progress_for_index(pages: &[RenderPage], page_index: usize) -> f32 {

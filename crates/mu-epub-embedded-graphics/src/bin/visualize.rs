@@ -6,7 +6,7 @@ use embedded_graphics::geometry::{OriginDimensions, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::Pixel;
 use mu_epub::EpubBook;
-use mu_epub_embedded_graphics::EgRenderer;
+use mu_epub_embedded_graphics::{with_embedded_text_measurer, EgRenderer};
 use mu_epub_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DEFAULT_EPUB_PATH: &str = "tests/fixtures/bench/pg84-frankenstein.epub";
@@ -88,10 +88,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     let engine = RenderEngine::new(opts);
     let renderer: EgRenderer = EgRenderer::default();
+    let base_render_cfg = with_embedded_text_measurer(RenderConfig::default());
 
     let mut chapter_total_pages = 0usize;
     engine
-        .prepare_chapter_with(&mut book, cfg.chapter, |_| {
+        .prepare_chapter_with_config(&mut book, cfg.chapter, base_render_cfg.clone(), |_| {
             chapter_total_pages += 1;
         })
         .map_err(|e| format!("unable to count chapter pages: {}", e))?;
@@ -107,7 +108,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             .prepare_chapter_with_config_collect(
                 &mut book,
                 cfg.chapter,
-                RenderConfig::default().with_page_range(page_range),
+                base_render_cfg.clone().with_page_range(page_range),
             )
             .map_err(|e| {
                 format!(

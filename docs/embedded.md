@@ -107,3 +107,26 @@ let opts = RenderEngineOptions {
 
 let _engine = RenderEngine::new(opts);
 ```
+
+## Embedded Renderer Diagnostics
+
+```rust,no_run
+use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor};
+use mu_epub_embedded_graphics::{EgRenderer, ImageRegistryLimits};
+use mu_epub_render::RenderPage;
+
+let renderer = EgRenderer::with_image_registry_limits(
+    Default::default(),
+    ImageRegistryLimits {
+        max_images: 8,
+        max_total_pixels: 128 * 1024,
+    },
+);
+let _registry = renderer.image_registry_diagnostics();
+
+let page = RenderPage::new(1);
+let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
+let diagnostics = renderer.render_page_with_diagnostics(&page, &mut display)?;
+let _fallbacks = diagnostics.text_fallbacks.total();
+# Ok::<(), core::convert::Infallible>(())
+```

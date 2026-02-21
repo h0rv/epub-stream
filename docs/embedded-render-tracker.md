@@ -1,6 +1,6 @@
 # Embedded EPUB Rendering Production Tracker
 
-Last updated: 2026-02-20
+Last updated: 2026-02-21
 
 ## Scope
 This tracker covers remaining work to make embedded rendering production-grade across:
@@ -22,12 +22,15 @@ This tracker covers remaining work to make embedded rendering production-grade a
 - Render pipeline split is in place (`mu-epub-render` + `mu-epub-embedded-graphics`).
 - Web reflow regression harness exists for config mapping and text-boundary checks.
 - Embedded tiny-budget and allocation tests exist and are passing locally (`just test-embedded`, `just test-alloc`).
+- Embedded renderer now exposes deterministic fallback/budget diagnostics with low-overhead counters.
+- Embedded low-RAM reflow/page-turn stress loops now run in the regression matrix.
+- Render corpus regression harness now covers bench fixtures across multiple pagination profiles with deterministic invariant checks.
 
 Known blockers in current code:
 
 - TTF backend draw path still falls back to mono rasterization for glyph drawing.
 - Image commands without registered bitmap payload still use rectangle fallback.
-- SVG rendering remains unsupported in embedded backend.
+- SVG vector rasterization remains unsupported in embedded backend; current render path relies on deterministic image/alt-text fallback policy.
 - Default layout still uses heuristic width when no explicit measurer is injected.
 
 ## Memory-First Contract (Required For Every New Feature)
@@ -84,47 +87,51 @@ Every item below must follow `docs/memory-management.md`.
   Required tests: reopen latency sanity, cache-hit equivalence tests, invalidation tests.
 
 - [ ] `EMB-007` TOC/locator to rendered page mapping (`partial`)
-  Current: navigation parse exists, but fast map from TOC target to rendered page/offset is incomplete.
+  Current: `RenderBookPageMap` now provides compact chapter page spans plus `resolve_href`/`resolve_toc_href` APIs with deterministic chapter-start fallback for unresolved fragments.
   Done when: jump-to-TOC lands on deterministic page offsets and remains stable after bounded reflow.
   Memory constraints: compact index structure and bounded locator table.
   Required tests: TOC jump accuracy, chapter boundary transitions, reflow remap correctness.
 
 - [ ] `EMB-008` Reflow-safe reading position retention (`partial`)
-  Current: chapter-progress remap helpers exist for page-index carry-over between reflows; anchor-level remap is still incomplete.
+  Current: `RenderReadingPositionToken` APIs (`reading_position_token_for_page_index` + `remap_reading_position_token`) preserve chapter/global progress with chapter-href hints across reflow profile changes.
   Done when: nearest logical position survives re-render and resumes on equivalent content.
   Memory constraints: compact persisted locator representation.
   Required tests: reflow while on middle pages, chapter jumps, resume after reopen.
 
-- [ ] `EMB-009` Embedded renderer no-std/low-RAM verification matrix (`partial`)
-  Current: root crate has no-std checks; render crates need stricter embedded-target verification gates.
+- [x] `EMB-009` Embedded renderer no-std/low-RAM verification matrix (`done`)
+  Current: embedded regression suite now includes constrained-budget repeated reflow/page-turn loops with stability assertions and panic-free verification.
   Done when: render crates have explicit compile/test gates for constrained profiles.
   Memory constraints: documented stack/heap expectations per profile.
   Required tests: profile-specific compile checks and small-budget runtime suites.
 
-- [ ] `EMB-010` Feature-level memory budget telemetry (`missing`)
-  Current: allocation tests exist, but not all render feature paths emit budget diagnostics.
+- [x] `EMB-010` Feature-level memory budget telemetry (`done`)
+  Current: renderer exposes image-registry pressure diagnostics, image fallback counters, and text fallback reason counters through structured APIs.
   Done when: feature paths expose diagnostics for limit pressure and failure reasons.
   Memory constraints: counters/telemetry implemented without per-event allocation churn.
   Required tests: budget-overrun diagnostics and structured error coverage.
 
 ### P1 High-Value (after blockers)
 
-- [ ] `EMB-011` SVG support policy (`missing`)
+- [ ] `EMB-011` SVG support policy (`partial`)
+  Current: prep emits SVG `<image>` (`xlink:href`/`href`) events and layout applies deterministic object fallback policy (`svg_mode` + `alt_text_fallback`) into image-object/alt-text output.
   Done when: either deterministic raster fallback or explicit alt-text fallback policy per device profile.
 
 - [ ] `EMB-012` CSS subset expansion for ebook realism (`partial`)
+  Current: CSS subset covers font family/size/weight/style, text align, line height, letter-spacing (`px` + `normal`), and paragraph margins with stylesheet+inline precedence tests.
   Done when: high-impact properties used by common EPUBs are covered with deterministic limits.
 
 - [ ] `EMB-013` RTL/BiDi baseline support (`missing`)
   Done when: right-to-left paragraph flow and punctuation placement pass basic mixed-direction fixtures.
 
-- [ ] `EMB-014` Table rendering strategy (`missing`)
+- [ ] `EMB-014` Table rendering strategy (`partial`)
+  Current: prep linearizes basic table rows/cells into deterministic paragraph-safe fallback text flow (including per-cell separators).
   Done when: readable table fallback (stacked or simplified layout) is implemented with bounded memory.
 
 - [ ] `EMB-015` Hyphenation dictionary integration (`missing`)
   Done when: optional dictionary path improves breaks while preserving deterministic bounded behavior.
 
 - [ ] `EMB-016` Robust corpus regression at scale (`partial`)
+  Current: `mu-epub-render` corpus harness now discovers bench fixtures dynamically and validates multi-profile invariants (right-edge safety, monotonic progress, page metrics sanity, and sampled page-range consistency).
   Done when: large fixture corpus includes layout/render invariants and expected-failure baselines.
 
 ### P2 Strategic (defer until P0/P1 stable)
@@ -140,8 +147,11 @@ Every item below must follow `docs/memory-management.md`.
 Required gate set for production progression:
 
 - `just test-embedded`
+- `just embedded-low-ram-matrix`
+- `just embedded-budget-telemetry`
 - `just test-alloc`
 - `cargo test -p mu-epub-embedded-graphics`
+- `cargo test -p mu-epub-render --test corpus_regression_harness`
 - `cargo test -p mu-epub-render --test typography_regression`
 - `cargo test -p mu-epub-render-web --bin web-preview`
 - `just lint-memory`
@@ -151,7 +161,7 @@ Planned additions to make this tracker enforceable:
 
 - [ ] Add embedded reflow matrix tests parallel to web-preview regression matrix.
 - [ ] Add golden render snapshots for embedded backend across font/image combinations.
-- [ ] Add stress tests for repeated reflow/page-turn loops under tight budgets.
+- [x] Add stress tests for repeated reflow/page-turn loops under tight budgets.
 
 ## Exit Criteria For "Great Embedded EPUB Rendering"
 

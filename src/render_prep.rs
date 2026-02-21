@@ -642,6 +642,7 @@ impl Styler {
         let mut buf = Vec::with_capacity(0);
         let mut stack: Vec<ElementCtx> = Vec::with_capacity(0);
         let mut skip_depth = 0usize;
+        let mut table_row_cells: Vec<usize> = Vec::with_capacity(0);
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -658,11 +659,30 @@ impl Styler {
                     }
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
-                    if ctx.tag == "img" {
+                    if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut on_item);
                         buf.clear();
                         continue;
+                    }
+                    if ctx.tag == "tr" {
+                        table_row_cells.push(0);
+                    } else if matches!(ctx.tag.as_str(), "td" | "th") {
+                        if let Some(cell_count) = table_row_cells.last_mut() {
+                            if *cell_count > 0 {
+                                let (resolved, role, bold_tag, italic_tag) =
+                                    self.resolve_context_style(&stack);
+                                let style =
+                                    self.compute_style(resolved, role, bold_tag, italic_tag);
+                                on_item(StyledEventOrRun::Run(StyledRun {
+                                    text: " | ".to_string(),
+                                    style,
+                                    font_id: 0,
+                                    resolved_family: String::with_capacity(0),
+                                }));
+                            }
+                            *cell_count = cell_count.saturating_add(1);
+                        }
                     }
                     emit_start_event(&ctx.tag, &mut on_item);
                     stack.push(ctx);
@@ -675,11 +695,28 @@ impl Styler {
                     }
                     let ctx =
                         element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
-                    if ctx.tag == "img" {
+                    if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut on_item);
                         buf.clear();
                         continue;
+                    }
+                    if matches!(ctx.tag.as_str(), "td" | "th") {
+                        if let Some(cell_count) = table_row_cells.last_mut() {
+                            if *cell_count > 0 {
+                                let (resolved, role, bold_tag, italic_tag) =
+                                    self.resolve_context_style(&stack);
+                                let style =
+                                    self.compute_style(resolved, role, bold_tag, italic_tag);
+                                on_item(StyledEventOrRun::Run(StyledRun {
+                                    text: " | ".to_string(),
+                                    style,
+                                    font_id: 0,
+                                    resolved_family: String::with_capacity(0),
+                                }));
+                            }
+                            *cell_count = cell_count.saturating_add(1);
+                        }
                     }
                     emit_start_event(&ctx.tag, &mut on_item);
                     if ctx.tag == "br" {
@@ -699,8 +736,13 @@ impl Styler {
                         continue;
                     }
                     emit_end_event(&tag, &mut on_item);
-                    if !stack.is_empty() {
-                        stack.pop();
+                    if tag == "tr" {
+                        table_row_cells.pop();
+                    }
+                    if let Some(last) = stack.last() {
+                        if last.tag == tag {
+                            stack.pop();
+                        }
                     }
                 }
                 Ok(Event::Text(e)) => {
@@ -1702,12 +1744,18 @@ fn element_ctx_from_start(
                 prep_err
             })?;
             inline_style = Some(parsed);
-        } else if key == "src" {
+        } else if key == "src"
+            || ((key == "href" || key == "xlink:href") && matches!(tag.as_str(), "img" | "image"))
+        {
             if !val.is_empty() {
                 img_src = Some(val);
             }
         } else if key == "alt" {
             img_alt = Some(val);
+        } else if key == "title" {
+            if img_alt.is_none() && !val.is_empty() {
+                img_alt = Some(val);
+            }
         } else if key == "width" {
             img_width_px = parse_dimension_hint_px(&val);
         } else if key == "height" {
@@ -1739,7 +1787,7 @@ fn emit_image_event<F: FnMut(StyledEventOrRun)>(
     in_figure: bool,
     on_item: &mut F,
 ) {
-    if ctx.tag != "img" {
+    if !matches!(ctx.tag.as_str(), "img" | "image") {
         return;
     }
     let Some(src) = ctx.img_src.clone() else {
@@ -1756,7 +1804,7 @@ fn emit_image_event<F: FnMut(StyledEventOrRun)>(
 
 fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" | "figure" | "figcaption" => {
+        "p" | "div" | "figure" | "figcaption" | "table" | "tr" => {
             on_item(StyledEventOrRun::Event(StyledEvent::ParagraphStart))
         }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemStart)),
@@ -1772,7 +1820,7 @@ fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
 
 fn emit_end_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" | "figure" | "figcaption" => {
+        "p" | "div" | "figure" | "figcaption" | "table" | "tr" => {
             on_item(StyledEventOrRun::Event(StyledEvent::ParagraphEnd))
         }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemEnd)),
@@ -2287,6 +2335,59 @@ mod tests {
             caption_run.style.block_role,
             BlockRole::FigureCaption
         ));
+    }
+
+    #[test]
+    fn styler_emits_svg_image_event_from_xlink_href() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter(
+                "<p>Intro</p><svg><image xlink:href=\"images/cover.svg\" title=\"Vector cover\" width=\"240\" height=\"320\"></image></svg><p>Outro</p>",
+            )
+            .expect("style should succeed");
+
+        let image = chapter
+            .iter()
+            .find_map(|item| match item {
+                StyledEventOrRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("expected svg image event");
+        assert_eq!(image.src, "images/cover.svg");
+        assert_eq!(image.alt, "Vector cover");
+        assert_eq!(image.width_px, Some(240));
+        assert_eq!(image.height_px, Some(320));
+        assert!(chapter.runs().any(|run| run.text == "Outro"));
+    }
+
+    #[test]
+    fn styler_linearizes_basic_table_rows_and_cells() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter(
+                "<table><tr><th>Col A</th><th>Col B</th></tr><tr><td>1</td><td>2</td></tr></table>",
+            )
+            .expect("style should succeed");
+
+        let runs: Vec<&str> = chapter.runs().map(|run| run.text.as_str()).collect();
+        assert!(runs.windows(3).any(|w| w == ["Col A", " | ", "Col B"]));
+        assert!(runs.windows(3).any(|w| w == ["1", " | ", "2"]));
+        let starts = chapter
+            .iter()
+            .filter(|item| matches!(item, StyledEventOrRun::Event(StyledEvent::ParagraphStart)))
+            .count();
+        let ends = chapter
+            .iter()
+            .filter(|item| matches!(item, StyledEventOrRun::Event(StyledEvent::ParagraphEnd)))
+            .count();
+        assert!(starts >= 2);
+        assert_eq!(starts, ends);
     }
 
     #[test]

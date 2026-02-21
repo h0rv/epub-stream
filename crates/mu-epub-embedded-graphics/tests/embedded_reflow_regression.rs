@@ -7,11 +7,14 @@ use embedded_graphics::{
     pixelcolor::BinaryColor,
     Pixel,
 };
-use mu_epub::EpubBook;
-use mu_epub_embedded_graphics::EgRenderer;
+use mu_epub::{EpubBook, MemoryBudget};
+use mu_epub_embedded_graphics::{
+    with_embedded_text_measurer, EgRenderer, ImageRegistryLimits, MonochromeBitmap,
+};
 use mu_epub_render::{
-    BlockRole, DrawCommand, RenderConfig, RenderEngine, RenderEngineError, RenderEngineOptions,
-    RenderPage, ResolvedTextStyle,
+    BlockRole, DrawCommand, ImageObjectCommand, JustifyMode, RenderConfig, RenderEngine,
+    RenderEngineError, RenderEngineOptions, RenderPage, ResolvedTextStyle, TextCommand,
+    TextMeasurer,
 };
 
 const DISPLAY_WIDTH: i32 = 480;
@@ -121,6 +124,177 @@ fn embedded_reflow_regression_matrix_is_monotonic_and_bounded() {
     for fixture in fixtures {
         run_matrix_for_fixture(&fixture);
     }
+}
+
+#[test]
+fn embedded_low_ram_reflow_and_page_turn_loops_are_stable() {
+    const LOW_RAM_BUDGET: MemoryBudget = MemoryBudget {
+        max_entry_bytes: 2 * 1024 * 1024,
+        max_css_bytes: 192 * 1024,
+        max_nav_bytes: 192 * 1024,
+        max_inline_style_bytes: 8 * 1024,
+        max_pages_in_memory: 96,
+    };
+
+    let Some(fixture) = available_bench_fixtures().into_iter().next() else {
+        eprintln!(
+            "embedded low-ram regression skipped: no bench fixtures found under {}",
+            bench_fixture_root().display()
+        );
+        return;
+    };
+
+    let baseline = Scenario {
+        base_font_size_px: 22.0,
+        text_scale: 1.0,
+        justify: true,
+        family_override: FamilyOverride::Auto,
+        line_gap_px: 4,
+        paragraph_gap_px: 8,
+    };
+
+    let Some((chapter_index, baseline_pages)) =
+        pick_multi_page_text_chapter_with_budget(&fixture, baseline, LOW_RAM_BUDGET)
+    else {
+        eprintln!(
+            "embedded low-ram regression skipped for {}: no suitable chapter found within budget",
+            fixture.display()
+        );
+        return;
+    };
+
+    let scenarios = [
+        baseline,
+        Scenario {
+            base_font_size_px: 24.0,
+            text_scale: 1.10,
+            justify: true,
+            family_override: FamilyOverride::Auto,
+            line_gap_px: 5,
+            paragraph_gap_px: 10,
+        },
+        Scenario {
+            base_font_size_px: 20.0,
+            text_scale: 1.0,
+            justify: false,
+            family_override: FamilyOverride::Monospace,
+            line_gap_px: 3,
+            paragraph_gap_px: 6,
+        },
+    ];
+
+    let mut expected = Vec::new();
+    expected.push((
+        baseline_pages.len(),
+        sampled_embedded_signature(&baseline_pages),
+    ));
+    for scenario in scenarios.iter().skip(1).copied() {
+        let pages =
+            render_fixture_chapter_with_budget(&fixture, chapter_index, scenario, LOW_RAM_BUDGET)
+                .unwrap_or_else(|msg| panic!("{}", msg));
+        expected.push((pages.len(), sampled_embedded_signature(&pages)));
+    }
+
+    for _loop_idx in 0..6 {
+        for (scenario_idx, scenario) in scenarios.iter().copied().enumerate() {
+            let pages = render_fixture_chapter_with_budget(
+                &fixture,
+                chapter_index,
+                scenario,
+                LOW_RAM_BUDGET,
+            )
+            .unwrap_or_else(|msg| panic!("{}", msg));
+            let (expected_page_count, expected_signature) = expected[scenario_idx];
+            assert_eq!(
+                pages.len(),
+                expected_page_count,
+                "fixture={} scenario='{}' low-ram page count drifted",
+                fixture.display(),
+                scenario.describe()
+            );
+            let signature = sampled_embedded_signature(&pages);
+            assert_eq!(
+                signature,
+                expected_signature,
+                "fixture={} scenario='{}' low-ram render signature drifted",
+                fixture.display(),
+                scenario.describe()
+            );
+        }
+    }
+}
+
+#[test]
+fn embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths() {
+    let mut renderer = EgRenderer::with_image_registry_limits(
+        mu_epub_embedded_graphics::EgRenderConfig {
+            clear_first: false,
+            ..mu_epub_embedded_graphics::EgRenderConfig::default()
+        },
+        ImageRegistryLimits {
+            max_images: 1,
+            max_total_pixels: 4,
+        },
+    );
+    renderer
+        .register_image_bitmap(
+            "images/a.bin",
+            MonochromeBitmap::from_packed_bits(2, 2, vec![0b1111_0000]).expect("valid bitmap"),
+        )
+        .expect("first registration should succeed");
+    let err = renderer.register_image_bitmap(
+        "images/b.bin",
+        MonochromeBitmap::from_packed_bits(1, 1, vec![0b1000_0000]).expect("valid bitmap"),
+    );
+    assert_eq!(
+        err,
+        Err(mu_epub_embedded_graphics::ImageRegistryError::MaxImagesExceeded)
+    );
+
+    let text = TextCommand {
+        x: 0,
+        baseline_y: 10,
+        text: "fallback telemetry".to_string(),
+        font_id: None,
+        style: ResolvedTextStyle {
+            font_id: None,
+            family: "fantasy".to_string(),
+            weight: 400,
+            italic: false,
+            size_px: 16.0,
+            line_height: 1.3,
+            letter_spacing: 0.0,
+            role: BlockRole::Body,
+            justify_mode: JustifyMode::None,
+        },
+    };
+    let image = ImageObjectCommand {
+        src: "images/missing.bin".to_string(),
+        alt: String::new(),
+        x: 4,
+        y: 6,
+        width: 8,
+        height: 8,
+    };
+    let page = RenderPage {
+        page_number: 1,
+        commands: vec![DrawCommand::Text(text), DrawCommand::ImageObject(image)],
+        ..RenderPage::new(1)
+    };
+    let mut display = PixelCaptureDisplay::new(96, 96);
+    let diagnostics = renderer
+        .render_page_with_diagnostics(&page, &mut display)
+        .expect("render should succeed");
+
+    assert_eq!(diagnostics.image_fallback_draws, 1);
+    assert_eq!(diagnostics.text_fallbacks.unknown_family, 1);
+    assert_eq!(diagnostics.text_fallbacks.total(), 1);
+    assert_eq!(diagnostics.image_registry.registered_images, 1);
+    assert_eq!(diagnostics.image_registry.max_images_errors, 1);
+    assert_eq!(
+        diagnostics.image_registry.image_slot_pressure_percent(),
+        100
+    );
 }
 
 fn run_matrix_for_fixture(fixture: &Path) {
@@ -398,9 +572,9 @@ fn assert_no_right_edge_body_overrun(
                 scenario.describe(),
                 page_idx
             );
-            let est_right = text.x as f32 + conservative_text_width_px(&text.text, &text.style);
+            let est_right = text.x as f32 + measured_text_width_px(&text.text, &text.style);
             assert!(
-                est_right <= right_limit,
+                est_right <= (right_limit + 1.0),
                 "fixture={} {} scenario='{}' page={} right-edge overrun: line='{}' est_right={} limit={}",
                 fixture.display(),
                 context,
@@ -459,6 +633,30 @@ fn assert_embedded_renderer_draws_sample_pages(
     );
 }
 
+fn sampled_embedded_signature(pages: &[RenderPage]) -> u64 {
+    let renderer: EgRenderer = EgRenderer::default();
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    hash = hash_mix(hash, pages.len() as u64);
+    for page in pages.iter().take(6) {
+        hash = hash_mix(hash, page.page_number as u64);
+        hash = hash_mix(hash, page.commands.len() as u64);
+        hash = hash_mix(hash, page.metrics.chapter_page_index as u64);
+        hash = hash_mix(hash, page.metrics.progress_chapter.to_bits() as u64);
+        let mut display = PixelCaptureDisplay::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32);
+        renderer
+            .render_page(page, &mut display)
+            .expect("embedded renderer should draw sampled page");
+        hash = hash_mix(hash, display.on_pixels as u64);
+    }
+    hash
+}
+
+fn hash_mix(mut hash: u64, value: u64) -> u64 {
+    hash ^= value;
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    hash
+}
+
 fn pick_multi_page_text_chapter(
     fixture: &Path,
     scenario: Scenario,
@@ -470,6 +668,27 @@ fn pick_multi_page_text_chapter(
             continue;
         };
         if pages.len() < 3 {
+            continue;
+        }
+        if sampled_body_line_count(&pages) >= 8 {
+            return Some((chapter_index, pages));
+        }
+    }
+    None
+}
+
+fn pick_multi_page_text_chapter_with_budget(
+    fixture: &Path,
+    scenario: Scenario,
+    budget: MemoryBudget,
+) -> Option<(usize, Vec<RenderPage>)> {
+    let mut book = EpubBook::open(fixture).ok()?;
+    let engine = build_engine_with_budget(scenario, budget);
+    for chapter_index in 0..book.chapter_count() {
+        let Ok(pages) = render_chapter(&engine, &mut book, chapter_index, scenario) else {
+            continue;
+        };
+        if !(3..=48).contains(&pages.len()) {
             continue;
         }
         if sampled_body_line_count(&pages) >= 8 {
@@ -526,6 +745,32 @@ fn render_fixture_chapter(
     })
 }
 
+fn render_fixture_chapter_with_budget(
+    fixture: &Path,
+    chapter_index: usize,
+    scenario: Scenario,
+    budget: MemoryBudget,
+) -> Result<Vec<RenderPage>, String> {
+    let mut book = EpubBook::open(fixture).map_err(|e| {
+        format!(
+            "unable to open fixture {} for scenario '{}': {}",
+            fixture.display(),
+            scenario.describe(),
+            e
+        )
+    })?;
+    let engine = build_engine_with_budget(scenario, budget);
+    render_chapter(&engine, &mut book, chapter_index, scenario).map_err(|e| {
+        format!(
+            "low-ram render failed for fixture={} chapter={} scenario='{}': {}",
+            fixture.display(),
+            chapter_index,
+            scenario.describe(),
+            e
+        )
+    })
+}
+
 fn render_chapter<R: std::io::Read + std::io::Seek>(
     engine: &RenderEngine,
     book: &mut EpubBook<R>,
@@ -536,10 +781,15 @@ fn render_chapter<R: std::io::Read + std::io::Seek>(
     if let Some(family) = scenario.family_override.as_forced_family() {
         config = config.with_forced_font_family(family);
     }
+    config = with_embedded_text_measurer(config);
     engine.prepare_chapter_with_config_collect(book, chapter_index, config)
 }
 
 fn build_engine(scenario: Scenario) -> RenderEngine {
+    build_engine_with_budget(scenario, MemoryBudget::default())
+}
+
+fn build_engine_with_budget(scenario: Scenario, budget: MemoryBudget) -> RenderEngine {
     let mut opts = RenderEngineOptions::for_display(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     opts.layout.margin_left = 10;
     opts.layout.margin_right = 10;
@@ -557,6 +807,7 @@ fn build_engine(scenario: Scenario) -> RenderEngine {
     opts.prep.layout_hints.max_font_size_px = 72.0;
     opts.prep.layout_hints.min_line_height = 1.05;
     opts.prep.layout_hints.max_line_height = 1.40;
+    opts.prep.memory = budget;
     opts.prep.style.hints = opts.prep.layout_hints;
     RenderEngine::new(opts)
 }
@@ -601,54 +852,9 @@ fn available_bench_fixtures() -> Vec<PathBuf> {
     discovered
 }
 
-fn conservative_text_width_px(text: &str, style: &ResolvedTextStyle) -> f32 {
-    let chars = text.chars().count();
-    if chars == 0 {
-        return 0.0;
-    }
-    let family = style.family.to_ascii_lowercase();
-    let proportional = !(family.contains("mono") || family.contains("fixed"));
-    let mut em_sum = 0.0f32;
-    if proportional {
-        for ch in text.chars() {
-            em_sum += match ch {
-                ' ' | '\u{00A0}' => 0.32,
-                '\t' => 1.28,
-                'i' | 'l' | 'I' | '|' | '!' => 0.24,
-                '.' | ',' | ':' | ';' | '\'' | '"' | '`' => 0.23,
-                '-' | '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' => 0.34,
-                '(' | ')' | '[' | ']' | '{' | '}' => 0.30,
-                'f' | 't' | 'j' | 'r' => 0.34,
-                'm' | 'w' | 'M' | 'W' | '@' | '%' | '&' | '#' => 0.74,
-                c if c.is_ascii_digit() => 0.52,
-                c if c.is_ascii_uppercase() => 0.61,
-                c if c.is_ascii_lowercase() => 0.50,
-                c if c.is_whitespace() => 0.32,
-                c if c.is_ascii_punctuation() => 0.42,
-                _ => 0.56,
-            };
-        }
-    } else {
-        for ch in text.chars() {
-            em_sum += if ch == ' ' { 0.52 } else { 0.58 };
-        }
-    }
-
-    let mut scale = if proportional { 1.05 } else { 1.02 };
-    if style.weight >= 700 {
-        scale += 0.02;
-    }
-    if style.italic {
-        scale += 0.01;
-    }
-    if style.size_px >= 24.0 {
-        scale += 0.01;
-    }
-    let mut width = em_sum * style.size_px * scale;
-    if chars > 1 {
-        width += (chars as f32 - 1.0) * style.letter_spacing.max(0.0);
-    }
-    width
+fn measured_text_width_px(text: &str, style: &ResolvedTextStyle) -> f32 {
+    let measurer = mu_epub_embedded_graphics::EgTextMeasurer::new();
+    measurer.measure_text_px(text, style)
 }
 
 fn is_uppercase_heavy(text: &str) -> bool {

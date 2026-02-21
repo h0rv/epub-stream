@@ -29,14 +29,12 @@ use embedded_graphics::{
 };
 use mu_epub_render::{
     DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeConfig,
-    PageChromeKind, PageChromeTextStyle, RenderPage, ResolvedTextStyle, TextCommand,
+    PageChromeKind, PageChromeTextStyle, RenderConfig, RenderPage, ResolvedTextStyle, TextCommand,
 };
 use std::borrow::Cow;
 #[cfg(feature = "ttf-backend")]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Backend-local font identifier used for metrics and rasterization dispatch.
 pub type FontId = u8;
@@ -125,6 +123,141 @@ pub enum ImageRegistryError {
     InvalidPixelData,
     MaxImagesExceeded,
     MaxTotalPixelsExceeded,
+}
+
+/// Snapshot of image-registry budget pressure and limit diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImageRegistryDiagnostics {
+    /// Whether the registry is currently enabled.
+    pub enabled: bool,
+    /// Current number of registered image sources.
+    pub registered_images: usize,
+    /// Configured max image-source slots.
+    pub max_images: usize,
+    /// Peak registered image count observed by this renderer instance.
+    pub peak_registered_images: usize,
+    /// Current total pixels stored by registered bitmaps.
+    pub registered_pixels: usize,
+    /// Configured max aggregate pixel budget.
+    pub max_total_pixels: usize,
+    /// Peak total registered pixels observed by this renderer instance.
+    pub peak_registered_pixels: usize,
+    /// Count of operations rejected because the registry was disabled.
+    pub registry_disabled_errors: u64,
+    /// Count of operations rejected due to empty image source keys.
+    pub empty_source_errors: u64,
+    /// Count of operations rejected by image-slot limits.
+    pub max_images_errors: u64,
+    /// Count of operations rejected by pixel-budget limits.
+    pub max_total_pixels_errors: u64,
+}
+
+impl ImageRegistryDiagnostics {
+    /// Image slot pressure as an integer percentage in `[0, 100]`.
+    pub fn image_slot_pressure_percent(&self) -> u8 {
+        pressure_percent(self.registered_images, self.max_images)
+    }
+
+    /// Pixel budget pressure as an integer percentage in `[0, 100]`.
+    pub fn pixel_pressure_percent(&self) -> u8 {
+        pressure_percent(self.registered_pixels, self.max_total_pixels)
+    }
+}
+
+/// Counters for text fallback reasons observed during draw execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextFallbackDiagnostics {
+    pub unknown_family: u64,
+    pub unknown_font_id: u64,
+    pub unsupported_weight_italic: u64,
+    pub backend_unavailable: u64,
+}
+
+impl TextFallbackDiagnostics {
+    /// Total fallback count across all reasons.
+    pub fn total(&self) -> u64 {
+        self.unknown_family
+            .saturating_add(self.unknown_font_id)
+            .saturating_add(self.unsupported_weight_italic)
+            .saturating_add(self.backend_unavailable)
+    }
+
+    fn note_reason(&mut self, reason: FontFallbackReason) {
+        match reason {
+            FontFallbackReason::UnknownFamily => {
+                self.unknown_family = self.unknown_family.saturating_add(1)
+            }
+            FontFallbackReason::UnknownFontId => {
+                self.unknown_font_id = self.unknown_font_id.saturating_add(1)
+            }
+            FontFallbackReason::UnsupportedWeightItalic => {
+                self.unsupported_weight_italic = self.unsupported_weight_italic.saturating_add(1)
+            }
+            FontFallbackReason::BackendUnavailable => {
+                self.backend_unavailable = self.backend_unavailable.saturating_add(1)
+            }
+        }
+    }
+}
+
+/// Per-render diagnostics for fallback behavior and image-budget pressure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EgRenderDiagnostics {
+    pub image_registry: ImageRegistryDiagnostics,
+    pub image_fallback_draws: u64,
+    pub text_fallbacks: TextFallbackDiagnostics,
+}
+
+impl EgRenderDiagnostics {
+    fn with_image_registry(image_registry: ImageRegistryDiagnostics) -> Self {
+        Self {
+            image_registry,
+            ..Self::default()
+        }
+    }
+
+    fn note_image_fallback(&mut self) {
+        self.image_fallback_draws = self.image_fallback_draws.saturating_add(1);
+    }
+
+    fn note_text_fallback(&mut self, reason: FontFallbackReason) {
+        self.text_fallbacks.note_reason(reason);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ImageRegistryTelemetry {
+    peak_registered_images: usize,
+    peak_registered_pixels: usize,
+    registry_disabled_errors: u64,
+    empty_source_errors: u64,
+    max_images_errors: u64,
+    max_total_pixels_errors: u64,
+}
+
+impl ImageRegistryTelemetry {
+    fn note_success(&mut self, registered_images: usize, registered_pixels: usize) {
+        self.peak_registered_images = self.peak_registered_images.max(registered_images);
+        self.peak_registered_pixels = self.peak_registered_pixels.max(registered_pixels);
+    }
+
+    fn note_error(&mut self, error: ImageRegistryError) {
+        match error {
+            ImageRegistryError::RegistryDisabled => {
+                self.registry_disabled_errors = self.registry_disabled_errors.saturating_add(1);
+            }
+            ImageRegistryError::EmptySource => {
+                self.empty_source_errors = self.empty_source_errors.saturating_add(1);
+            }
+            ImageRegistryError::MaxImagesExceeded => {
+                self.max_images_errors = self.max_images_errors.saturating_add(1);
+            }
+            ImageRegistryError::MaxTotalPixelsExceeded => {
+                self.max_total_pixels_errors = self.max_total_pixels_errors.saturating_add(1);
+            }
+            ImageRegistryError::InvalidDimensions | ImageRegistryError::InvalidPixelData => {}
+        }
+    }
 }
 
 /// Pre-decoded monochrome bitmap stored in packed row-major bits.
@@ -311,6 +444,13 @@ impl Default for EgTextMeasurer<MonoFontBackend> {
     }
 }
 
+impl EgTextMeasurer<MonoFontBackend> {
+    /// Create a shared measurer trait object for render-config wiring.
+    pub fn shared() -> Arc<dyn mu_epub_render::TextMeasurer> {
+        Arc::new(Self::new())
+    }
+}
+
 impl<B> EgTextMeasurer<B>
 where
     B: FontBackend,
@@ -319,6 +459,14 @@ where
     pub fn with_backend(backend: B) -> Self {
         Self { backend }
     }
+}
+
+/// Attach backend-consistent embedded text measurement to a render config.
+///
+/// This ensures layout wrapping decisions use the same width model as the
+/// embedded renderer backend defaults.
+pub fn with_embedded_text_measurer<'a>(config: RenderConfig<'a>) -> RenderConfig<'a> {
+    config.with_text_measurer(EgTextMeasurer::shared())
 }
 
 impl<B> mu_epub_render::TextMeasurer for EgTextMeasurer<B>
@@ -972,6 +1120,7 @@ pub struct EgRenderer<B = MonoFontBackend> {
     cfg: EgRenderConfig,
     backend: B,
     images: ImageRegistry,
+    image_registry_telemetry: ImageRegistryTelemetry,
 }
 
 impl Default for EgRenderer<MonoFontBackend> {
@@ -980,6 +1129,7 @@ impl Default for EgRenderer<MonoFontBackend> {
             cfg: EgRenderConfig::default(),
             backend: MonoFontBackend,
             images: ImageRegistry::default(),
+            image_registry_telemetry: ImageRegistryTelemetry::default(),
         }
     }
 }
@@ -1003,6 +1153,7 @@ where
             cfg,
             backend,
             images: ImageRegistry::with_limits(image_limits),
+            image_registry_telemetry: ImageRegistryTelemetry::default(),
         }
     }
 
@@ -1021,7 +1172,17 @@ where
         &mut self,
         limits: ImageRegistryLimits,
     ) -> Result<(), ImageRegistryError> {
-        self.images.set_limits(limits)
+        match self.images.set_limits(limits) {
+            Ok(()) => {
+                self.image_registry_telemetry
+                    .note_success(self.images.len(), self.images.total_pixels());
+                Ok(())
+            }
+            Err(error) => {
+                self.image_registry_telemetry.note_error(error);
+                Err(error)
+            }
+        }
     }
 
     /// Return current image registry limits.
@@ -1035,7 +1196,17 @@ where
         src: impl Into<String>,
         bitmap: MonochromeBitmap,
     ) -> Result<(), ImageRegistryError> {
-        self.images.register(src.into(), bitmap)
+        match self.images.register(src.into(), bitmap) {
+            Ok(()) => {
+                self.image_registry_telemetry
+                    .note_success(self.images.len(), self.images.total_pixels());
+                Ok(())
+            }
+            Err(error) => {
+                self.image_registry_telemetry.note_error(error);
+                Err(error)
+            }
+        }
     }
 
     /// Number of currently registered images.
@@ -1046,6 +1217,25 @@ where
     /// Total registered image pixels currently reserved in the registry.
     pub fn registered_total_image_pixels(&self) -> usize {
         self.images.total_pixels()
+    }
+
+    /// Return image-registry pressure and limit diagnostics.
+    pub fn image_registry_diagnostics(&self) -> ImageRegistryDiagnostics {
+        let limits = self.images.limits();
+        let enabled = limits.max_images > 0 && limits.max_total_pixels > 0;
+        ImageRegistryDiagnostics {
+            enabled,
+            registered_images: self.images.len(),
+            max_images: limits.max_images,
+            peak_registered_images: self.image_registry_telemetry.peak_registered_images,
+            registered_pixels: self.images.total_pixels(),
+            max_total_pixels: limits.max_total_pixels,
+            peak_registered_pixels: self.image_registry_telemetry.peak_registered_pixels,
+            registry_disabled_errors: self.image_registry_telemetry.registry_disabled_errors,
+            empty_source_errors: self.image_registry_telemetry.empty_source_errors,
+            max_images_errors: self.image_registry_telemetry.max_images_errors,
+            max_total_pixels_errors: self.image_registry_telemetry.max_total_pixels_errors,
+        }
     }
 
     /// Report backend capabilities for graceful feature degradation.
@@ -1066,6 +1256,22 @@ where
         Ok(())
     }
 
+    /// Render a page and return structured fallback/budget diagnostics.
+    pub fn render_page_with_diagnostics<D>(
+        &self,
+        page: &RenderPage,
+        display: &mut D,
+    ) -> Result<EgRenderDiagnostics, D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let mut diagnostics =
+            EgRenderDiagnostics::with_image_registry(self.image_registry_diagnostics());
+        self.render_content_with_diagnostics(page, display, &mut diagnostics)?;
+        self.render_overlay_with_diagnostics(page, display, &mut diagnostics)?;
+        Ok(diagnostics)
+    }
+
     /// Render content commands from the current single-stream page output.
     pub fn render_content<D>(&self, page: &RenderPage, display: &mut D) -> Result<(), D::Error>
     where
@@ -1074,18 +1280,48 @@ where
         if self.cfg.clear_first {
             display.clear(BinaryColor::Off)?;
         }
-        let content_iter: Box<dyn Iterator<Item = &DrawCommand> + '_> =
-            if !page.content_commands.is_empty() {
-                Box::new(page.content_commands.iter())
-            } else {
-                Box::new(
-                    page.commands
-                        .iter()
-                        .filter(|cmd| !matches!(cmd, DrawCommand::PageChrome(_))),
-                )
-            };
-        for cmd in content_iter {
-            self.draw_command(display, cmd)?;
+        if !page.content_commands.is_empty() {
+            for cmd in &page.content_commands {
+                self.draw_command(display, cmd)?;
+            }
+        } else {
+            for cmd in page
+                .commands
+                .iter()
+                .filter(|cmd| !matches!(cmd, DrawCommand::PageChrome(_)))
+            {
+                self.draw_command(display, cmd)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Render content commands and append diagnostics.
+    pub fn render_content_with_diagnostics<D>(
+        &self,
+        page: &RenderPage,
+        display: &mut D,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        diagnostics.image_registry = self.image_registry_diagnostics();
+        if self.cfg.clear_first {
+            display.clear(BinaryColor::Off)?;
+        }
+        if !page.content_commands.is_empty() {
+            for cmd in &page.content_commands {
+                self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
+            }
+        } else {
+            for cmd in page
+                .commands
+                .iter()
+                .filter(|cmd| !matches!(cmd, DrawCommand::PageChrome(_)))
+            {
+                self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
+            }
         }
         Ok(())
     }
@@ -1115,6 +1351,37 @@ where
         Ok(())
     }
 
+    /// Render overlay/chrome commands and append diagnostics.
+    pub fn render_overlay_with_diagnostics<D>(
+        &self,
+        page: &RenderPage,
+        display: &mut D,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        diagnostics.image_registry = self.image_registry_diagnostics();
+        if !page.chrome_commands.is_empty() || !page.overlay_commands.is_empty() {
+            for cmd in page
+                .chrome_commands
+                .iter()
+                .chain(page.overlay_commands.iter())
+            {
+                self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
+            }
+            return Ok(());
+        }
+        for cmd in page
+            .commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DrawCommand::PageChrome(_)))
+        {
+            self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
+        }
+        Ok(())
+    }
+
     /// Render pre-split content commands (compatible with content/overlay page outputs).
     pub fn render_content_commands<D>(
         &self,
@@ -1133,6 +1400,26 @@ where
         Ok(())
     }
 
+    /// Render pre-split content commands and append diagnostics.
+    pub fn render_content_commands_with_diagnostics<D>(
+        &self,
+        commands: &[DrawCommand],
+        display: &mut D,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        diagnostics.image_registry = self.image_registry_diagnostics();
+        if self.cfg.clear_first {
+            display.clear(BinaryColor::Off)?;
+        }
+        for cmd in commands {
+            self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
+        }
+        Ok(())
+    }
+
     /// Render pre-split overlay commands (compatible with content/overlay page outputs).
     pub fn render_overlay_commands<D>(
         &self,
@@ -1144,6 +1431,23 @@ where
     {
         for cmd in commands {
             self.draw_command(display, cmd)?;
+        }
+        Ok(())
+    }
+
+    /// Render pre-split overlay commands and append diagnostics.
+    pub fn render_overlay_commands_with_diagnostics<D>(
+        &self,
+        commands: &[DrawCommand],
+        display: &mut D,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        diagnostics.image_registry = self.image_registry_diagnostics();
+        for cmd in commands {
+            self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
         }
         Ok(())
     }
@@ -1187,11 +1491,84 @@ where
         }
     }
 
+    fn draw_command_with_diagnostics<D>(
+        &self,
+        display: &mut D,
+        cmd: &DrawCommand,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        match cmd {
+            DrawCommand::Text(text) => self.draw_text_with_diagnostics(display, text, diagnostics),
+            DrawCommand::Rule(rule) => {
+                let style = PrimitiveStyle::with_stroke(BinaryColor::On, rule.thickness);
+                let end = if rule.horizontal {
+                    Point::new(rule.x + rule.length as i32, rule.y)
+                } else {
+                    Point::new(rule.x, rule.y + rule.length as i32)
+                };
+                Line::new(Point::new(rule.x, rule.y), end)
+                    .into_styled(style)
+                    .draw(display)?;
+                Ok(())
+            }
+            DrawCommand::Rect(rect) => {
+                let shape = Rectangle::new(
+                    Point::new(rect.x, rect.y),
+                    Size::new(rect.width, rect.height),
+                );
+                if rect.fill {
+                    shape
+                        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                        .draw(display)?;
+                } else {
+                    shape
+                        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+                        .draw(display)?;
+                }
+                Ok(())
+            }
+            DrawCommand::ImageObject(image) => {
+                self.draw_image_with_diagnostics(display, image, diagnostics)
+            }
+            DrawCommand::PageChrome(chrome) => self.draw_page_chrome(display, chrome),
+        }
+    }
+
     fn draw_image<D>(&self, display: &mut D, image: &ImageObjectCommand) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = BinaryColor>,
     {
+        self.draw_image_impl(display, image, None)
+    }
+
+    fn draw_image_with_diagnostics<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        self.draw_image_impl(display, image, Some(diagnostics))
+    }
+
+    fn draw_image_impl<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        diagnostics: Option<&mut EgRenderDiagnostics>,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
         let Some(bitmap) = self.images.bitmap_for(&image.src) else {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.note_image_fallback();
+            }
             return self.draw_image_fallback(display, image);
         };
         self.draw_registered_bitmap(display, image, bitmap)
@@ -1248,8 +1625,37 @@ where
     where
         D: DrawTarget<Color = BinaryColor>,
     {
+        self.draw_text_impl(display, cmd, None)
+    }
+
+    fn draw_text_with_diagnostics<D>(
+        &self,
+        display: &mut D,
+        cmd: &TextCommand,
+        diagnostics: &mut EgRenderDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        self.draw_text_impl(display, cmd, Some(diagnostics))
+    }
+
+    fn draw_text_impl<D>(
+        &self,
+        display: &mut D,
+        cmd: &TextCommand,
+        diagnostics: Option<&mut EgRenderDiagnostics>,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
         let requested_font_id = cmd.font_id.or(cmd.style.font_id);
         let selection = self.backend.resolve_font(&cmd.style, requested_font_id);
+        if let Some(reason) = selection.fallback_reason {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.note_text_fallback(reason);
+            }
+        }
         let metrics = self.backend.metrics(selection.font_id);
         let origin = Point::new(cmd.x, cmd.baseline_y);
 
@@ -1380,6 +1786,14 @@ where
     }
 }
 
+fn pressure_percent(used: usize, limit: usize) -> u8 {
+    if limit == 0 {
+        return 0;
+    }
+    let pct = ((used as u128 * 100) / limit as u128).min(100);
+    pct as u8
+}
+
 fn fit_bitmap_inside(src_w: u32, src_h: u32, target_w: u32, target_h: u32) -> (u32, u32) {
     let src_w = src_w.max(1);
     let src_h = src_h.max(1);
@@ -1412,6 +1826,7 @@ impl EgRenderer<MonoFontBackend> {
             cfg,
             backend: MonoFontBackend,
             images: ImageRegistry::default(),
+            image_registry_telemetry: ImageRegistryTelemetry::default(),
         }
     }
 
@@ -1421,6 +1836,7 @@ impl EgRenderer<MonoFontBackend> {
             cfg,
             backend: MonoFontBackend,
             images: ImageRegistry::with_limits(limits),
+            image_registry_telemetry: ImageRegistryTelemetry::default(),
         }
     }
 }
@@ -1841,6 +2257,96 @@ mod tests {
         );
         assert_eq!(renderer.registered_image_count(), 1);
         assert_eq!(renderer.registered_total_image_pixels(), 4);
+    }
+
+    #[test]
+    fn image_registry_diagnostics_report_pressure_and_limit_rejections() {
+        let mut renderer = EgRenderer::with_image_registry_limits(
+            EgRenderConfig::default(),
+            ImageRegistryLimits {
+                max_images: 1,
+                max_total_pixels: 4,
+            },
+        );
+        let before = renderer.image_registry_diagnostics();
+        assert!(before.enabled);
+        assert_eq!(before.registered_images, 0);
+        assert_eq!(before.image_slot_pressure_percent(), 0);
+        assert_eq!(before.pixel_pressure_percent(), 0);
+
+        renderer
+            .register_image_bitmap(
+                "images/a.bin",
+                MonochromeBitmap::from_packed_bits(2, 2, vec![0b1111_0000]).expect("valid bitmap"),
+            )
+            .expect("first registration should succeed");
+        let after_first = renderer.image_registry_diagnostics();
+        assert_eq!(after_first.registered_images, 1);
+        assert_eq!(after_first.registered_pixels, 4);
+        assert_eq!(after_first.peak_registered_images, 1);
+        assert_eq!(after_first.peak_registered_pixels, 4);
+        assert_eq!(after_first.image_slot_pressure_percent(), 100);
+        assert_eq!(after_first.pixel_pressure_percent(), 100);
+
+        let err = renderer.register_image_bitmap(
+            "images/b.bin",
+            MonochromeBitmap::from_packed_bits(1, 1, vec![0b1000_0000]).expect("valid bitmap"),
+        );
+        assert_eq!(err, Err(ImageRegistryError::MaxImagesExceeded));
+
+        let err = renderer.register_image_bitmap(
+            "images/a.bin",
+            MonochromeBitmap::from_packed_bits(3, 2, vec![0b1111_1100]).expect("valid bitmap"),
+        );
+        assert_eq!(err, Err(ImageRegistryError::MaxTotalPixelsExceeded));
+
+        let err = renderer.register_image_bitmap(
+            "   ",
+            MonochromeBitmap::from_packed_bits(1, 1, vec![0b1000_0000]).expect("valid bitmap"),
+        );
+        assert_eq!(err, Err(ImageRegistryError::EmptySource));
+
+        let final_diag = renderer.image_registry_diagnostics();
+        assert_eq!(final_diag.max_images_errors, 1);
+        assert_eq!(final_diag.max_total_pixels_errors, 1);
+        assert_eq!(final_diag.empty_source_errors, 1);
+    }
+
+    #[test]
+    fn render_page_with_diagnostics_tracks_image_and_text_fallbacks() {
+        let mut display = MockDisplay::new();
+        display.set_allow_overdraw(true);
+        let backend = BackendSpy::default();
+        let renderer = EgRenderer::with_backend(EgRenderConfig::default(), backend);
+        let page = page_with_commands(
+            1,
+            vec![
+                DrawCommand::Text(TextCommand {
+                    x: 0,
+                    baseline_y: 10,
+                    text: "fallback".to_string(),
+                    font_id: None,
+                    style: body_style(),
+                }),
+                DrawCommand::ImageObject(ImageObjectCommand {
+                    src: "images/missing.bin".to_string(),
+                    alt: String::new(),
+                    x: 2,
+                    y: 3,
+                    width: 4,
+                    height: 4,
+                }),
+            ],
+        );
+
+        let diagnostics = renderer
+            .render_page_with_diagnostics(&page, &mut display)
+            .expect("render should succeed");
+
+        assert_eq!(diagnostics.image_fallback_draws, 1);
+        assert_eq!(diagnostics.text_fallbacks.unknown_family, 1);
+        assert_eq!(diagnostics.text_fallbacks.total(), 1);
+        assert!(!diagnostics.image_registry.enabled);
     }
 
     #[test]
