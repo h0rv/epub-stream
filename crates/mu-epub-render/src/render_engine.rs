@@ -241,6 +241,19 @@ impl RenderBookPageMap {
     /// Fragment mapping is best-effort. Until anchor-level mappings are available,
     /// fragment hrefs deterministically fall back to chapter start.
     pub fn resolve_href(&self, href: &str) -> Option<RenderLocatorPageTarget> {
+        self.resolve_href_with_fragment_progress(href, None)
+    }
+
+    /// Resolve a chapter/fragment href with optional normalized fragment progress.
+    ///
+    /// When `fragment_progress` is provided for hrefs containing a fragment,
+    /// the target page is resolved to the nearest page in that chapter and the
+    /// target kind is marked as `FragmentAnchor`.
+    pub fn resolve_href_with_fragment_progress(
+        &self,
+        href: &str,
+        fragment_progress: Option<f32>,
+    ) -> Option<RenderLocatorPageTarget> {
         let (base_href, fragment) = split_href_fragment(href);
         if base_href.is_empty() {
             return None;
@@ -248,14 +261,22 @@ impl RenderBookPageMap {
 
         let chapter_index = self.find_chapter_index_for_href(base_href)?;
         let chapter = self.chapter_entry_with_pages(chapter_index)?;
-        let kind = if fragment.is_some() {
-            RenderLocatorTargetKind::FragmentFallbackChapterStart
-        } else {
-            RenderLocatorTargetKind::ChapterStart
+        let mut page_index = chapter.first_page_index;
+        let kind = match fragment {
+            Some(_) => {
+                if let Some(progress) = fragment_progress {
+                    let local_index = progress_to_page_index(progress, chapter.page_count.max(1));
+                    page_index = chapter.first_page_index.saturating_add(local_index);
+                    RenderLocatorTargetKind::FragmentAnchor
+                } else {
+                    RenderLocatorTargetKind::FragmentFallbackChapterStart
+                }
+            }
+            None => RenderLocatorTargetKind::ChapterStart,
         };
 
         Some(RenderLocatorPageTarget {
-            page_index: chapter.first_page_index,
+            page_index,
             chapter_index: chapter.chapter_index,
             chapter_href: chapter.chapter_href.clone(),
             fragment: fragment.map(ToOwned::to_owned),
@@ -714,6 +735,65 @@ fn split_href_fragment(href: &str) -> (&str, Option<&str>) {
     };
     let fragment = fragment.filter(|value| !value.is_empty());
     (base, fragment)
+}
+
+/// Estimate normalized chapter progress for an anchor fragment in XHTML bytes.
+///
+/// This is a lightweight best-effort helper intended for locator remap flows.
+/// It searches for `id="<fragment>"`, `id='<fragment>'`, `name="<fragment>"`,
+/// and `name='<fragment>'` byte patterns and maps the match offset into `[0, 1]`.
+pub fn estimate_fragment_progress_in_html(chapter_html: &[u8], fragment: &str) -> Option<f32> {
+    if chapter_html.is_empty() {
+        return None;
+    }
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
+        return None;
+    }
+    let needle = fragment.as_bytes();
+
+    let mut patterns: [Vec<u8>; 4] = [
+        Vec::with_capacity(needle.len() + 5),
+        Vec::with_capacity(needle.len() + 5),
+        Vec::with_capacity(needle.len() + 7),
+        Vec::with_capacity(needle.len() + 7),
+    ];
+    patterns[0].extend_from_slice(b"id=\"");
+    patterns[0].extend_from_slice(needle);
+    patterns[0].push(b'"');
+
+    patterns[1].extend_from_slice(b"id='");
+    patterns[1].extend_from_slice(needle);
+    patterns[1].push(b'\'');
+
+    patterns[2].extend_from_slice(b"name=\"");
+    patterns[2].extend_from_slice(needle);
+    patterns[2].push(b'"');
+
+    patterns[3].extend_from_slice(b"name='");
+    patterns[3].extend_from_slice(needle);
+    patterns[3].push(b'\'');
+
+    let mut best: Option<usize> = None;
+    for pattern in &patterns {
+        if let Some(pos) = find_bytes(chapter_html, pattern) {
+            best = Some(best.map_or(pos, |current| current.min(pos)));
+        }
+    }
+    let position = best?;
+    if chapter_html.len() <= 1 {
+        return Some(0.0);
+    }
+    Some((position as f32 / (chapter_html.len() - 1) as f32).clamp(0.0, 1.0))
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn normalize_rel_path(path: &str) -> String {
@@ -2286,7 +2366,7 @@ mod tests {
         PageAnnotation, PageChromeCommand, PageChromeKind, RectCommand, ResolvedTextStyle,
         RuleCommand, TextCommand,
     };
-    use mu_epub::{BlockRole, ComputedTextStyle, StyledEvent, StyledRun};
+    use mu_epub::{BlockRole, ChapterRef, ComputedTextStyle, StyledEvent, StyledRun};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2419,6 +2499,23 @@ mod tests {
         ))
     }
 
+    fn sample_chapters() -> Vec<ChapterRef> {
+        vec![
+            ChapterRef {
+                index: 0,
+                idref: "c0".to_string(),
+                href: "text/ch0.xhtml".to_string(),
+                media_type: "application/xhtml+xml".to_string(),
+            },
+            ChapterRef {
+                index: 1,
+                idref: "c1".to_string(),
+                href: "text/ch1.xhtml".to_string(),
+                media_type: "application/xhtml+xml".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn begin_push_and_drain_pages_streams_incrementally() {
         let mut opts = RenderEngineOptions::for_display(300, 120);
@@ -2538,5 +2635,46 @@ mod tests {
             Some(0)
         );
         assert_eq!(resolve_page_index_for_chapter_progress(0.5, &[]), None);
+    }
+
+    #[test]
+    fn resolve_href_with_fragment_progress_maps_anchor_inside_chapter() {
+        let map = RenderBookPageMap::from_chapter_page_counts(&sample_chapters(), &[3, 5]);
+        let target = map
+            .resolve_href_with_fragment_progress("text/ch1.xhtml#intro", Some(0.5))
+            .expect("target should resolve");
+        assert_eq!(target.chapter_index, 1);
+        assert_eq!(target.page_index, 5);
+        assert_eq!(target.kind, RenderLocatorTargetKind::FragmentAnchor);
+        assert_eq!(target.fragment.as_deref(), Some("intro"));
+
+        let fallback = map
+            .resolve_href("text/ch1.xhtml#intro")
+            .expect("fallback should resolve");
+        assert_eq!(fallback.page_index, 3);
+        assert_eq!(
+            fallback.kind,
+            RenderLocatorTargetKind::FragmentFallbackChapterStart
+        );
+    }
+
+    #[test]
+    fn estimate_fragment_progress_in_html_matches_id_and_name_patterns() {
+        let html = br#"
+            <html><body>
+                <p>intro text</p>
+                <h2 id="middle">Middle</h2>
+                <a name='end-anchor'>End</a>
+            </body></html>
+        "#;
+        let middle = estimate_fragment_progress_in_html(html, "middle")
+            .expect("middle anchor should resolve");
+        let end = estimate_fragment_progress_in_html(html, "end-anchor")
+            .expect("end anchor should resolve");
+        assert!(middle > 0.0);
+        assert!(end > middle);
+        assert!(estimate_fragment_progress_in_html(html, "missing").is_none());
+        assert!(estimate_fragment_progress_in_html(&[], "middle").is_none());
+        assert!(estimate_fragment_progress_in_html(html, "").is_none());
     }
 }
