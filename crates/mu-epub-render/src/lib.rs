@@ -27,12 +27,12 @@ pub use render_engine::{
     RenderReadingPositionToken,
 };
 pub use render_ir::{
-    DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HangingPunctuationConfig,
-    HyphenationConfig, HyphenationMode, ImageObjectCommand, JustificationConfig, JustifyMode,
-    ObjectLayoutConfig, OverlayComposer, OverlayContent, OverlayItem, OverlayRect, OverlaySize,
-    OverlaySlot, PageAnnotation, PageChromeCommand, PageChromeConfig, PageChromeKind,
-    PageChromeTextStyle, PageMeta, PageMetrics, PaginationProfileId, RectCommand, RenderIntent,
-    RenderPage, ResolvedTextStyle, RuleCommand, SvgMode, TextCommand, TypographyConfig,
-    WidowOrphanControl,
+    CoverPageMode, DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HangingPunctuationConfig,
+    HyphenationConfig, HyphenationMode, ImageObjectCommand, JustificationConfig,
+    JustificationStrategy, JustifyMode, ObjectLayoutConfig, OverlayComposer, OverlayContent,
+    OverlayItem, OverlayRect, OverlaySize, OverlaySlot, PageAnnotation, PageChromeCommand,
+    PageChromeConfig, PageChromeKind, PageChromeTextStyle, PageMeta, PageMetrics,
+    PaginationProfileId, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle, RuleCommand,
+    SvgMode, TextCommand, TypographyConfig, WidowOrphanControl,
 };
 pub use render_layout::{LayoutConfig, LayoutEngine, SoftHyphenPolicy, TextMeasurer};

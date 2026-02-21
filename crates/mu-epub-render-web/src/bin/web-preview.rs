@@ -13,9 +13,10 @@ use mu_epub::{
     ReadingSession,
 };
 use mu_epub_render::{
-    BlockRole, DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HyphenationMode, JustifyMode,
-    PageChromeConfig, PageChromeKind, PageChromeTextStyle, RenderConfig, RenderEngine,
-    RenderEngineOptions, RenderPage, SoftHyphenPolicy, SvgMode,
+    BlockRole, CoverPageMode, DitherMode, DrawCommand, FloatSupport, GrayscaleMode,
+    HyphenationMode, JustificationStrategy, JustifyMode, PageChromeConfig, PageChromeKind,
+    PageChromeTextStyle, RenderConfig, RenderEngine, RenderEngineOptions, RenderPage,
+    SoftHyphenPolicy, SvgMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,8 @@ struct Args {
     display_width: u32,
     display_height: u32,
     justify_enabled: bool,
+    justify_strategy: String,
+    cover_page_mode: String,
     prep_base_font_size_px: f32,
     prep_text_scale: f32,
     line_gap_px: i32,
@@ -46,6 +49,7 @@ struct Args {
     margin_bottom: i32,
     justify_min_words: usize,
     justify_min_fill_ratio: f32,
+    justify_max_space_stretch_ratio: f32,
     widow_orphan_enabled: bool,
     widow_orphan_min_lines: u8,
     hanging_punctuation_enabled: bool,
@@ -76,8 +80,10 @@ struct RenderUiConfig {
     suppress_indent_after_heading: bool,
 
     justify_enabled: bool,
+    justify_strategy: String,
     justify_min_words: usize,
     justify_min_fill_ratio: f32,
+    justify_max_space_stretch_ratio: f32,
 
     widow_orphan_enabled: bool,
     widow_orphan_min_lines: u8,
@@ -90,6 +96,7 @@ struct RenderUiConfig {
     max_line_height_px: i32,
 
     object_max_inline_image_height_ratio: f32,
+    object_cover_page_mode: String,
     object_float_support: String,
     object_svg_mode: String,
     object_alt_text_fallback: bool,
@@ -158,8 +165,10 @@ impl Default for RenderUiConfig {
             first_line_indent_px: 0,
             suppress_indent_after_heading: true,
             justify_enabled: true,
+            justify_strategy: "adaptive-inter-word".to_string(),
             justify_min_words: 6,
             justify_min_fill_ratio: 0.78,
+            justify_max_space_stretch_ratio: 0.45,
             widow_orphan_enabled: true,
             widow_orphan_min_lines: 2,
             hanging_punctuation_enabled: true,
@@ -168,6 +177,7 @@ impl Default for RenderUiConfig {
             min_line_height_px: 14,
             max_line_height_px: 56,
             object_max_inline_image_height_ratio: 0.5,
+            object_cover_page_mode: "contain".to_string(),
             object_float_support: "none".to_string(),
             object_svg_mode: "rasterize-fallback".to_string(),
             object_alt_text_fallback: true,
@@ -228,8 +238,11 @@ impl RenderUiConfig {
             line_gap_px: args.line_gap_px,
             paragraph_gap_px: args.paragraph_gap_px,
             justify_enabled: args.justify_enabled,
+            justify_strategy: args.justify_strategy.clone(),
+            object_cover_page_mode: args.cover_page_mode.clone(),
             justify_min_words: args.justify_min_words,
             justify_min_fill_ratio: args.justify_min_fill_ratio,
+            justify_max_space_stretch_ratio: args.justify_max_space_stretch_ratio,
             widow_orphan_enabled: args.widow_orphan_enabled,
             widow_orphan_min_lines: args.widow_orphan_min_lines,
             hanging_punctuation_enabled: args.hanging_punctuation_enabled,
@@ -246,6 +259,10 @@ impl RenderUiConfig {
         self.display_height = self.display_height.clamp(64, 4096);
         self.justify_min_words = self.justify_min_words.max(1);
         self.justify_min_fill_ratio = self.justify_min_fill_ratio.clamp(0.0, 1.0);
+        self.justify_max_space_stretch_ratio = self.justify_max_space_stretch_ratio.clamp(0.0, 8.0);
+        self.justify_strategy =
+            justification_strategy_to_string(parse_justification_strategy(&self.justify_strategy))
+                .to_string();
         self.widow_orphan_min_lines = self.widow_orphan_min_lines.max(1);
         self.heading_keep_with_next_lines = self.heading_keep_with_next_lines.max(1);
         self.prep_base_font_size_px = self.prep_base_font_size_px.clamp(1.0, 240.0);
@@ -273,6 +290,9 @@ impl RenderUiConfig {
         }
         self.object_max_inline_image_height_ratio =
             self.object_max_inline_image_height_ratio.clamp(0.05, 4.0);
+        self.object_cover_page_mode =
+            cover_page_mode_to_string(parse_cover_page_mode(&self.object_cover_page_mode))
+                .to_string();
         self.render_contrast_boost = self.render_contrast_boost.clamp(10, 255);
         self.page_chrome_progress_height = self.page_chrome_progress_height.max(1);
         self.page_chrome_progress_stroke_width = self.page_chrome_progress_stroke_width.max(1);
@@ -327,12 +347,17 @@ impl RenderUiConfig {
         layout.typography.widow_orphan_control.enabled = self.widow_orphan_enabled;
         layout.typography.widow_orphan_control.min_lines = self.widow_orphan_min_lines;
         layout.typography.justification.enabled = self.justify_enabled;
+        layout.typography.justification.strategy =
+            parse_justification_strategy(&self.justify_strategy);
         layout.typography.justification.min_words = self.justify_min_words;
         layout.typography.justification.min_fill_ratio = self.justify_min_fill_ratio;
+        layout.typography.justification.max_space_stretch_ratio =
+            self.justify_max_space_stretch_ratio;
         layout.typography.hanging_punctuation.enabled = self.hanging_punctuation_enabled;
 
         layout.object_layout.max_inline_image_height_ratio =
             self.object_max_inline_image_height_ratio;
+        layout.object_layout.cover_page_mode = parse_cover_page_mode(&self.object_cover_page_mode);
         layout.object_layout.float_support = parse_float_support(&self.object_float_support);
         layout.object_layout.svg_mode = parse_svg_mode(&self.object_svg_mode);
         layout.object_layout.alt_text_fallback = self.object_alt_text_fallback;
@@ -506,6 +531,7 @@ struct TextStylePayload {
 struct JustifyPayload {
     mode: String,
     extra_px_total: Option<i32>,
+    offset_px: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -530,6 +556,8 @@ struct FontFacePayload {
 
 #[derive(Serialize)]
 struct OptionLists {
+    justification_strategy: Vec<&'static str>,
+    cover_page_mode: Vec<&'static str>,
     soft_hyphen_policy: Vec<&'static str>,
     hyphenation_mode: Vec<&'static str>,
     object_float_support: Vec<&'static str>,
@@ -542,6 +570,14 @@ struct OptionLists {
 impl Default for OptionLists {
     fn default() -> Self {
         Self {
+            justification_strategy: vec![
+                "adaptive-inter-word",
+                "full-inter-word",
+                "align-left",
+                "align-right",
+                "align-center",
+            ],
+            cover_page_mode: vec!["contain", "full-bleed", "respect-css"],
             soft_hyphen_policy: vec!["discretionary", "ignore"],
             hyphenation_mode: vec!["discretionary", "ignore"],
             object_float_support: vec!["none", "basic"],
@@ -1312,6 +1348,22 @@ fn parse_hyphenation_mode(value: &str) -> HyphenationMode {
     }
 }
 
+fn parse_cover_page_mode(value: &str) -> CoverPageMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "full-bleed" | "full_bleed" | "fullbleed" => CoverPageMode::FullBleed,
+        "respect-css" | "respect_css" | "respectcss" | "css" => CoverPageMode::RespectCss,
+        _ => CoverPageMode::Contain,
+    }
+}
+
+fn cover_page_mode_to_string(mode: CoverPageMode) -> &'static str {
+    match mode {
+        CoverPageMode::Contain => "contain",
+        CoverPageMode::FullBleed => "full-bleed",
+        CoverPageMode::RespectCss => "respect-css",
+    }
+}
+
 fn parse_float_support(value: &str) -> FloatSupport {
     match value.trim().to_ascii_lowercase().as_str() {
         "basic" => FloatSupport::Basic,
@@ -1369,15 +1421,47 @@ fn block_role_to_string(role: BlockRole) -> String {
     }
 }
 
+fn parse_justification_strategy(value: &str) -> JustificationStrategy {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "full-inter-word" | "full" => JustificationStrategy::FullInterWord,
+        "align-left" | "left" => JustificationStrategy::AlignLeft,
+        "align-right" | "right" => JustificationStrategy::AlignRight,
+        "align-center" | "center" | "centre" => JustificationStrategy::AlignCenter,
+        _ => JustificationStrategy::AdaptiveInterWord,
+    }
+}
+
+fn justification_strategy_to_string(strategy: JustificationStrategy) -> &'static str {
+    match strategy {
+        JustificationStrategy::AdaptiveInterWord => "adaptive-inter-word",
+        JustificationStrategy::FullInterWord => "full-inter-word",
+        JustificationStrategy::AlignLeft => "align-left",
+        JustificationStrategy::AlignRight => "align-right",
+        JustificationStrategy::AlignCenter => "align-center",
+    }
+}
+
 fn justify_mode_to_payload(mode: JustifyMode) -> JustifyPayload {
     match mode {
         JustifyMode::None => JustifyPayload {
             mode: "none".to_string(),
             extra_px_total: None,
+            offset_px: None,
         },
         JustifyMode::InterWord { extra_px_total } => JustifyPayload {
             mode: "inter-word".to_string(),
             extra_px_total: Some(extra_px_total),
+            offset_px: None,
+        },
+        JustifyMode::AlignRight { offset_px } => JustifyPayload {
+            mode: "align-right".to_string(),
+            extra_px_total: None,
+            offset_px: Some(offset_px),
+        },
+        JustifyMode::AlignCenter { offset_px } => JustifyPayload {
+            mode: "align-center".to_string(),
+            extra_px_total: None,
+            offset_px: Some(offset_px),
         },
     }
 }
@@ -1812,6 +1896,12 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
               <option value="false">disabled</option>
             </select>
           </label>
+          <label><span class="label-title">Justify strategy</span>
+            <select id="quick-justify-mode"></select>
+          </label>
+          <label><span class="label-title">Cover page mode</span>
+            <select id="quick-cover-mode"></select>
+          </label>
         </div>
         <div class="control-row" style="margin-top:8px;">
           <button id="apply-btn" class="btn btn-primary">Apply (Re-render)</button>
@@ -1879,6 +1969,8 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       uiFontScale: document.getElementById('quick-ui-font-scale'),
       uiFontScaleValue: document.getElementById('quick-ui-font-scale-value'),
       justify: document.getElementById('quick-justify'),
+      justifyMode: document.getElementById('quick-justify-mode'),
+      coverMode: document.getElementById('quick-cover-mode'),
       apply: document.getElementById('apply-btn'),
       reset: document.getElementById('reset-btn'),
       configJson: document.getElementById('config-json'),
@@ -1974,6 +2066,8 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       const cfg = state.payload.config || {};
       rebuildChapterSelect(cfg.chapter);
       rebuildFontFamilySelect(cfg.ui_font_family);
+      rebuildJustifyStrategySelect(cfg.justify_strategy);
+      rebuildCoverModeSelect(cfg.object_cover_page_mode);
       updateQuickControls(cfg);
       updateConfigEditor(cfg);
       renderToc();
@@ -2024,12 +2118,50 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       el.uiFontFamily.value = selectedFamily && families.has(selectedFamily) ? selectedFamily : 'auto';
     }
 
+    function rebuildJustifyStrategySelect(selectedStrategy) {
+      const options = (state.payload.option_lists && state.payload.option_lists.justification_strategy) || [
+        'adaptive-inter-word',
+        'full-inter-word',
+        'align-left',
+        'align-right',
+        'align-center',
+      ];
+      el.justifyMode.innerHTML = '';
+      for (const value of options) {
+        const option = document.createElement('option');
+        option.value = String(value);
+        option.textContent = String(value);
+        el.justifyMode.appendChild(option);
+      }
+      const fallback = 'adaptive-inter-word';
+      el.justifyMode.value = options.includes(selectedStrategy) ? selectedStrategy : fallback;
+    }
+
+    function rebuildCoverModeSelect(selectedMode) {
+      const options = (state.payload.option_lists && state.payload.option_lists.cover_page_mode) || [
+        'contain',
+        'full-bleed',
+        'respect-css',
+      ];
+      el.coverMode.innerHTML = '';
+      for (const value of options) {
+        const option = document.createElement('option');
+        option.value = String(value);
+        option.textContent = String(value);
+        el.coverMode.appendChild(option);
+      }
+      const fallback = 'contain';
+      el.coverMode.value = options.includes(selectedMode) ? selectedMode : fallback;
+    }
+
     function updateQuickControls(cfg) {
       el.width.value = cfg.display_width;
       el.height.value = cfg.display_height;
       el.baseFont.value = cfg.prep_base_font_size_px;
       el.textScale.value = cfg.prep_text_scale;
       el.justify.value = String(Boolean(cfg.justify_enabled));
+      el.justifyMode.value = cfg.justify_strategy || 'adaptive-inter-word';
+      el.coverMode.value = cfg.object_cover_page_mode || 'contain';
       el.uiFontScale.value = cfg.ui_font_scale;
       updateUiFontScaleValue(cfg.ui_font_scale);
       if (Number.isInteger(cfg.chapter)) {
@@ -2065,6 +2197,8 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       cfg.prep_base_font_size_px = Number(el.baseFont.value || cfg.prep_base_font_size_px || 22);
       cfg.prep_text_scale = Number(el.textScale.value || cfg.prep_text_scale || 1);
       cfg.justify_enabled = el.justify.value === 'true';
+      cfg.justify_strategy = String(el.justifyMode.value || cfg.justify_strategy || 'adaptive-inter-word');
+      cfg.object_cover_page_mode = String(el.coverMode.value || cfg.object_cover_page_mode || 'contain');
       cfg.ui_font_scale = Number(el.uiFontScale.value || cfg.ui_font_scale || 1);
       cfg.ui_font_family = String(el.uiFontFamily.value || cfg.ui_font_family || 'auto');
       cfg.chapter = el.chapter.value === 'all' ? null : Number(el.chapter.value);
@@ -2379,15 +2513,24 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       ctx.font = `${italic} ${weight} ${size}px ${familySpec}`;
 
       const text = String(cmd.text || '');
-      const justify = style.justify || { mode: 'none', extra_px_total: null };
+      const justify = style.justify || { mode: 'none', extra_px_total: null, offset_px: null };
       const applyJustify = Boolean(cfg.justify_enabled) && justify.mode === 'inter-word' && Number.isFinite(justify.extra_px_total);
-      const x = Number(cmd.x || 0);
+      let x = Number(cmd.x || 0);
       const y = Number(cmd.baseline_y || 0);
       const contentRight = el.canvas.width - Number(cfg.margin_right || 0);
       const availableWidth = Math.max(0, contentRight - x);
       const chars = Array.from(text);
       const measuredBaseWidth = ctx.measureText(text).width + (Math.max(0, chars.length - 1) * letterSpacing);
       const spaces = chars.filter((ch) => ch === ' ').length;
+
+      if (Boolean(cfg.justify_enabled) && (justify.mode === 'align-right' || justify.mode === 'align-center')) {
+        if (Number.isFinite(justify.offset_px)) {
+          x += Math.max(0, Number(justify.offset_px));
+        } else {
+          const slack = Math.max(0, availableWidth - measuredBaseWidth);
+          x += justify.mode === 'align-center' ? slack / 2 : slack;
+        }
+      }
 
       if (!applyJustify && letterSpacing <= 0.01) {
         ctx.fillText(text, x, y);
@@ -2398,9 +2541,7 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       if (applyJustify) {
         if (spaces > 0) {
           const requestedExtraTotal = Math.max(0, Number(justify.extra_px_total || 0) * scale);
-          const maxExtraTotal = Math.max(0, availableWidth - measuredBaseWidth);
-          const appliedExtraTotal = Math.min(requestedExtraTotal, maxExtraTotal);
-          extraSpace = appliedExtraTotal / spaces;
+          extraSpace = requestedExtraTotal / spaces;
         }
       }
 
@@ -2721,6 +2862,8 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         display_width: 900,
         display_height: 1200,
         justify_enabled: true,
+        justify_strategy: "adaptive-inter-word".to_string(),
+        cover_page_mode: "contain".to_string(),
         prep_base_font_size_px: 22.0,
         prep_text_scale: 1.0,
         line_gap_px: 4,
@@ -2731,6 +2874,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         margin_bottom: 30,
         justify_min_words: 6,
         justify_min_fill_ratio: 0.78,
+        justify_max_space_stretch_ratio: 0.45,
         widow_orphan_enabled: true,
         widow_orphan_min_lines: 2,
         hanging_punctuation_enabled: true,
@@ -2819,6 +2963,20 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--no-justify" => {
                 cfg.justify_enabled = false;
                 i += 1;
+            }
+            "--justify-mode" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--justify-mode requires a value".to_string())?;
+                cfg.justify_strategy = v.clone();
+                i += 2;
+            }
+            "--cover-page-mode" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--cover-page-mode requires a value".to_string())?;
+                cfg.cover_page_mode = v.clone();
+                i += 2;
             }
             "--font-size" => {
                 let v = args
@@ -2910,6 +3068,15 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                     .map_err(|_| format!("invalid --justify-min-fill value '{}'", v))?;
                 i += 2;
             }
+            "--justify-max-space-stretch" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--justify-max-space-stretch requires a value".to_string())?;
+                cfg.justify_max_space_stretch_ratio = v
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid --justify-max-space-stretch value '{}'", v))?;
+                i += 2;
+            }
             "--no-widow-orphan" => {
                 cfg.widow_orphan_enabled = false;
                 i += 1;
@@ -2961,6 +3128,14 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     if !(0.0..=1.0).contains(&cfg.justify_min_fill_ratio) {
         return Err("--justify-min-fill must be between 0.0 and 1.0".to_string());
     }
+    if cfg.justify_max_space_stretch_ratio < 0.0 {
+        return Err("--justify-max-space-stretch must be >= 0.0".to_string());
+    }
+    cfg.justify_strategy =
+        justification_strategy_to_string(parse_justification_strategy(&cfg.justify_strategy))
+            .to_string();
+    cfg.cover_page_mode =
+        cover_page_mode_to_string(parse_cover_page_mode(&cfg.cover_page_mode)).to_string();
 
     Ok(cfg)
 }
@@ -2988,6 +3163,8 @@ OPTIONS:
   --width <px>                initial viewport width (default: 900)
   --height <px>               initial viewport height (default: 1200)
   --justify / --no-justify    initial justification state (default: on)
+  --justify-mode <mode>       adaptive-inter-word|full-inter-word|align-left|align-right|align-center
+  --cover-page-mode <mode>    contain|full-bleed|respect-css
   --font-size <px>            initial base font size (default: 22)
   --text-scale <x>            initial text scale (default: 1.0)
   --line-gap <px>             initial line gap (default: 4)
@@ -2998,6 +3175,7 @@ OPTIONS:
   --margin-bottom <px>        initial bottom margin (default: 30)
   --justify-min-words <n>     initial min words for justify (default: 6)
   --justify-min-fill <r>      initial min fill ratio for justify (default: 0.78)
+  --justify-max-space-stretch <r> max adaptive stretch ratio per space (default: 0.45)
   --no-widow-orphan           disable widow/orphan control initially
   --widow-orphan-min-lines <n> initial widow/orphan min lines (default: 2)
   --no-hanging-punctuation    disable hanging punctuation initially
@@ -3048,6 +3226,9 @@ mod tests {
         let cfg = RenderUiConfig {
             justify_min_words: 0,
             justify_min_fill_ratio: 9.0,
+            justify_max_space_stretch_ratio: 99.0,
+            justify_strategy: "bogus".to_string(),
+            object_cover_page_mode: "weird-mode".to_string(),
             ui_font_scale: 0.01,
             style_max_selectors: 0,
             memory_max_pages_in_memory: 0,
@@ -3057,6 +3238,9 @@ mod tests {
 
         assert_eq!(cfg.justify_min_words, 1);
         assert_eq!(cfg.justify_min_fill_ratio, 1.0);
+        assert_eq!(cfg.justify_max_space_stretch_ratio, 8.0);
+        assert_eq!(cfg.justify_strategy, "adaptive-inter-word");
+        assert_eq!(cfg.object_cover_page_mode, "contain");
         assert_eq!(cfg.ui_font_scale, 0.25);
         assert_eq!(cfg.style_max_selectors, 1);
         assert_eq!(cfg.memory_max_pages_in_memory, 1);
@@ -3070,6 +3254,7 @@ mod tests {
             justify_enabled: false,
             prep_text_scale: 1.2,
             ui_font_scale: 1.4,
+            object_cover_page_mode: "full-bleed".to_string(),
             style_max_selectors: 123,
             style_max_css_bytes: 222_222,
             style_max_nesting: 9,
@@ -3089,6 +3274,10 @@ mod tests {
         assert_eq!(opts.layout.display_height, 999);
         assert!(!opts.layout.typography.justification.enabled);
         assert!((opts.prep.layout_hints.text_scale - 1.68).abs() < 0.0001);
+        assert_eq!(
+            opts.layout.object_layout.cover_page_mode,
+            CoverPageMode::FullBleed
+        );
         assert_eq!(opts.prep.style.limits.max_selectors, 123);
         assert_eq!(opts.prep.style.limits.max_css_bytes, 222_222);
         assert_eq!(opts.prep.style.limits.max_nesting, 9);
@@ -3117,6 +3306,9 @@ mod tests {
             "line_gap_px",
             "paragraph_gap_px",
             "justify_enabled",
+            "justify_strategy",
+            "justify_max_space_stretch_ratio",
+            "object_cover_page_mode",
             "prep_base_font_size_px",
             "prep_text_scale",
             "ui_font_scale",
@@ -3214,7 +3406,14 @@ mod tests {
                 if text.trim().is_empty() {
                     continue;
                 }
-                let right = *x as f32 + payload_text_right_px(text, style);
+                let offset = if style.justify.mode == "align-right"
+                    || style.justify.mode == "align-center"
+                {
+                    style.justify.offset_px.unwrap_or(0).max(0) as f32
+                } else {
+                    0.0
+                };
+                let right = *x as f32 + offset + payload_text_right_px(text, style);
                 assert!(
                     right <= content_right + 2.0,
                     "text likely clipped: '{}' right={} content_right={}",

@@ -1363,6 +1363,8 @@ impl From<PersistedBlockRole> for BlockRole {
 enum PersistedJustifyMode {
     None,
     InterWord { extra_px_total: i32 },
+    AlignRight { offset_px: i32 },
+    AlignCenter { offset_px: i32 },
 }
 
 impl From<JustifyMode> for PersistedJustifyMode {
@@ -1370,6 +1372,8 @@ impl From<JustifyMode> for PersistedJustifyMode {
         match value {
             JustifyMode::None => Self::None,
             JustifyMode::InterWord { extra_px_total } => Self::InterWord { extra_px_total },
+            JustifyMode::AlignRight { offset_px } => Self::AlignRight { offset_px },
+            JustifyMode::AlignCenter { offset_px } => Self::AlignCenter { offset_px },
         }
     }
 }
@@ -1381,6 +1385,8 @@ impl From<PersistedJustifyMode> for JustifyMode {
             PersistedJustifyMode::InterWord { extra_px_total } => {
                 Self::InterWord { extra_px_total }
             }
+            PersistedJustifyMode::AlignRight { offset_px } => Self::AlignRight { offset_px },
+            PersistedJustifyMode::AlignCenter { offset_px } => Self::AlignCenter { offset_px },
         }
     }
 }

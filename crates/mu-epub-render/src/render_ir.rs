@@ -272,6 +272,10 @@ pub enum JustifyMode {
     None,
     /// Inter-word with total extra px to distribute.
     InterWord { extra_px_total: i32 },
+    /// Right alignment with horizontal offset.
+    AlignRight { offset_px: i32 },
+    /// Center alignment with horizontal offset.
+    AlignCenter { offset_px: i32 },
 }
 
 /// Text draw command.
@@ -491,22 +495,46 @@ impl Default for WidowOrphanControl {
 /// Justification policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JustificationConfig {
-    /// Enable inter-word justification.
+    /// Enable justification/alignment policy.
     pub enabled: bool,
+    /// Justification strategy for body/paragraph lines.
+    pub strategy: JustificationStrategy,
     /// Minimum words required for justification.
     pub min_words: usize,
     /// Minimum fill ratio required for justification.
     pub min_fill_ratio: f32,
+    /// Maximum stretch per space as a multiplier of measured space width.
+    ///
+    /// Used by adaptive inter-word mode to avoid visually noisy spacing.
+    /// Full inter-word mode ignores this cap.
+    pub max_space_stretch_ratio: f32,
 }
 
 impl Default for JustificationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            strategy: JustificationStrategy::AdaptiveInterWord,
             min_words: 7,
             min_fill_ratio: 0.75,
+            max_space_stretch_ratio: 0.45,
         }
     }
+}
+
+/// Justification/alignment strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JustificationStrategy {
+    /// Adaptive inter-word justification with quality thresholds.
+    AdaptiveInterWord,
+    /// Full inter-word justification that uses all line slack.
+    FullInterWord,
+    /// Left alignment (no inter-word expansion).
+    AlignLeft,
+    /// Right alignment.
+    AlignRight,
+    /// Center alignment.
+    AlignCenter,
 }
 
 /// Hanging punctuation policy.
@@ -527,6 +555,8 @@ impl Default for HangingPunctuationConfig {
 pub struct ObjectLayoutConfig {
     /// Max inline-image height ratio relative to content height.
     pub max_inline_image_height_ratio: f32,
+    /// Policy for cover-like first-page images.
+    pub cover_page_mode: CoverPageMode,
     /// Enable/disable float placement.
     pub float_support: FloatSupport,
     /// SVG placement mode.
@@ -539,11 +569,23 @@ impl Default for ObjectLayoutConfig {
     fn default() -> Self {
         Self {
             max_inline_image_height_ratio: 0.5,
+            cover_page_mode: CoverPageMode::Contain,
             float_support: FloatSupport::None,
             svg_mode: SvgMode::RasterizeFallback,
             alt_text_fallback: true,
         }
     }
+}
+
+/// Cover-image placement mode for cover-like first-page image resources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverPageMode {
+    /// Fit image within content area, preserve aspect ratio, no cropping.
+    Contain,
+    /// Fill viewport while preserving aspect ratio; crop overflow by viewport clip.
+    FullBleed,
+    /// Respect normal CSS/object layout behavior (no special cover handling).
+    RespectCss,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

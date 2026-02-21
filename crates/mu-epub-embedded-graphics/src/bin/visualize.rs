@@ -7,7 +7,7 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::Pixel;
 use mu_epub::EpubBook;
 use mu_epub_embedded_graphics::{with_embedded_text_measurer, EgRenderer};
-use mu_epub_render::{RenderConfig, RenderEngine, RenderEngineOptions};
+use mu_epub_render::{CoverPageMode, RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DEFAULT_EPUB_PATH: &str = "tests/fixtures/bench/pg84-frankenstein.epub";
 
@@ -30,6 +30,7 @@ struct Args {
     margin_bottom: i32,
     justify_min_words: usize,
     justify_min_fill_ratio: f32,
+    cover_page_mode: CoverPageMode,
     widow_orphan: bool,
     widow_orphan_min_lines: u8,
     hanging_punctuation: bool,
@@ -75,6 +76,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     opts.layout.typography.justification.enabled = cfg.justify;
     opts.layout.typography.justification.min_words = cfg.justify_min_words;
     opts.layout.typography.justification.min_fill_ratio = cfg.justify_min_fill_ratio;
+    opts.layout.object_layout.cover_page_mode = cfg.cover_page_mode;
     opts.layout.typography.widow_orphan_control.enabled = cfg.widow_orphan;
     opts.layout.typography.widow_orphan_control.min_lines = cfg.widow_orphan_min_lines.max(1);
     opts.layout.typography.hanging_punctuation.enabled = cfg.hanging_punctuation;
@@ -203,6 +205,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         margin_bottom: 24,
         justify_min_words: 6,
         justify_min_fill_ratio: 0.78,
+        cover_page_mode: CoverPageMode::Contain,
         widow_orphan: true,
         widow_orphan_min_lines: 2,
         hanging_punctuation: true,
@@ -348,6 +351,14 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
                     .map_err(|_| format!("invalid --justify-min-fill value '{}'", v))?;
                 i += 2;
             }
+            "--cover-page-mode" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--cover-page-mode requires a value".to_string())?;
+                cfg.cover_page_mode = parse_cover_page_mode(v)
+                    .ok_or_else(|| format!("invalid --cover-page-mode value '{}'", v))?;
+                i += 2;
+            }
             "--no-widow-orphan" => {
                 cfg.widow_orphan = false;
                 i += 1;
@@ -385,6 +396,15 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     Ok(cfg)
 }
 
+fn parse_cover_page_mode(value: &str) -> Option<CoverPageMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "contain" => Some(CoverPageMode::Contain),
+        "full-bleed" | "full_bleed" | "fullbleed" => Some(CoverPageMode::FullBleed),
+        "respect-css" | "respect_css" | "respectcss" | "css" => Some(CoverPageMode::RespectCss),
+        _ => None,
+    }
+}
+
 fn help_text() -> &'static str {
     r#"visualize - render EPUB pages to PGM snapshots
 
@@ -408,6 +428,7 @@ OPTIONS:
   --margin-bottom <px> bottom margin (default: 24)
   --justify-min-words <n> minimum words for justification (default: 6)
   --justify-min-fill <r> minimum fill ratio for justification (default: 0.78)
+  --cover-page-mode <mode> contain|full-bleed|respect-css (default: contain)
   --no-widow-orphan   disable widow/orphan control
   --widow-orphan-min-lines <n> min lines for widow/orphan (default: 2)
   --no-hanging-punctuation disable hanging punctuation

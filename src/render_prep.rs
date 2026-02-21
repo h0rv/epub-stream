@@ -10,6 +10,7 @@ use core::cmp::min;
 use core::fmt;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::book::EpubBook;
 use crate::css::{
@@ -1230,6 +1231,7 @@ pub struct RenderPrep {
     opts: RenderPrepOptions,
     styler: Styler,
     font_resolver: FontResolver,
+    image_dimension_cache: BTreeMap<String, Option<(u16, u16)>>,
 }
 
 /// Structured trace context for a streamed chapter item.
@@ -1273,6 +1275,7 @@ impl RenderPrep {
             opts,
             styler,
             font_resolver,
+            image_dimension_cache: BTreeMap::new(),
         }
     }
 
@@ -1416,6 +1419,43 @@ impl RenderPrep {
         Ok(())
     }
 
+    fn collect_intrinsic_image_dimensions<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        book: &mut EpubBook<R>,
+        chapter_href: &str,
+        html: &[u8],
+    ) -> BTreeMap<String, (u16, u16)> {
+        let mut out = BTreeMap::new();
+        let sources = collect_image_sources_from_html(chapter_href, html);
+        for src in sources {
+            if let Some((w, h)) = self.resolve_intrinsic_image_dimensions(book, &src) {
+                out.insert(resource_path_without_fragment(&src).to_string(), (w, h));
+            }
+        }
+        out
+    }
+
+    fn resolve_intrinsic_image_dimensions<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        book: &mut EpubBook<R>,
+        src: &str,
+    ) -> Option<(u16, u16)> {
+        let key = resource_path_without_fragment(src);
+        if let Some(cached) = self.image_dimension_cache.get(key) {
+            return *cached;
+        }
+
+        let mut bytes = Vec::with_capacity(0);
+        let cap = self.opts.memory.max_entry_bytes.max(16 * 1024);
+        let dimensions = match book.read_resource_into_with_hard_cap(key, &mut bytes, cap) {
+            Ok(_) => infer_image_dimensions_from_bytes(&bytes),
+            Err(_) => None,
+        };
+        self.image_dimension_cache
+            .insert(key.to_string(), dimensions);
+        dimensions
+    }
+
     /// Register fonts from any external source with a byte loader callback.
     pub fn with_registered_fonts<I, F>(
         mut self,
@@ -1463,10 +1503,13 @@ impl RenderPrep {
     ) -> Result<(), RenderPrepError> {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
+        let image_dimensions =
+            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), &html);
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(&html, |item| {
-            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
+            let item =
+                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1514,7 +1557,7 @@ impl RenderPrep {
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
-            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, None, item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1568,7 +1611,7 @@ impl RenderPrep {
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
-            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
+            let item = resolve_item_assets_for_chapter(chapter_href_ref, None, item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1586,10 +1629,13 @@ impl RenderPrep {
     ) -> Result<(), RenderPrepError> {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
+        let image_dimensions =
+            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), &html);
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(&html, |item| {
-            let item = resolve_item_assets_for_chapter(chapter_href_ref, item);
+            let item =
+                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
             let (item, trace) = resolve_item_with_font(font_resolver, item);
             on_item(item, trace);
         })
@@ -1922,10 +1968,33 @@ fn resolve_item_with_font(
 
 fn resolve_item_assets_for_chapter(
     chapter_href: &str,
+    image_dimensions: Option<&BTreeMap<String, (u16, u16)>>,
     mut item: StyledEventOrRun,
 ) -> StyledEventOrRun {
     if let StyledEventOrRun::Image(image) = &mut item {
         image.src = resolve_relative(chapter_href, &image.src);
+        if let Some(dimensions) = image_dimensions {
+            let key = resource_path_without_fragment(&image.src);
+            if let Some((intrinsic_w, intrinsic_h)) = dimensions.get(key).copied() {
+                match (image.width_px, image.height_px) {
+                    (None, None) => {
+                        image.width_px = Some(intrinsic_w);
+                        image.height_px = Some(intrinsic_h);
+                    }
+                    (Some(width), None) if intrinsic_w > 0 => {
+                        let ratio = intrinsic_h as f32 / intrinsic_w as f32;
+                        let resolved = ((width as f32) * ratio).round();
+                        image.height_px = bounded_nonzero_u16_f32(resolved);
+                    }
+                    (None, Some(height)) if intrinsic_h > 0 => {
+                        let ratio = intrinsic_w as f32 / intrinsic_h as f32;
+                        let resolved = ((height as f32) * ratio).round();
+                        image.width_px = bounded_nonzero_u16_f32(resolved);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     item
 }
@@ -1952,6 +2021,332 @@ pub(crate) fn resolve_relative(base_path: &str, rel: &str) -> String {
     } else {
         normalize_path(&format!("{}/{}", base_dir, rel))
     }
+}
+
+fn resource_path_without_fragment(path: &str) -> &str {
+    path.split('#').next().unwrap_or(path)
+}
+
+fn bounded_nonzero_u16(value: u32) -> Option<u16> {
+    if value == 0 || value > u16::MAX as u32 {
+        None
+    } else {
+        Some(value as u16)
+    }
+}
+
+fn bounded_nonzero_u16_f32(value: f32) -> Option<u16> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded <= 0.0 || rounded > u16::MAX as f32 {
+        None
+    } else {
+        Some(rounded as u16)
+    }
+}
+
+fn collect_image_sources_from_html(chapter_href: &str, html: &[u8]) -> Vec<String> {
+    let mut reader = Reader::from_reader(html);
+    let mut buf = Vec::with_capacity(0);
+    let mut out = BTreeSet::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let Ok(tag) = decode_tag_name(&reader, e.name().as_ref()) else {
+                    buf.clear();
+                    continue;
+                };
+                if !matches!(tag.as_str(), "img" | "image") {
+                    buf.clear();
+                    continue;
+                }
+                if let Some(src) = image_src_from_start(&reader, &tag, &e) {
+                    out.insert(resolve_relative(chapter_href, &src));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        buf.clear();
+    }
+
+    out.into_iter().collect()
+}
+
+fn image_src_from_start(
+    reader: &Reader<&[u8]>,
+    tag: &str,
+    start: &quick_xml::events::BytesStart<'_>,
+) -> Option<String> {
+    for attr in start.attributes().flatten() {
+        let key = match reader.decoder().decode(attr.key.as_ref()) {
+            Ok(v) => v.to_ascii_lowercase(),
+            Err(_) => continue,
+        };
+        if key == "src"
+            || ((key == "href" || key == "xlink:href") && matches!(tag, "img" | "image"))
+        {
+            let value = match reader.decoder().decode(&attr.value) {
+                Ok(v) => v.to_string(),
+                Err(_) => continue,
+            };
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn infer_image_dimensions_from_bytes(bytes: &[u8]) -> Option<(u16, u16)> {
+    infer_png_dimensions(bytes)
+        .or_else(|| infer_jpeg_dimensions(bytes))
+        .or_else(|| infer_gif_dimensions(bytes))
+        .or_else(|| infer_webp_dimensions(bytes))
+        .or_else(|| infer_svg_dimensions(bytes))
+}
+
+fn infer_png_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    Some((bounded_nonzero_u16(width)?, bounded_nonzero_u16(height)?))
+}
+
+fn infer_gif_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    if bytes.len() < 10 {
+        return None;
+    }
+    if &bytes[..6] != b"GIF87a" && &bytes[..6] != b"GIF89a" {
+        return None;
+    }
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn infer_jpeg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 1 < bytes.len() {
+        while i < bytes.len() && bytes[i] != 0xFF {
+            i += 1;
+        }
+        while i < bytes.len() && bytes[i] == 0xFF {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let marker = bytes[i];
+        i += 1;
+
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        let seg_len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if seg_len < 2 {
+            break;
+        }
+        let payload_start = i + 2;
+        let payload_end = i.saturating_add(seg_len);
+        if payload_end > bytes.len() {
+            break;
+        }
+        if is_jpeg_sof_marker(marker) && seg_len >= 7 {
+            if payload_start + 4 >= bytes.len() {
+                break;
+            }
+            let height =
+                u16::from_be_bytes([bytes[payload_start + 1], bytes[payload_start + 2]]) as u32;
+            let width =
+                u16::from_be_bytes([bytes[payload_start + 3], bytes[payload_start + 4]]) as u32;
+            return Some((bounded_nonzero_u16(width)?, bounded_nonzero_u16(height)?));
+        }
+        i = payload_end;
+    }
+    None
+}
+
+fn is_jpeg_sof_marker(marker: u8) -> bool {
+    matches!(
+        marker,
+        0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+    )
+}
+
+fn infer_webp_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    if bytes.len() < 16 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let mut offset = 12usize;
+    while offset + 8 <= bytes.len() {
+        let chunk_tag = &bytes[offset..offset + 4];
+        let chunk_len = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        let payload_start = offset + 8;
+        let payload_end = payload_start.saturating_add(chunk_len);
+        if payload_end > bytes.len() {
+            break;
+        }
+
+        match chunk_tag {
+            b"VP8X" if chunk_len >= 10 => {
+                let w_minus_1 = (bytes[payload_start + 4] as u32)
+                    | ((bytes[payload_start + 5] as u32) << 8)
+                    | ((bytes[payload_start + 6] as u32) << 16);
+                let h_minus_1 = (bytes[payload_start + 7] as u32)
+                    | ((bytes[payload_start + 8] as u32) << 8)
+                    | ((bytes[payload_start + 9] as u32) << 16);
+                return Some((
+                    bounded_nonzero_u16(w_minus_1 + 1)?,
+                    bounded_nonzero_u16(h_minus_1 + 1)?,
+                ));
+            }
+            b"VP8L" if chunk_len >= 5 && bytes[payload_start] == 0x2F => {
+                let bits = u32::from_le_bytes([
+                    bytes[payload_start + 1],
+                    bytes[payload_start + 2],
+                    bytes[payload_start + 3],
+                    bytes[payload_start + 4],
+                ]);
+                let width = (bits & 0x3FFF) + 1;
+                let height = ((bits >> 14) & 0x3FFF) + 1;
+                return Some((bounded_nonzero_u16(width)?, bounded_nonzero_u16(height)?));
+            }
+            b"VP8 " if chunk_len >= 10 => {
+                if bytes[payload_start + 3..payload_start + 6] != [0x9D, 0x01, 0x2A] {
+                    return None;
+                }
+                let width =
+                    u16::from_le_bytes([bytes[payload_start + 6], bytes[payload_start + 7]])
+                        & 0x3FFF;
+                let height =
+                    u16::from_le_bytes([bytes[payload_start + 8], bytes[payload_start + 9]])
+                        & 0x3FFF;
+                if width == 0 || height == 0 {
+                    return None;
+                }
+                return Some((width, height));
+            }
+            _ => {}
+        }
+
+        offset = payload_end + (chunk_len & 1);
+    }
+    None
+}
+
+fn infer_svg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+    let mut reader = Reader::from_reader(bytes);
+    let mut buf = Vec::with_capacity(0);
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let tag = decode_tag_name(&reader, e.name().as_ref()).ok()?;
+                if tag != "svg" {
+                    buf.clear();
+                    continue;
+                }
+                let mut width = None;
+                let mut height = None;
+                let mut view_box = None;
+                for attr in e.attributes().flatten() {
+                    let key = match reader.decoder().decode(attr.key.as_ref()) {
+                        Ok(v) => v.to_ascii_lowercase(),
+                        Err(_) => continue,
+                    };
+                    let value = match reader.decoder().decode(&attr.value) {
+                        Ok(v) => v.to_string(),
+                        Err(_) => continue,
+                    };
+                    match key.as_str() {
+                        "width" => width = parse_svg_length_px(&value),
+                        "height" => height = parse_svg_length_px(&value),
+                        "viewbox" => view_box = parse_svg_view_box(&value),
+                        _ => {}
+                    }
+                }
+                if let (Some(w), Some(h)) = (width, height) {
+                    return Some((bounded_nonzero_u16_f32(w)?, bounded_nonzero_u16_f32(h)?));
+                }
+                if let Some((w, h)) = view_box {
+                    return Some((bounded_nonzero_u16_f32(w)?, bounded_nonzero_u16_f32(h)?));
+                }
+                return None;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        buf.clear();
+    }
+    None
+}
+
+fn parse_svg_length_px(raw: &str) -> Option<f32> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.ends_with('%') {
+        return None;
+    }
+    let mut boundary = 0usize;
+    for (idx, ch) in trimmed.char_indices() {
+        if ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E') {
+            boundary = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if boundary == 0 {
+        return None;
+    }
+    let value = trimmed[..boundary].trim().parse::<f32>().ok()?;
+    let unit = trimmed[boundary..].trim().to_ascii_lowercase();
+    let factor = match unit.as_str() {
+        "" | "px" => 1.0,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        _ => return None,
+    };
+    Some(value * factor)
+}
+
+fn parse_svg_view_box(raw: &str) -> Option<(f32, f32)> {
+    let mut nums = raw
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .filter(|part| !part.trim().is_empty())
+        .filter_map(|part| part.trim().parse::<f32>().ok());
+    let _min_x = nums.next()?;
+    let _min_y = nums.next()?;
+    let width = nums.next()?;
+    let height = nums.next()?;
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some((width, height))
 }
 
 fn normalize_path(path: &str) -> String {
@@ -2258,6 +2653,77 @@ mod tests {
             })
             .expect("style_chapter_with should succeed");
         assert!(seen > 0);
+    }
+
+    #[test]
+    fn infer_image_dimensions_parses_common_formats() {
+        let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&960u32.to_be_bytes());
+        png.extend_from_slice(&[8, 2, 0, 0, 0]);
+        assert_eq!(infer_image_dimensions_from_bytes(&png), Some((640, 960)));
+
+        let gif = [
+            b'G', b'I', b'F', b'8', b'9', b'a', 0x20, 0x03, 0x58, 0x02, 0, 0,
+        ];
+        assert_eq!(infer_image_dimensions_from_bytes(&gif), Some((800, 600)));
+
+        let jpeg = [
+            0xFF, 0xD8, // SOI
+            0xFF, 0xE0, 0x00, 0x10, // APP0 len=16
+            b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, // APP0 payload
+            0xFF, 0xC0, 0x00, 0x11, // SOF0 len=17
+            0x08, // precision
+            0x02, 0x58, // height 600
+            0x03, 0x20, // width 800
+            0x03, // components
+            0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
+        ];
+        assert_eq!(infer_image_dimensions_from_bytes(&jpeg), Some((800, 600)));
+
+        let mut webp = Vec::from(&b"RIFF"[..]);
+        webp.extend_from_slice(&0u32.to_le_bytes());
+        webp.extend_from_slice(b"WEBPVP8X");
+        webp.extend_from_slice(&10u32.to_le_bytes());
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        let w_minus_1 = 799u32;
+        webp.extend_from_slice(&[
+            (w_minus_1 & 0xFF) as u8,
+            ((w_minus_1 >> 8) & 0xFF) as u8,
+            ((w_minus_1 >> 16) & 0xFF) as u8,
+        ]);
+        let h_minus_1 = 599u32;
+        webp.extend_from_slice(&[
+            (h_minus_1 & 0xFF) as u8,
+            ((h_minus_1 >> 8) & 0xFF) as u8,
+            ((h_minus_1 >> 16) & 0xFF) as u8,
+        ]);
+        assert_eq!(infer_image_dimensions_from_bytes(&webp), Some((800, 600)));
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 480"></svg>"#;
+        assert_eq!(infer_image_dimensions_from_bytes(svg), Some((320, 480)));
+    }
+
+    #[test]
+    fn resolve_item_assets_uses_intrinsic_dimensions_when_missing() {
+        let mut map = BTreeMap::new();
+        map.insert("images/cover.jpg".to_string(), (600u16, 900u16));
+        let item = StyledEventOrRun::Image(StyledImage {
+            src: "../images/cover.jpg".to_string(),
+            alt: String::new(),
+            width_px: None,
+            height_px: Some(300),
+            in_figure: false,
+        });
+        let resolved = resolve_item_assets_for_chapter("text/ch01.xhtml", Some(&map), item);
+        let StyledEventOrRun::Image(image) = resolved else {
+            panic!("expected image");
+        };
+        assert_eq!(image.src, "images/cover.jpg");
+        assert_eq!(image.width_px, Some(200));
+        assert_eq!(image.height_px, Some(300));
     }
 
     #[test]

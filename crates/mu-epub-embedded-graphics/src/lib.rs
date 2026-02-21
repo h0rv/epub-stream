@@ -1715,6 +1715,24 @@ where
                 .backend
                 .draw_text_run(display, selection.font_id, &cmd.text, origin)
                 .map(|_| ()),
+            JustifyMode::AlignRight { offset_px } => self
+                .backend
+                .draw_text_run(
+                    display,
+                    selection.font_id,
+                    &cmd.text,
+                    Point::new(cmd.x + offset_px.max(0), cmd.baseline_y),
+                )
+                .map(|_| ()),
+            JustifyMode::AlignCenter { offset_px } => self
+                .backend
+                .draw_text_run(
+                    display,
+                    selection.font_id,
+                    &cmd.text,
+                    Point::new(cmd.x + offset_px.max(0), cmd.baseline_y),
+                )
+                .map(|_| ()),
             JustifyMode::InterWord { extra_px_total } => {
                 let spaces = cmd.text.chars().filter(|c| *c == ' ').count() as i32;
                 if spaces <= 0 || extra_px_total <= 0 {
@@ -1723,12 +1741,8 @@ where
                     return Ok(());
                 }
 
-                // Guard against visually noisy justification when the layout
-                // asks for too much inter-word expansion for the active font.
-                let max_extra_per_space = (metrics.space_width / 2).max(1);
-                let capped_total = extra_px_total.min(max_extra_per_space * spaces);
-                let per_space = capped_total / spaces;
-                let mut remainder = capped_total % spaces;
+                let per_space = extra_px_total / spaces;
+                let mut remainder = extra_px_total % spaces;
                 let mut x = cmd.x;
                 let mut run_start = 0usize;
 

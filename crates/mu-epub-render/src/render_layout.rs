@@ -4,9 +4,9 @@ use mu_epub::{
 use std::sync::Arc;
 
 use crate::render_ir::{
-    DrawCommand, ImageObjectCommand, JustifyMode, ObjectLayoutConfig, PageChromeCommand,
-    PageChromeConfig, PageChromeKind, RenderIntent, RenderPage, ResolvedTextStyle, TextCommand,
-    TypographyConfig,
+    CoverPageMode, DrawCommand, ImageObjectCommand, JustificationStrategy, JustifyMode,
+    ObjectLayoutConfig, PageChromeCommand, PageChromeConfig, PageChromeKind, RenderIntent,
+    RenderPage, ResolvedTextStyle, TextCommand, TypographyConfig,
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
@@ -482,37 +482,101 @@ impl LayoutState {
         self.pending_keep_with_next_lines = lines.max(1);
     }
 
+    fn is_cover_page_candidate(&self, image: &StyledImage) -> bool {
+        if self.page_no != 1 || image.in_figure {
+            return false;
+        }
+        if !self.page.content_commands.is_empty()
+            || !self.page.chrome_commands.is_empty()
+            || !self.page.overlay_commands.is_empty()
+        {
+            return false;
+        }
+        let src_lower = image.src.to_ascii_lowercase();
+        let alt_lower = image.alt.to_ascii_lowercase();
+        if src_lower.contains("cover") || alt_lower.contains("cover") {
+            return true;
+        }
+        // Heuristic fallback: first render item on first page is often the cover,
+        // especially for books that use opaque hashed asset names.
+        self.cursor_y <= self.cfg.margin_top + 2
+    }
+
     fn place_inline_image_block(&mut self, image: StyledImage) {
         let content_w = self.cfg.content_width().max(8);
         let content_h = (self.cfg.content_bottom() - self.cfg.margin_top).max(16);
-        let max_h = ((content_h as f32) * self.cfg.object_layout.max_inline_image_height_ratio)
+        let default_max_h = ((content_h as f32)
+            * self.cfg.object_layout.max_inline_image_height_ratio)
             .round()
             .clamp(40.0, content_h as f32) as i32;
+        let cover_mode = if self.is_cover_page_candidate(&image) {
+            self.cfg.object_layout.cover_page_mode
+        } else {
+            CoverPageMode::RespectCss
+        };
+        let (intrinsic_w, intrinsic_h) = match (image.width_px, image.height_px) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
+            // Unknown intrinsic dimensions default to a portrait-friendly ratio.
+            _ => (720.0, 972.0),
+        };
 
-        let (mut image_w, mut image_h) = match (image.width_px, image.height_px) {
-            (Some(w), Some(h)) if w > 0 && h > 0 => {
-                let w = w as f32;
-                let h = h as f32;
-                let fit_w = content_w as f32 / w;
-                let fit_h = max_h as f32 / h;
-                let scale = fit_w.min(fit_h).min(1.0);
-                let out_w = (w * scale).round().max(24.0) as i32;
-                let out_h = (h * scale).round().max(18.0) as i32;
-                (out_w, out_h)
+        let (mut image_x, mut image_y, mut image_w, mut image_h, enable_caption) = match cover_mode
+        {
+            CoverPageMode::Contain => {
+                let box_w = content_w.max(1) as f32;
+                let box_h = content_h.max(1) as f32;
+                let scale = (box_w / intrinsic_w).min(box_h / intrinsic_h);
+                let out_w = (intrinsic_w * scale).round().max(24.0) as i32;
+                let out_h = (intrinsic_h * scale).round().max(18.0) as i32;
+                let out_x = self.cfg.margin_left + ((content_w - out_w) / 2);
+                let out_y = self.cfg.margin_top + ((content_h - out_h) / 2);
+                (out_x, out_y, out_w, out_h, false)
             }
-            _ => {
-                let out_w = ((content_w as f32) * 0.72)
-                    .round()
-                    .clamp(60.0, content_w as f32) as i32;
-                let out_h = ((out_w as f32) * 0.62).round().clamp(36.0, max_h as f32) as i32;
-                (out_w, out_h)
+            CoverPageMode::FullBleed => {
+                let view_w = self.cfg.display_width.max(1) as f32;
+                let view_h = self.cfg.display_height.max(1) as f32;
+                let scale = (view_w / intrinsic_w).max(view_h / intrinsic_h);
+                let out_w = (intrinsic_w * scale).round().max(24.0) as i32;
+                let out_h = (intrinsic_h * scale).round().max(18.0) as i32;
+                let out_x = (self.cfg.display_width - out_w) / 2;
+                let out_y = (self.cfg.display_height - out_h) / 2;
+                (out_x, out_y, out_w, out_h, false)
+            }
+            CoverPageMode::RespectCss => {
+                let max_h = default_max_h;
+                let (mut out_w, mut out_h) = match (image.width_px, image.height_px) {
+                    (Some(w), Some(h)) if w > 0 && h > 0 => {
+                        let w = w as f32;
+                        let h = h as f32;
+                        let fit_w = content_w as f32 / w;
+                        let fit_h = max_h as f32 / h;
+                        let scale = fit_w.min(fit_h).min(1.0);
+                        let out_w = (w * scale).round().max(24.0) as i32;
+                        let out_h = (h * scale).round().max(18.0) as i32;
+                        (out_w, out_h)
+                    }
+                    _ => {
+                        let out_w = ((content_w as f32) * 0.72)
+                            .round()
+                            .clamp(60.0, content_w as f32)
+                            as i32;
+                        let out_h =
+                            ((out_w as f32) * 1.35).round().clamp(36.0, max_h as f32) as i32;
+                        (out_w, out_h)
+                    }
+                };
+                out_w = out_w.min(content_w);
+                out_h = out_h.min(max_h).max(18);
+                let out_x = self.cfg.margin_left + ((content_w - out_w) / 2);
+                let out_y = self.cursor_y;
+                (out_x, out_y, out_w, out_h, true)
             }
         };
-        image_w = image_w.min(content_w);
-        image_h = image_h.min(max_h).max(18);
+        image_w = image_w.max(1);
+        image_h = image_h.max(1);
 
         let mut caption = String::with_capacity(0);
-        if self.cfg.object_layout.alt_text_fallback {
+        if enable_caption && self.cfg.object_layout.alt_text_fallback {
             let alt = image.alt.trim();
             if !alt.is_empty() {
                 caption = alt.to_string();
@@ -531,7 +595,7 @@ impl LayoutState {
         };
         let caption_line_h = line_height_px(&caption_style, &self.cfg);
         let caption_gap = if caption.is_empty() { 0 } else { 6 };
-        let reserve_caption_h = if image.in_figure && caption.is_empty() {
+        let reserve_caption_h = if enable_caption && image.in_figure && caption.is_empty() {
             caption_line_h + 4
         } else {
             0
@@ -545,17 +609,17 @@ impl LayoutState {
             }
             + reserve_caption_h;
 
-        if self.cursor_y + block_h > self.cfg.content_bottom() {
+        if enable_caption && self.cursor_y + block_h > self.cfg.content_bottom() {
             self.start_next_page();
+            image_y = self.cursor_y;
+            image_x = self.cfg.margin_left + ((content_w - image_w) / 2);
         }
-        let x = self.cfg.margin_left + ((content_w - image_w) / 2);
-        let y = self.cursor_y;
         self.page
             .push_content_command(DrawCommand::ImageObject(ImageObjectCommand {
                 src: image.src.clone(),
                 alt: image.alt.clone(),
-                x,
-                y,
+                x: image_x,
+                y: image_y,
                 width: image_w.max(1) as u32,
                 height: image_h.max(1) as u32,
             }));
@@ -569,9 +633,9 @@ impl LayoutState {
                 });
         }
         self.page.sync_commands();
-        self.cursor_y += image_h;
+        self.cursor_y = (image_y + image_h).max(self.cursor_y);
 
-        if !caption.is_empty() {
+        if enable_caption && !caption.is_empty() {
             self.cursor_y += caption_gap;
             let max_caption_w = (content_w - 8).max(1) as f32;
             let caption_text =
@@ -587,7 +651,9 @@ impl LayoutState {
             self.page.sync_commands();
             self.cursor_y += caption_line_h;
         }
-        self.cursor_y += self.cfg.paragraph_gap_px.max(4);
+        if enable_caption {
+            self.cursor_y += self.cfg.paragraph_gap_px.max(4);
+        }
     }
 
     fn measure_text(&self, text: &str, style: &ResolvedTextStyle) -> f32 {
@@ -650,7 +716,7 @@ impl LayoutState {
         if self.replay_direct_mode {
             return false;
         }
-        if !self.cfg.typography.justification.enabled {
+        if !uses_inter_word_justification(&self.cfg) {
             return false;
         }
         if !self.in_paragraph || self.line.is_some() {
@@ -930,14 +996,19 @@ impl LayoutState {
                     let ratio = (slack / available).clamp(0.0, 1.2);
                     (ratio * ratio * ratio * 2400.0).round() as i64
                 };
-                let min_fill = self
-                    .cfg
-                    .typography
-                    .justification
-                    .min_fill_ratio
-                    .max(self.cfg.justify_min_fill_ratio);
-                if !is_last && fill_ratio < min_fill {
-                    badness += ((min_fill - fill_ratio) * 8000.0).round() as i64;
+                if matches!(
+                    effective_justification_strategy(&self.cfg),
+                    JustificationStrategy::AdaptiveInterWord
+                ) {
+                    let min_fill = self
+                        .cfg
+                        .typography
+                        .justification
+                        .min_fill_ratio
+                        .max(self.cfg.justify_min_fill_ratio);
+                    if !is_last && fill_ratio < min_fill {
+                        badness += ((min_fill - fill_ratio) * 8000.0).round() as i64;
+                    }
                 }
                 if !is_last && words_in_line == 1 {
                     badness += 3000;
@@ -1165,8 +1236,10 @@ impl LayoutState {
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
             - line_fit_guard_px(&line.style)) as i32;
-        let quality_remainder = if self.cfg.typography.justification.enabled
-            && !is_last_in_block
+        let quality_remainder = if matches!(
+            effective_justification_strategy(&self.cfg),
+            JustificationStrategy::AdaptiveInterWord
+        ) && !is_last_in_block
             && !hard_break
             && !self.buffered_flush_mode
             && !cfg!(target_os = "espidf")
@@ -1214,43 +1287,19 @@ impl LayoutState {
         } else {
             0.0
         };
-
-        if self.cfg.typography.justification.enabled
-            && matches!(line.style.role, BlockRole::Body | BlockRole::Paragraph)
-            && !is_last_in_block
-            && !hard_break
-            && words
-                >= self
-                    .cfg
-                    .typography
-                    .justification
-                    .min_words
-                    .max(self.cfg.justify_min_words)
-            && spaces > 0
-            && fill_ratio
-                >= self
-                    .cfg
-                    .typography
-                    .justification
-                    .min_fill_ratio
-                    .max(self.cfg.justify_min_fill_ratio)
-        {
-            let extra = (available_width as f32 - line.width_px).max(0.0) as i32;
-            let space_w = self.measure_text(" ", &line.style).max(1.0);
-            let max_extra_per_space = (space_w * 0.45).round().max(1.0) as i32;
-            let max_extra_total = spaces.saturating_mul(max_extra_per_space);
-            let punctuation_terminal = ends_with_terminal_punctuation(&line.text);
-            let extra = extra.min(max_extra_total);
-            if punctuation_terminal || extra <= 0 {
-                line.style.justify_mode = JustifyMode::None;
-            } else {
-                line.style.justify_mode = JustifyMode::InterWord {
-                    extra_px_total: extra,
-                };
-            }
-        } else {
-            line.style.justify_mode = JustifyMode::None;
-        }
+        line.style.justify_mode = resolve_line_justify_mode(
+            &self.cfg,
+            &line,
+            LineJustifyInputs {
+                available_width,
+                words,
+                spaces,
+                fill_ratio,
+                is_last_in_block,
+                hard_break,
+                measured_space_width: self.measure_text(" ", &line.style).max(1.0),
+            },
+        );
 
         self.page
             .push_content_command(DrawCommand::Text(TextCommand {
@@ -1275,6 +1324,10 @@ impl LayoutState {
         available_width: i32,
     ) -> Option<String> {
         if available_width <= 0 {
+            return None;
+        }
+        let measured = self.measure_text(&line.text, &line.style);
+        if measured <= available_width as f32 {
             return None;
         }
         let conservative = self.conservative_measure_text(&line.text, &line.style);
@@ -1405,6 +1458,110 @@ fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
         letter_spacing: style.letter_spacing,
         role: style.block_role,
         justify_mode: JustifyMode::None,
+    }
+}
+
+fn effective_justification_strategy(cfg: &LayoutConfig) -> JustificationStrategy {
+    if cfg.typography.justification.enabled {
+        cfg.typography.justification.strategy
+    } else {
+        JustificationStrategy::AlignLeft
+    }
+}
+
+fn uses_inter_word_justification(cfg: &LayoutConfig) -> bool {
+    matches!(
+        effective_justification_strategy(cfg),
+        JustificationStrategy::AdaptiveInterWord | JustificationStrategy::FullInterWord
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LineJustifyInputs {
+    available_width: i32,
+    words: usize,
+    spaces: i32,
+    fill_ratio: f32,
+    is_last_in_block: bool,
+    hard_break: bool,
+    measured_space_width: f32,
+}
+
+fn resolve_line_justify_mode(
+    cfg: &LayoutConfig,
+    line: &CurrentLine,
+    inputs: LineJustifyInputs,
+) -> JustifyMode {
+    if !matches!(line.style.role, BlockRole::Body | BlockRole::Paragraph) {
+        return JustifyMode::None;
+    }
+    if inputs.available_width <= 0 {
+        return JustifyMode::None;
+    }
+    let slack = (inputs.available_width as f32 - line.width_px).max(0.0) as i32;
+    let strategy = effective_justification_strategy(cfg);
+    match strategy {
+        JustificationStrategy::AlignLeft => JustifyMode::None,
+        JustificationStrategy::AlignRight => {
+            if slack > 0 {
+                JustifyMode::AlignRight { offset_px: slack }
+            } else {
+                JustifyMode::None
+            }
+        }
+        JustificationStrategy::AlignCenter => {
+            if slack > 1 {
+                JustifyMode::AlignCenter {
+                    offset_px: slack / 2,
+                }
+            } else {
+                JustifyMode::None
+            }
+        }
+        JustificationStrategy::AdaptiveInterWord | JustificationStrategy::FullInterWord => {
+            if inputs.is_last_in_block || inputs.hard_break || inputs.spaces <= 0 {
+                return JustifyMode::None;
+            }
+            let min_words = cfg
+                .typography
+                .justification
+                .min_words
+                .max(cfg.justify_min_words);
+            if inputs.words < min_words {
+                return JustifyMode::None;
+            }
+
+            if matches!(strategy, JustificationStrategy::AdaptiveInterWord) {
+                let min_fill = cfg
+                    .typography
+                    .justification
+                    .min_fill_ratio
+                    .max(cfg.justify_min_fill_ratio);
+                if inputs.fill_ratio < min_fill || ends_with_terminal_punctuation(&line.text) {
+                    return JustifyMode::None;
+                }
+            }
+
+            let mut extra = slack;
+            if matches!(strategy, JustificationStrategy::AdaptiveInterWord) {
+                let stretch = cfg
+                    .typography
+                    .justification
+                    .max_space_stretch_ratio
+                    .clamp(0.0, 8.0);
+                let max_extra_per_space = (inputs.measured_space_width * stretch).round() as i32;
+                if max_extra_per_space > 0 {
+                    extra = extra.min(inputs.spaces.saturating_mul(max_extra_per_space));
+                }
+            }
+            if extra > 0 {
+                JustifyMode::InterWord {
+                    extra_px_total: extra,
+                }
+            } else {
+                JustifyMode::None
+            }
+        }
     }
 }
 
@@ -1856,6 +2013,78 @@ mod tests {
     }
 
     #[test]
+    fn cover_page_mode_contain_fits_within_content_area_without_distortion() {
+        let cfg = LayoutConfig {
+            display_width: 320,
+            display_height: 480,
+            margin_left: 20,
+            margin_right: 20,
+            margin_top: 20,
+            margin_bottom: 20,
+            object_layout: crate::render_ir::ObjectLayoutConfig {
+                cover_page_mode: crate::render_ir::CoverPageMode::Contain,
+                ..crate::render_ir::ObjectLayoutConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let pages = engine.layout_items(vec![inline_image(
+            "images/cover.jpg",
+            "Cover image",
+            Some(600),
+            Some(900),
+        )]);
+        let cmd = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::ImageObject(img) => Some(img),
+                _ => None,
+            })
+            .expect("expected image command");
+        assert_eq!(cmd.width, 280);
+        assert_eq!(cmd.height, 420);
+        assert_eq!(cmd.x, 20);
+        assert_eq!(cmd.y, 30);
+    }
+
+    #[test]
+    fn cover_page_mode_full_bleed_can_crop_by_viewport_clip() {
+        let cfg = LayoutConfig {
+            display_width: 320,
+            display_height: 480,
+            margin_left: 20,
+            margin_right: 20,
+            margin_top: 20,
+            margin_bottom: 20,
+            object_layout: crate::render_ir::ObjectLayoutConfig {
+                cover_page_mode: crate::render_ir::CoverPageMode::FullBleed,
+                ..crate::render_ir::ObjectLayoutConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let pages = engine.layout_items(vec![inline_image(
+            "images/cover.jpg",
+            "Cover image",
+            Some(1000),
+            Some(1200),
+        )]);
+        let cmd = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::ImageObject(img) => Some(img),
+                _ => None,
+            })
+            .expect("expected image command");
+        assert_eq!(cmd.height, 480);
+        assert_eq!(cmd.width, 400);
+        assert_eq!(cmd.y, 0);
+        assert_eq!(cmd.x, -40);
+    }
+
+    #[test]
     fn figure_caption_runs_render_unjustified_and_italic() {
         let cfg = LayoutConfig {
             display_width: 360,
@@ -1902,6 +2131,114 @@ mod tests {
             }
         }
         assert!(saw_justified);
+    }
+
+    #[test]
+    fn layout_supports_right_and_center_alignment_strategies() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta";
+        let right_cfg = LayoutConfig {
+            typography: TypographyConfig {
+                justification: crate::render_ir::JustificationConfig {
+                    enabled: true,
+                    strategy: crate::render_ir::JustificationStrategy::AlignRight,
+                    ..crate::render_ir::JustificationConfig::default()
+                },
+                ..TypographyConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let center_cfg = LayoutConfig {
+            typography: TypographyConfig {
+                justification: crate::render_ir::JustificationConfig {
+                    enabled: true,
+                    strategy: crate::render_ir::JustificationStrategy::AlignCenter,
+                    ..crate::render_ir::JustificationConfig::default()
+                },
+                ..TypographyConfig::default()
+            },
+            ..LayoutConfig::default()
+        };
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run(text),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let right_pages = LayoutEngine::new(right_cfg).layout_items(items.clone());
+        let center_pages = LayoutEngine::new(center_cfg).layout_items(items);
+        let right_mode = right_pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.style.justify_mode),
+                _ => None,
+            })
+            .expect("expected text line");
+        let center_mode = center_pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t.style.justify_mode),
+                _ => None,
+            })
+            .expect("expected text line");
+        assert!(matches!(right_mode, JustifyMode::AlignRight { .. }));
+        assert!(matches!(center_mode, JustifyMode::AlignCenter { .. }));
+    }
+
+    #[test]
+    fn full_inter_word_justification_uses_more_slack_than_adaptive() {
+        let mut adaptive_cfg = LayoutConfig::default();
+        adaptive_cfg.typography.justification.strategy =
+            crate::render_ir::JustificationStrategy::AdaptiveInterWord;
+        adaptive_cfg
+            .typography
+            .justification
+            .max_space_stretch_ratio = 0.15;
+        adaptive_cfg.typography.justification.min_words = 2;
+        adaptive_cfg.justify_min_words = 2;
+
+        let mut full_cfg = adaptive_cfg;
+        full_cfg.typography.justification.strategy =
+            crate::render_ir::JustificationStrategy::FullInterWord;
+
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            body_run("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let adaptive_pages = LayoutEngine::new(adaptive_cfg).layout_items(items.clone());
+        let full_pages = LayoutEngine::new(full_cfg).layout_items(items);
+
+        let adaptive_max = adaptive_pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => match t.style.justify_mode {
+                    JustifyMode::InterWord { extra_px_total } => Some(extra_px_total),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let full_max = full_pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => match t.style.justify_mode {
+                    JustifyMode::InterWord { extra_px_total } => Some(extra_px_total),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            full_max >= adaptive_max,
+            "full inter-word should not use less extra slack (adaptive={}, full={})",
+            adaptive_max,
+            full_max
+        );
     }
 
     #[test]
@@ -2282,6 +2619,7 @@ mod tests {
                     enabled: true,
                     min_words: 3,
                     min_fill_ratio: 0.5,
+                    ..crate::render_ir::JustificationConfig::default()
                 },
                 ..TypographyConfig::default()
             },
@@ -2320,6 +2658,7 @@ mod tests {
                     enabled: true,
                     min_words: 4,
                     min_fill_ratio: 0.72,
+                    ..crate::render_ir::JustificationConfig::default()
                 },
                 ..TypographyConfig::default()
             },

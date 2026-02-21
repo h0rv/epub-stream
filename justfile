@@ -138,34 +138,45 @@ cli *args:
 # Usage:
 #   just visualize
 #   just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 12 target/visualize-default
-visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-default":
+visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-default" cover_page_mode="contain":
     RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
       --pages {{pages}} \
-      --out {{out}}
+      --out {{out}} \
+      --cover-page-mode {{cover_page_mode}}
 
 # Launch interactive web preview with live re-render API.
-web-preview epub="tests/fixtures/bench/pg84-frankenstein.epub" port="42817":
+# Exposes primary typography + cover policy controls for quick e-reader tuning.
+web-preview epub="tests/fixtures/bench/pg84-frankenstein.epub" port="42817" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
     RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
       {{epub}} \
       --serve \
       --open \
-      --port {{port}}
+      --port {{port}} \
+      --justify-mode {{justify_mode}} \
+      --justify-max-space-stretch {{justify_max_space_stretch}} \
+      --cover-page-mode {{cover_page_mode}}
 
 # Export standalone HTML preview snapshot (non-interactive reflow).
-web-preview-export epub="tests/fixtures/bench/pg84-frankenstein.epub" out="target/web-preview/index.html":
+web-preview-export epub="tests/fixtures/bench/pg84-frankenstein.epub" out="target/web-preview/index.html" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
     RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
       {{epub}} \
-      --out {{out}}
+      --out {{out}} \
+      --justify-mode {{justify_mode}} \
+      --justify-max-space-stretch {{justify_max_space_stretch}} \
+      --cover-page-mode {{cover_page_mode}}
 
 # Chapter-scoped web preview variant.
-web-preview-chapter epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" out="target/web-preview/chapter.html":
+web-preview-chapter epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" out="target/web-preview/chapter.html" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
     RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
       {{epub}} \
       --chapter {{chapter}} \
-      --out {{out}}
+      --out {{out}} \
+      --justify-mode {{justify_mode}} \
+      --justify-max-space-stretch {{justify_max_space_stretch}} \
+      --cover-page-mode {{cover_page_mode}}
 
 # One-command sane default render pass for local layout iteration.
 visualize-default:
@@ -173,9 +184,9 @@ visualize-default:
 
 # Render with a constrained virtual-memory budget to catch large transient
 # allocations locally before flashing firmware.
-visualize-lowmem epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-lowmem" vm_kib="180000":
+visualize-lowmem epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-lowmem" vm_kib="180000" cover_page_mode="contain":
     RUSTC_WRAPPER= cargo build -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }}
-    bash -lc "ulimit -Sv {{vm_kib}}; target/{{host_target}}/debug/visualize {{epub}} --chapter {{chapter}} --start-page {{start}} --pages {{pages}} --out {{out}}"
+    bash -lc "ulimit -Sv {{vm_kib}}; target/{{host_target}}/debug/visualize {{epub}} --chapter {{chapter}} --start-page {{start}} --pages {{pages}} --out {{out}} --cover-page-mode {{cover_page_mode}}"
 
 # Low-memory smoke suite for EPUB stability validation prior to flashing.
 lowmem-confidence vm_kib="150000":
