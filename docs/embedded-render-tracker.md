@@ -29,7 +29,7 @@ This tracker covers remaining work to make embedded rendering production-grade a
 Known blockers in current code:
 
 - TTF backend draw path still falls back to mono rasterization for glyph drawing.
-- Image commands without registered bitmap payload still use rectangle fallback.
+- Image commands without registered bitmap payload still use deterministic placeholder fallback (outline or outline+label), not full source decode/raster.
 - SVG vector rasterization remains unsupported in embedded backend; current render path relies on deterministic image/alt-text fallback policy.
 - Default layout still uses heuristic width when no explicit measurer is injected.
 
@@ -50,7 +50,7 @@ Every item below must follow `docs/memory-management.md`.
 ### P0 Must-Have (production blocker)
 
 - [ ] `EMB-001` Real embedded image rendering (`partial`)
-  Current: image commands can render registered monochrome bitmaps; unresolved sources still fallback to rectangles.
+  Current: image commands can render registered monochrome bitmaps; unresolved sources fallback to explicit policy-driven placeholders (`OutlineOnly` or `OutlineWithAltText`).
   Done when: decode and render core EPUB image types (PNG, JPEG, GIF, WebP where available) with deterministic scaling.
   Memory constraints: row/tile decode, bounded scratch, hard pixel and byte caps.
   Required tests: decode fixtures, pagination with images, allocation counter checks, out-of-budget failure behavior.
@@ -70,7 +70,7 @@ Every item below must follow `docs/memory-management.md`.
 - [ ] `EMB-004` Layout/renderer measurement parity (`partial`)
   Current: default layout width estimates are heuristic and can diverge from backend glyph widths.
   Done when: embedded rendering paths use measurer parity guarantees so text does not clip at right edge after reflow.
-  Progress: `EgTextMeasurer` adapter exists so embedded consumers can run layout with backend-consistent width metrics.
+  Progress: `EgTextMeasurer` adapter plus `with_embedded_text_measurer(RenderConfig)` helper now drive embedded regression and visualize paths with backend-consistent width metrics.
   Memory constraints: reusable measurer state and fixed-size caches.
   Required tests: right-edge clipping invariants over font-size/family/spacing matrix.
 
@@ -112,8 +112,8 @@ Every item below must follow `docs/memory-management.md`.
 
 ### P1 High-Value (after blockers)
 
-- [ ] `EMB-011` SVG support policy (`partial`)
-  Current: prep emits SVG `<image>` (`xlink:href`/`href`) events and layout applies deterministic object fallback policy (`svg_mode` + `alt_text_fallback`) into image-object/alt-text output.
+- [x] `EMB-011` SVG support policy (`done`)
+  Current: prep emits SVG `<image>` (`xlink:href`/`href`) events and layout/backend apply deterministic fallback policy (`svg_mode` + `alt_text_fallback` + embedded image placeholder policy).
   Done when: either deterministic raster fallback or explicit alt-text fallback policy per device profile.
 
 - [ ] `EMB-012` CSS subset expansion for ebook realism (`partial`)
@@ -123,8 +123,8 @@ Every item below must follow `docs/memory-management.md`.
 - [ ] `EMB-013` RTL/BiDi baseline support (`missing`)
   Done when: right-to-left paragraph flow and punctuation placement pass basic mixed-direction fixtures.
 
-- [ ] `EMB-014` Table rendering strategy (`partial`)
-  Current: prep linearizes basic table rows/cells into deterministic paragraph-safe fallback text flow (including per-cell separators).
+- [x] `EMB-014` Table rendering strategy (`done`)
+  Current: prep linearizes table rows/cells into deterministic paragraph-safe fallback text flow with row boundaries and per-cell separators.
   Done when: readable table fallback (stacked or simplified layout) is implemented with bounded memory.
 
 - [ ] `EMB-015` Hyphenation dictionary integration (`missing`)

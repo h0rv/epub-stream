@@ -66,6 +66,7 @@ book.chapter_events(0, ChapterEventsOptions::default(), |item| {
 
 ```rust,no_run
 use mu_epub::EpubBook;
+use mu_epub_embedded_graphics::with_embedded_text_measurer;
 use mu_epub_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 let mut book = EpubBook::open("book.epub")?;
@@ -80,7 +81,7 @@ engine.prepare_chapter_with(&mut book, 0, |page| {
 let _subset = engine.page_range(&mut book, 0, 0..3)?;
 
 // Explicit session path.
-let mut session = engine.begin(0, RenderConfig::default());
+let mut session = engine.begin(0, with_embedded_text_measurer(RenderConfig::default()));
 let _ = &mut session;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -112,11 +113,16 @@ let _engine = RenderEngine::new(opts);
 
 ```rust,no_run
 use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor};
-use mu_epub_embedded_graphics::{EgRenderer, ImageRegistryLimits};
+use mu_epub_embedded_graphics::{
+    EgRenderConfig, EgRenderer, ImageFallbackPolicy, ImageRegistryLimits,
+};
 use mu_epub_render::RenderPage;
 
 let renderer = EgRenderer::with_image_registry_limits(
-    Default::default(),
+    EgRenderConfig {
+        image_fallback: ImageFallbackPolicy::OutlineWithAltText,
+        ..EgRenderConfig::default()
+    },
     ImageRegistryLimits {
         max_images: 8,
         max_total_pixels: 128 * 1024,

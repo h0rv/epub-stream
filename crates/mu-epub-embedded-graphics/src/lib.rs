@@ -1103,6 +1103,8 @@ pub struct EgRenderConfig {
     pub clear_first: bool,
     /// Page chrome rendering policy and geometry.
     pub page_chrome: PageChromeConfig,
+    /// Policy used when image payloads are unavailable.
+    pub image_fallback: ImageFallbackPolicy,
 }
 
 impl Default for EgRenderConfig {
@@ -1110,8 +1112,18 @@ impl Default for EgRenderConfig {
         Self {
             clear_first: true,
             page_chrome: PageChromeConfig::geometry_defaults(),
+            image_fallback: ImageFallbackPolicy::OutlineWithAltText,
         }
     }
+}
+
+/// Fallback behavior for unresolved image payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFallbackPolicy {
+    /// Draw only outline rectangle placeholders.
+    OutlineOnly,
+    /// Draw outlines with compact label text when available.
+    OutlineWithAltText,
 }
 
 /// Draw-command executor for embedded-graphics targets.
@@ -1618,6 +1630,45 @@ where
         )
         .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
         .draw(display)?;
+        if self.cfg.image_fallback == ImageFallbackPolicy::OutlineWithAltText {
+            self.draw_image_fallback_label(display, image)?;
+        }
+        Ok(())
+    }
+
+    fn draw_image_fallback_label<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let Some(label) = fallback_image_label(image) else {
+            return Ok(());
+        };
+        if image.width < 10 || image.height < 10 {
+            return Ok(());
+        }
+
+        let style = MonoTextStyle::new(&FONT_6X9, BinaryColor::On);
+        let char_width = style.font.character_size.width.max(1) as usize;
+        let max_chars = image
+            .width
+            .saturating_sub(4)
+            .max(style.font.character_size.width) as usize
+            / char_width;
+        let text = truncate_ascii_with_ellipsis(&label, max_chars.max(1));
+        if text.is_empty() {
+            return Ok(());
+        }
+        Text::with_baseline(
+            &text,
+            Point::new(image.x + 2, image.y + 2),
+            style,
+            Baseline::Top,
+        )
+        .draw(display)?;
         Ok(())
     }
 
@@ -1808,6 +1859,38 @@ fn fit_bitmap_inside(src_w: u32, src_h: u32, target_w: u32, target_h: u32) -> (u
         let scaled_w = ((target_h as u64 * src_w as u64) / src_h as u64).max(1) as u32;
         (scaled_w.max(1).min(target_w), target_h)
     }
+}
+
+fn fallback_image_label(image: &ImageObjectCommand) -> Option<String> {
+    let alt = image.alt.trim();
+    if !alt.is_empty() {
+        return Some(alt.to_string());
+    }
+    let src = image.src.trim();
+    if src.is_empty() {
+        return None;
+    }
+    let basename = src.rsplit('/').next().unwrap_or(src).trim();
+    if basename.is_empty() {
+        return None;
+    }
+    Some(basename.to_string())
+}
+
+fn truncate_ascii_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::with_capacity(0);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut out: String = chars[..(max_chars - 3)].iter().collect();
+    out.push_str("...");
+    out
 }
 
 fn mono_text_style(style: PageChromeTextStyle) -> MonoTextStyle<'static, BinaryColor> {
@@ -2178,6 +2261,76 @@ mod tests {
         assert!(display.on_pixels.contains(&Point::new(2, 3)));
         assert!(display.on_pixels.contains(&Point::new(5, 6)));
         assert!(!display.on_pixels.contains(&Point::new(3, 4)));
+    }
+
+    #[test]
+    fn image_fallback_outline_and_alt_text_draws_more_pixels_than_outline_only() {
+        let page = page_with_commands(
+            1,
+            vec![DrawCommand::ImageObject(ImageObjectCommand {
+                src: "images/cover-diagram.png".to_string(),
+                alt: "diagram".to_string(),
+                x: 6,
+                y: 6,
+                width: 72,
+                height: 24,
+            })],
+        );
+
+        let outline_only = EgRenderer::new(EgRenderConfig {
+            image_fallback: ImageFallbackPolicy::OutlineOnly,
+            clear_first: false,
+            ..EgRenderConfig::default()
+        });
+        let mut outline_only_display = PixelCaptureDisplay::with_size(96, 64);
+        outline_only
+            .render_page(&page, &mut outline_only_display)
+            .expect("outline-only fallback should render");
+
+        let outline_with_text = EgRenderer::new(EgRenderConfig {
+            image_fallback: ImageFallbackPolicy::OutlineWithAltText,
+            clear_first: false,
+            ..EgRenderConfig::default()
+        });
+        let mut outline_with_text_display = PixelCaptureDisplay::with_size(96, 64);
+        outline_with_text
+            .render_page(&page, &mut outline_with_text_display)
+            .expect("outline+alt fallback should render");
+
+        assert!(outline_with_text_display.on_pixels.len() > outline_only_display.on_pixels.len());
+    }
+
+    #[test]
+    fn fallback_image_label_prefers_alt_then_src_basename() {
+        let from_alt = fallback_image_label(&ImageObjectCommand {
+            src: "images/pic.png".to_string(),
+            alt: "Cover".to_string(),
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(from_alt.as_deref(), Some("Cover"));
+
+        let from_src = fallback_image_label(&ImageObjectCommand {
+            src: "images/pic.png".to_string(),
+            alt: "   ".to_string(),
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(from_src.as_deref(), Some("pic.png"));
+
+        let none = fallback_image_label(&ImageObjectCommand {
+            src: String::new(),
+            alt: String::new(),
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(none, None);
     }
 
     #[test]
