@@ -16,7 +16,7 @@ license = "MIT"
 repository = "https://github.com/h0rv/mu-epub"
 
 [package]
-name = "mu_epub"
+name = "mu-epub"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

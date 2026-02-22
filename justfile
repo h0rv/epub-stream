@@ -354,7 +354,7 @@ clean:
 
 # Crates.io publish order (dependency-aware).
 publish-order:
-    @echo "mu_epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"
+    @echo "mu-epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"
 
 # Local package sanity check for one crate.
 package crate:
@@ -362,7 +362,7 @@ package crate:
 
 # Local package sanity check for all crates in publish order.
 package-all:
-    just package mu_epub
+    just package mu-epub
     just package mu-epub-render
     just package mu-epub-embedded-graphics
     just package mu-epub-render-web
@@ -373,7 +373,7 @@ publish-dry-run crate:
 
 # Dry-run publish for all crates in dependency order.
 publish-dry-run-all:
-    just publish-dry-run mu_epub
+    just publish-dry-run mu-epub
     just publish-dry-run mu-epub-render
     just publish-dry-run mu-epub-embedded-graphics
     just publish-dry-run mu-epub-render-web
@@ -388,7 +388,7 @@ release-preflight:
 # Requires CARGO_REGISTRY_TOKEN to be configured.
 publish-all:
     @bash -eu -o pipefail -c '\
-      crates="mu_epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"; \
+      crates="mu-epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"; \
       for c in $crates; do \
         echo "Publishing $$c..."; \
         cargo publish -p "$$c"; \

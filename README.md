@@ -29,7 +29,7 @@ Note: ZIP64 archives are currently not supported and are rejected explicitly.
 
 ```toml
 [dependencies]
-mu_epub = "0.2"
+mu-epub = "0.2"
 ```
 
 ### Quick Start
@@ -86,7 +86,7 @@ println!("chars={}", first_text.len());
 
 ### Rendering Stack (Decoupled Crates)
 
-`mu_epub` remains the EPUB parse/prep crate.
+`mu-epub` remains the EPUB parse/prep crate.
 Rendering is split into:
 
 1. `mu-epub-render`: render IR + layout engine + chapter-to-pages orchestration
@@ -97,7 +97,7 @@ Add local workspace deps:
 
 ```toml
 [dependencies]
-mu_epub = { path = "." }
+mu-epub = { path = "." }
 mu-epub-render = { path = "crates/mu-epub-render" }
 mu-epub-embedded-graphics = { path = "crates/mu-epub-embedded-graphics" }
 mu-epub-render-web = { path = "crates/mu-epub-render-web" }
@@ -158,7 +158,7 @@ just render-regression
 Install from crates.io:
 
 ```bash
-cargo install mu_epub --features cli --bin mu-epub
+cargo install mu-epub --features cli --bin mu-epub
 mu-epub --help
 ```
 

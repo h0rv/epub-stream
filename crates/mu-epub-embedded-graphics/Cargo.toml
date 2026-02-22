@@ -14,5 +14,5 @@ ttf-backend = []
 
 [dependencies]
 mu-epub-render = { version = "0.1.0", path = "../mu-epub-render" }
-mu_epub = { version = "0.1.0", path = "../.." }
+mu-epub = { version = "0.1.0", path = "../.." }
 embedded-graphics = "0.8"

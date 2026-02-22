@@ -14,7 +14,7 @@ This keeps daily development fast while avoiding ad-hoc local release mistakes.
 
 ## Release order
 
-1. `mu_epub`
+1. `mu-epub`
 2. `mu-epub-render`
 3. `mu-epub-embedded-graphics`
 4. `mu-epub-render-web`
