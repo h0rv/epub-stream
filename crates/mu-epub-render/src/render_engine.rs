@@ -9,7 +9,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -501,7 +501,7 @@ pub trait RenderCacheStore {
 
 const CACHE_SCHEMA_VERSION: u8 = 1;
 const DEFAULT_MAX_CACHE_FILE_BYTES: usize = 4 * 1024 * 1024;
-static CACHE_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+static CACHE_WRITE_NONCE: AtomicUsize = AtomicUsize::new(0);
 
 /// File-backed render-page cache store.
 ///
