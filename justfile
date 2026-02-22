@@ -396,9 +396,27 @@ release-preflight:
 # Requires CARGO_REGISTRY_TOKEN to be configured.
 publish-all:
     @bash -eu -o pipefail -c '\
-      crates="epub-stream epub-stream-render epub-stream-embedded-graphics epub-stream-render-web"; \
-      for c in $crates; do \
-        echo "Publishing $$c..."; \
-        cargo publish -p "$$c"; \
-        sleep 30; \
-      done'
+      publish_or_skip() { \
+        crate="$1"; \
+        echo "Publishing $crate..."; \
+        log_file=$(mktemp); \
+        if RUSTC_WRAPPER= cargo publish -p "$crate" 2>&1 | tee "$log_file"; then \
+          rm -f "$log_file"; \
+          return 0; \
+        fi; \
+        if rg -q "already exists on crates.io index" "$log_file"; then \
+          echo "Skipping $crate (already published)."; \
+          rm -f "$log_file"; \
+          return 0; \
+        fi; \
+        rm -f "$log_file"; \
+        return 1; \
+      }; \
+      publish_or_skip epub-stream; \
+      sleep 30; \
+      publish_or_skip epub-stream-render; \
+      sleep 30; \
+      publish_or_skip epub-stream-embedded-graphics; \
+      sleep 30; \
+      publish_or_skip epub-stream-render-web; \
+    '
