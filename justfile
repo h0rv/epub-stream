@@ -358,7 +358,7 @@ publish-order:
 
 # Local package sanity check for one crate.
 package crate:
-    env -u RUSTC_WRAPPER cargo package -p {{crate}}
+    RUSTC_WRAPPER= cargo package -p {{crate}}
 
 # Local package sanity check for all crates in publish order.
 package-all:
@@ -369,7 +369,7 @@ package-all:
 
 # Dry-run publish for one crate.
 publish-dry-run crate:
-    env -u RUSTC_WRAPPER cargo publish -p {{crate}} --dry-run
+    RUSTC_WRAPPER= cargo publish -p {{crate}} --dry-run
 
 # Dry-run publish for all crates in dependency order.
 publish-dry-run-all:
