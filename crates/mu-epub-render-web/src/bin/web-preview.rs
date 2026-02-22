@@ -441,6 +441,7 @@ struct ChapterSummary {
     index: usize,
     idref: String,
     href: String,
+    title: Option<String>,
     media_type: String,
 }
 
@@ -926,6 +927,7 @@ fn render_preview_payload(epub_path: &str, cfg: &RenderUiConfig) -> Result<Previ
         &chapter_refs,
         &chapter_first_global_page,
     );
+    let chapter_titles = build_chapter_title_lookup(&toc, chapter_refs.len());
 
     Ok(PreviewPayload {
         meta: PreviewMeta {
@@ -945,6 +947,7 @@ fn render_preview_payload(epub_path: &str, cfg: &RenderUiConfig) -> Result<Previ
                 index: c.index,
                 idref: c.idref.clone(),
                 href: c.href.clone(),
+                title: chapter_titles.get(c.index).cloned().flatten(),
                 media_type: c.media_type.clone(),
             })
             .collect(),
@@ -1254,6 +1257,42 @@ fn flatten_toc(
             out,
         );
     }
+}
+
+fn build_chapter_title_lookup(
+    toc: &[TocEntryPayload],
+    chapter_count: usize,
+) -> Vec<Option<String>> {
+    let mut best: Vec<Option<(usize, String)>> = vec![None; chapter_count];
+
+    for entry in toc {
+        let Some(chapter_index) = entry.target_chapter else {
+            continue;
+        };
+        if chapter_index >= chapter_count {
+            continue;
+        }
+        let label = entry.label.trim();
+        if label.is_empty() {
+            continue;
+        }
+
+        let should_replace = match &best[chapter_index] {
+            None => true,
+            Some((best_depth, best_label)) => {
+                entry.depth < *best_depth
+                    || (entry.depth == *best_depth && label.len() < best_label.len())
+            }
+        };
+
+        if should_replace {
+            best[chapter_index] = Some((entry.depth, label.to_string()));
+        }
+    }
+
+    best.into_iter()
+        .map(|item| item.map(|(_, label)| label))
+        .collect()
 }
 
 fn resolve_chapter_index(
@@ -2085,7 +2124,8 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
       for (const chapter of state.payload.chapters || []) {
         const option = document.createElement('option');
         option.value = String(chapter.index);
-        option.textContent = `#${chapter.index + 1} ${chapter.href}`;
+        const label = String(chapter.title || chapter.href || '').trim();
+        option.textContent = `#${chapter.index + 1} ${label || '(untitled chapter)'}`;
         el.chapter.appendChild(option);
       }
 
@@ -3546,6 +3586,35 @@ mod tests {
         assert!(
             constrained.is_err(),
             "tight page memory limit should fail for multi-page chapter"
+        );
+    }
+
+    #[test]
+    fn frankenstein_chapter_titles_prefer_toc_labels_over_href_filenames() {
+        let epub = fixture_path("pg84-frankenstein.epub");
+        let cfg = RenderUiConfig {
+            chapter: Some(4),
+            ..RenderUiConfig::default()
+        };
+        let payload = render_preview_payload(&epub, &cfg).expect("render should succeed");
+
+        let chapter = payload
+            .chapters
+            .iter()
+            .find(|c| c.href.contains("84-h-1.htm.html"))
+            .expect("frankenstein chapter href should exist");
+        let title = chapter
+            .title
+            .as_deref()
+            .map(str::trim)
+            .expect("chapter should have TOC-derived title");
+
+        assert!(!title.is_empty(), "title should be non-empty");
+        assert_ne!(title, chapter.href, "title should not mirror href");
+        assert!(
+            !title.contains(".htm"),
+            "title should not look like an html file name: {}",
+            title
         );
     }
 }

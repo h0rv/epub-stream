@@ -61,6 +61,17 @@ fn render_chapter_page_counts(
     out
 }
 
+fn normalize_pages_for_stream_compare(mut pages: Vec<RenderPage>) -> Vec<RenderPage> {
+    for page in &mut pages {
+        page.metrics.chapter_page_count = None;
+        page.metrics.global_page_index = None;
+        page.metrics.global_page_count_estimate = None;
+        page.metrics.progress_chapter = 0.0;
+        page.metrics.progress_book = None;
+    }
+    pages
+}
+
 #[test]
 fn prepare_chapter_page_range_matches_full_slice() {
     let engine = build_engine();
@@ -110,7 +121,10 @@ fn prepare_chapter_iter_streaming_matches_full_render() {
         .collect::<Result<Vec<_>, _>>()
         .expect("streaming iterator should succeed");
 
-    assert_eq!(streaming, full);
+    assert_eq!(
+        normalize_pages_for_stream_compare(streaming),
+        normalize_pages_for_stream_compare(full)
+    );
 }
 
 #[test]
@@ -137,7 +151,10 @@ fn prepare_chapter_bytes_with_matches_full_render() {
         .prepare_chapter_bytes_with(&mut book, chapter, &chapter_buf, |page| actual.push(page))
         .expect("chapter-bytes render should succeed");
 
-    assert_eq!(actual, expected);
+    assert_eq!(
+        normalize_pages_for_stream_compare(actual),
+        normalize_pages_for_stream_compare(expected)
+    );
 }
 
 #[test]

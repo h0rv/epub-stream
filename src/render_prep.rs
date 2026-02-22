@@ -1554,10 +1554,13 @@ impl RenderPrep {
             ));
         }
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, html)?;
+        let image_dimensions =
+            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), html);
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
-            let item = resolve_item_assets_for_chapter(chapter_href_ref, None, item);
+            let item =
+                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
