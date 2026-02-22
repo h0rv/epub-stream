@@ -1,7 +1,7 @@
-use mu_epub::{
+use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
-use mu_epub_render::{DrawCommand, LayoutConfig, LayoutEngine};
+use epub_stream_render::{DrawCommand, LayoutConfig, LayoutEngine};
 
 fn body_run(text: &str) -> StyledEventOrRun {
     StyledEventOrRun::Run(StyledRun {

@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use mu_epub::{
+use epub_stream::{
     navigation::NavPoint, EmbeddedFontFace, EmbeddedFontStyle, EpubBook, Locator, Navigation,
     ReadingSession,
 };
-use mu_epub_render::{
+use epub_stream_render::{
     BlockRole, CoverPageMode, DitherMode, DrawCommand, FloatSupport, GrayscaleMode,
     HyphenationMode, JustificationStrategy, JustifyMode, PageChromeConfig, PageChromeKind,
     PageChromeTextStyle, RenderConfig, RenderEngine, RenderEngineOptions, RenderPage,
@@ -1194,7 +1194,7 @@ fn load_font_face<R: std::io::Read + std::io::Seek>(
 fn build_toc_payload(
     navigation: Option<&Navigation>,
     reading_session: &mut ReadingSession,
-    chapters: &[mu_epub::ChapterRef],
+    chapters: &[epub_stream::ChapterRef],
     chapter_first_global_page: &HashMap<usize, usize>,
 ) -> Vec<TocEntryPayload> {
     let Some(navigation) = navigation else {
@@ -1315,7 +1315,7 @@ fn resolve_chapter_index(
     basename_lookup.get(&basename).copied()
 }
 
-fn build_chapter_lookup(chapters: &[mu_epub::ChapterRef]) -> HashMap<String, usize> {
+fn build_chapter_lookup(chapters: &[epub_stream::ChapterRef]) -> HashMap<String, usize> {
     let mut out = HashMap::new();
     for chapter in chapters {
         out.insert(chapter.href.clone(), chapter.index);
@@ -1324,7 +1324,7 @@ fn build_chapter_lookup(chapters: &[mu_epub::ChapterRef]) -> HashMap<String, usi
     out
 }
 
-fn build_chapter_basename_lookup(chapters: &[mu_epub::ChapterRef]) -> HashMap<String, usize> {
+fn build_chapter_basename_lookup(chapters: &[epub_stream::ChapterRef]) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for chapter in chapters {
         let base = basename_of(&normalize_rel_path(&chapter.href));
@@ -1584,7 +1584,7 @@ fn build_html(initial_payload_json: &str, server_mode: bool) -> String {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>mu-epub interactive preview</title>
+  <title>epub-stream interactive preview</title>
   <style>
     :root {
       --bg: #f2efe8;
@@ -3181,10 +3181,10 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
 }
 
 fn help_text() -> &'static str {
-    r#"web-preview - interactive web renderer preview for mu-epub
+    r#"web-preview - interactive web renderer preview for epub-stream
 
 USAGE:
-  cargo run -p mu-epub-render-web --bin web-preview -- [epub_path] [options]
+  cargo run -p epub-stream-render-web --bin web-preview -- [epub_path] [options]
 
 MODES:
   default: generate standalone HTML file at --out

@@ -1,4 +1,4 @@
-use mu_epub::{
+use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
 use std::sync::Arc;
@@ -1936,7 +1936,7 @@ mod tests {
         let mut items = Vec::new();
         for _ in 0..50 {
             items.push(StyledEventOrRun::Event(StyledEvent::ParagraphStart));
-            items.push(body_run("hello world mu-epub renderer pipeline"));
+            items.push(body_run("hello world epub-stream renderer pipeline"));
             items.push(StyledEventOrRun::Event(StyledEvent::ParagraphEnd));
         }
 

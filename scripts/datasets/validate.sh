@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATASET_DIR="${MU_EPUB_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
-BIN="${MU_EPUB_CLI_BIN:-$ROOT_DIR/target/debug/mu-epub}"
+DATASET_DIR="${EPUB_STREAM_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
+BIN="${EPUB_STREAM_CLI_BIN:-$ROOT_DIR/target/debug/epub-stream}"
 OUT_DIR="$ROOT_DIR/target/datasets"
 STRICT=0
 EXPECTATIONS_FILE="$ROOT_DIR/scripts/datasets/expectations.tsv"
@@ -48,8 +48,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ ! -x "$BIN" ]; then
-  echo "mu-epub binary not found at $BIN" >&2
-  echo "build with: cargo build --features cli --bin mu-epub" >&2
+  echo "epub-stream binary not found at $BIN" >&2
+  echo "build with: cargo build --features cli --bin epub-stream" >&2
   exit 1
 fi
 

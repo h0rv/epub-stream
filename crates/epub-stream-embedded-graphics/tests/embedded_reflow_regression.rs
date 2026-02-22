@@ -7,11 +7,11 @@ use embedded_graphics::{
     pixelcolor::BinaryColor,
     Pixel,
 };
-use mu_epub::{EpubBook, MemoryBudget};
-use mu_epub_embedded_graphics::{
+use epub_stream::{EpubBook, MemoryBudget};
+use epub_stream_embedded_graphics::{
     with_embedded_text_measurer, EgRenderer, ImageRegistryLimits, MonochromeBitmap,
 };
-use mu_epub_render::{
+use epub_stream_render::{
     BlockRole, DrawCommand, ImageObjectCommand, JustifyMode, RenderConfig, RenderEngine,
     RenderEngineError, RenderEngineOptions, RenderPage, ResolvedTextStyle, TextCommand,
     TextMeasurer,
@@ -227,9 +227,9 @@ fn embedded_low_ram_reflow_and_page_turn_loops_are_stable() {
 #[test]
 fn embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths() {
     let mut renderer = EgRenderer::with_image_registry_limits(
-        mu_epub_embedded_graphics::EgRenderConfig {
+        epub_stream_embedded_graphics::EgRenderConfig {
             clear_first: false,
-            ..mu_epub_embedded_graphics::EgRenderConfig::default()
+            ..epub_stream_embedded_graphics::EgRenderConfig::default()
         },
         ImageRegistryLimits {
             max_images: 1,
@@ -248,7 +248,7 @@ fn embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths() {
     );
     assert_eq!(
         err,
-        Err(mu_epub_embedded_graphics::ImageRegistryError::MaxImagesExceeded)
+        Err(epub_stream_embedded_graphics::ImageRegistryError::MaxImagesExceeded)
     );
 
     let text = TextCommand {
@@ -853,7 +853,7 @@ fn available_bench_fixtures() -> Vec<PathBuf> {
 }
 
 fn measured_text_width_px(text: &str, style: &ResolvedTextStyle) -> f32 {
-    let measurer = mu_epub_embedded_graphics::EgTextMeasurer::new();
+    let measurer = epub_stream_embedded_graphics::EgTextMeasurer::new();
     measurer.measure_text_px(text, style)
 }
 

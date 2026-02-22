@@ -82,9 +82,9 @@ The harness prints CSV-like sections to stdout:
 - Results:
   `fixture,case,iterations,min_ns,median_ns,p90_ns,mean_ns,max_ns,min_peak_heap_bytes,median_peak_heap_bytes,p90_peak_heap_bytes,mean_peak_heap_bytes,max_peak_heap_bytes`
 - Summary:
-  `fixture,metric,mu-epub_median_ns,other_median_ns,ratio_x,delta_percent`
+  `fixture,metric,epub-stream_median_ns,other_median_ns,ratio_x,delta_percent`
 - Memory summary:
-  `fixture,metric,mu-epub_median_peak_heap_bytes,other_median_peak_heap_bytes,ratio_x,delta_percent`
+  `fixture,metric,epub-stream_median_peak_heap_bytes,other_median_peak_heap_bytes,ratio_x,delta_percent`
 - Fixture metadata:
   `key,filename,size_bytes`
 

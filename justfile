@@ -1,4 +1,4 @@
-# mu-epub justfile
+# epub-stream justfile
 
 # Host target used for local simulator/CLI binaries.
 host_target := `if [ -n "${HOST_TEST_TARGET:-}" ]; then \
@@ -64,19 +64,19 @@ lint-memory-no-std:
 
 # Render crate allocation-intent checks.
 lint-memory-render:
-    cargo clippy -p mu-epub-render --lib --no-deps -- -D warnings -W clippy::disallowed_methods
+    cargo clippy -p epub-stream-render --lib --no-deps -- -D warnings -W clippy::disallowed_methods
 
 # Check split render crates
 render-check:
-    cargo check -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web
+    cargo check -p epub-stream-render -p epub-stream-embedded-graphics -p epub-stream-render-web
 
 # Lint split render crates
 render-lint:
-    cargo clippy -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web --all-targets -- -D warnings -A clippy::disallowed_methods
+    cargo clippy -p epub-stream-render -p epub-stream-embedded-graphics -p epub-stream-render-web --all-targets -- -D warnings -A clippy::disallowed_methods
 
 # Test split render crates
 render-test:
-    cargo test -p mu-epub-render -p mu-epub-embedded-graphics -p mu-epub-render-web
+    cargo test -p epub-stream-render -p epub-stream-embedded-graphics -p epub-stream-render-web
 
 # Run all split render crate checks
 render-all:
@@ -103,7 +103,7 @@ test-alloc:
 # Run embedded-focused suites (tiny budgets + reflow regression matrix).
 test-embedded:
     cargo test --all-features --test embedded_mode_tests -- --ignored --nocapture
-    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression -- --nocapture
+    cargo test -p epub-stream-embedded-graphics --test embedded_reflow_regression -- --nocapture
 
 # Verify benchmark fixture corpus integrity
 bench-fixtures-check:
@@ -127,11 +127,11 @@ build:
 
 # Check CLI build
 cli-check:
-    cargo check --features cli --bin mu-epub
+    cargo check --features cli --bin epub-stream
 
 # Run CLI
 cli *args:
-    cargo run --features cli --bin mu-epub -- {{args}}
+    cargo run --features cli --bin epub-stream -- {{args}}
 
 # Render EPUB pages to PNG snapshots for local visual layout debugging.
 #
@@ -139,7 +139,7 @@ cli *args:
 #   just visualize
 #   just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 12 target/visualize-default
 visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-default" cover_page_mode="contain":
-    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -150,7 +150,7 @@ visualize epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="
 # Launch interactive web preview with live re-render API.
 # Exposes primary typography + cover policy controls for quick e-reader tuning.
 web-preview epub="tests/fixtures/bench/pg84-frankenstein.epub" port="42817" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
-    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-render-web --bin web-preview -- \
       {{epub}} \
       --serve \
       --open \
@@ -161,7 +161,7 @@ web-preview epub="tests/fixtures/bench/pg84-frankenstein.epub" port="42817" just
 
 # Export standalone HTML preview snapshot (non-interactive reflow).
 web-preview-export epub="tests/fixtures/bench/pg84-frankenstein.epub" out="target/web-preview/index.html" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
-    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-render-web --bin web-preview -- \
       {{epub}} \
       --out {{out}} \
       --justify-mode {{justify_mode}} \
@@ -170,7 +170,7 @@ web-preview-export epub="tests/fixtures/bench/pg84-frankenstein.epub" out="targe
 
 # Chapter-scoped web preview variant.
 web-preview-chapter epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" out="target/web-preview/chapter.html" justify_mode="adaptive-inter-word" justify_max_space_stretch="0.45" cover_page_mode="contain":
-    RUSTC_WRAPPER= cargo run -p mu-epub-render-web --bin web-preview -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-render-web --bin web-preview -- \
       {{epub}} \
       --chapter {{chapter}} \
       --out {{out}} \
@@ -185,7 +185,7 @@ visualize-default:
 # Render with a constrained virtual-memory budget to catch large transient
 # allocations locally before flashing firmware.
 visualize-lowmem epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-lowmem" vm_kib="180000" cover_page_mode="contain":
-    RUSTC_WRAPPER= cargo build -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }}
+    RUSTC_WRAPPER= cargo build -p epub-stream-embedded-graphics --bin visualize --target {{ host_target }}
     bash -lc "ulimit -Sv {{vm_kib}}; target/{{host_target}}/debug/visualize {{epub}} --chapter {{chapter}} --start-page {{start}} --pages {{pages}} --out {{out}} --cover-page-mode {{cover_page_mode}}"
 
 # Low-memory smoke suite for EPUB stability validation prior to flashing.
@@ -198,7 +198,7 @@ lowmem-confidence vm_kib="150000":
 
 # Same as visualize, but with inter-word justification enabled.
 visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="12" out="target/visualize-justify":
-    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -208,7 +208,7 @@ visualize-justify epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5"
 
 # Larger type profile for wrap/spacing validation.
 visualize-large epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" start="0" pages="8" out="target/visualize-large":
-    RUSTC_WRAPPER= cargo run -p mu-epub-embedded-graphics --bin visualize --target {{ host_target }} -- \
+    RUSTC_WRAPPER= cargo run -p epub-stream-embedded-graphics --bin visualize --target {{ host_target }} -- \
       {{epub}} \
       --chapter {{chapter}} \
       --start-page {{start}} \
@@ -228,8 +228,8 @@ visualize-matrix epub="tests/fixtures/bench/pg84-frankenstein.epub" chapter="5" 
 # - run render-layout + typography regression tests
 # - generate deterministic visual matrices for core Gutenberg fixtures
 typography-confidence:
-    cargo test -p mu-epub-render --tests
-    cargo test -p mu-epub-render render_layout::tests:: -- --nocapture
+    cargo test -p epub-stream-render --tests
+    cargo test -p epub-stream-render render_layout::tests:: -- --nocapture
     just visualize tests/fixtures/bench/pg84-frankenstein.epub 5 0 8 target/visualize-confidence/frankenstein/default
     just visualize-justify tests/fixtures/bench/pg84-frankenstein.epub 5 0 8 target/visualize-confidence/frankenstein/justify
     just visualize-large tests/fixtures/bench/pg84-frankenstein.epub 5 0 6 target/visualize-confidence/frankenstein/large
@@ -242,23 +242,23 @@ typography-confidence:
 
 # Deterministic reflow/config regression harness for reader controls.
 render-regression:
-    cargo test -p mu-epub-render --test corpus_regression_harness
-    cargo test -p mu-epub-render --test typography_regression
-    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression
-    cargo test -p mu-epub-render --test docs
-    cargo test -p mu-epub-render-web --bin web-preview
+    cargo test -p epub-stream-render --test corpus_regression_harness
+    cargo test -p epub-stream-render --test typography_regression
+    cargo test -p epub-stream-embedded-graphics --test embedded_reflow_regression
+    cargo test -p epub-stream-render --test docs
+    cargo test -p epub-stream-render-web --bin web-preview
 
 # Focused embedded reflow regression harness.
 embedded-reflow-regression:
-    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression -- --nocapture
+    cargo test -p epub-stream-embedded-graphics --test embedded_reflow_regression -- --nocapture
 
 # Focused low-RAM loop verification inside the embedded regression harness.
 embedded-low-ram-matrix:
-    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression embedded_low_ram_reflow_and_page_turn_loops_are_stable -- --nocapture
+    cargo test -p epub-stream-embedded-graphics --test embedded_reflow_regression embedded_low_ram_reflow_and_page_turn_loops_are_stable -- --nocapture
 
 # Focused budget/telemetry coverage inside the embedded regression harness.
 embedded-budget-telemetry:
-    cargo test -p mu-epub-embedded-graphics --test embedded_reflow_regression embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths -- --nocapture
+    cargo test -p epub-stream-embedded-graphics --test embedded_reflow_regression embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths -- --nocapture
 
 # Bootstrap external test datasets (not committed)
 dataset-bootstrap:
@@ -274,30 +274,30 @@ dataset-list:
 
 # Validate all dataset EPUB files
 dataset-validate:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --expectations scripts/datasets/expectations.tsv
 
 # Validate only Gutenberg EPUB corpus under tests/datasets/wild/gutenberg.
 dataset-validate-gutenberg:
-    @cargo build --features cli --bin mu-epub
-    DATASET_ROOT="${MU_EPUB_DATASET_DIR:-tests/datasets}" && \
+    @cargo build --features cli --bin epub-stream
+    DATASET_ROOT="${EPUB_STREAM_DATASET_DIR:-tests/datasets}" && \
     ./scripts/datasets/validate.sh --dataset-dir "$DATASET_ROOT/wild/gutenberg" --expectations scripts/datasets/expectations.tsv
 
 # Validate only Gutenberg EPUB corpus in strict mode.
 dataset-validate-gutenberg-strict:
-    @cargo build --features cli --bin mu-epub
-    DATASET_ROOT="${MU_EPUB_DATASET_DIR:-tests/datasets}" && \
+    @cargo build --features cli --bin epub-stream
+    DATASET_ROOT="${EPUB_STREAM_DATASET_DIR:-tests/datasets}" && \
     ./scripts/datasets/validate.sh --strict --dataset-dir "$DATASET_ROOT/wild/gutenberg" --expectations scripts/datasets/expectations.tsv
 
 # Time Gutenberg corpus smoke path (validate + chapters + first chapter text).
 dataset-profile-gutenberg:
-    @cargo build --release --features cli --bin mu-epub
-    MU_EPUB_CLI_BIN=target/release/mu-epub ./scripts/datasets/gutenberg_smoke.sh
+    @cargo build --release --features cli --bin epub-stream
+    EPUB_STREAM_CLI_BIN=target/release/epub-stream ./scripts/datasets/gutenberg_smoke.sh
 
 # Time Gutenberg corpus smoke path in strict validation mode.
 dataset-profile-gutenberg-strict:
-    @cargo build --release --features cli --bin mu-epub
-    MU_EPUB_CLI_BIN=target/release/mu-epub ./scripts/datasets/gutenberg_smoke.sh --strict
+    @cargo build --release --features cli --bin epub-stream
+    EPUB_STREAM_CLI_BIN=target/release/epub-stream ./scripts/datasets/gutenberg_smoke.sh --strict
 
 # Full pre-flash gate including local Gutenberg corpus (if bootstrapped).
 harden-gutenberg:
@@ -307,32 +307,32 @@ harden-gutenberg:
 
 # Validate all dataset EPUB files in strict mode (warnings fail too)
 dataset-validate-strict:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --strict --expectations scripts/datasets/expectations.tsv
 
 # Validate against expectation manifest (default mode)
 dataset-validate-expected:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --expectations scripts/datasets/expectations.tsv
 
 # Validate against expectation manifest in strict mode
 dataset-validate-expected-strict:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --strict --expectations scripts/datasets/expectations.tsv
 
 # Raw validate mode (every file must pass validation)
 dataset-validate-raw:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh
 
 # Raw strict validate mode (warnings fail too)
 dataset-validate-raw-strict:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --strict
 
 # Validate a small, CI-ready mini corpus from a manifest
 dataset-validate-mini:
-    @cargo build --features cli --bin mu-epub
+    @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --manifest tests/datasets/manifest-mini.tsv
 
 # Run benchmarks and save latest CSV report
@@ -354,7 +354,7 @@ clean:
 
 # Crates.io publish order (dependency-aware).
 publish-order:
-    @echo "mu-epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"
+    @echo "epub-stream epub-stream-render epub-stream-embedded-graphics epub-stream-render-web"
 
 # Local package sanity check for one crate.
 package crate:
@@ -366,10 +366,10 @@ package-no-verify crate:
 
 # Local package sanity check for all crates in publish order.
 package-all:
-    just package mu-epub
-    just package-no-verify mu-epub-render
-    just package-no-verify mu-epub-embedded-graphics
-    just package-no-verify mu-epub-render-web
+    just package epub-stream
+    just package-no-verify epub-stream-render
+    just package-no-verify epub-stream-embedded-graphics
+    just package-no-verify epub-stream-render-web
 
 # Dry-run publish for one crate.
 publish-dry-run crate:
@@ -381,10 +381,10 @@ publish-dry-run-no-verify crate:
 
 # Dry-run publish for all crates in dependency order.
 publish-dry-run-all:
-    just publish-dry-run mu-epub
-    just publish-dry-run-no-verify mu-epub-render
-    just publish-dry-run-no-verify mu-epub-embedded-graphics
-    just publish-dry-run-no-verify mu-epub-render-web
+    just publish-dry-run epub-stream
+    just publish-dry-run-no-verify epub-stream-render
+    just publish-dry-run-no-verify epub-stream-embedded-graphics
+    just publish-dry-run-no-verify epub-stream-render-web
 
 # Full release preflight before publishing.
 release-preflight:
@@ -396,7 +396,7 @@ release-preflight:
 # Requires CARGO_REGISTRY_TOKEN to be configured.
 publish-all:
     @bash -eu -o pipefail -c '\
-      crates="mu-epub mu-epub-render mu-epub-embedded-graphics mu-epub-render-web"; \
+      crates="epub-stream epub-stream-render epub-stream-embedded-graphics epub-stream-render-web"; \
       for c in $crates; do \
         echo "Publishing $$c..."; \
         cargo publish -p "$$c"; \

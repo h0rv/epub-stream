@@ -1,4 +1,4 @@
-use mu_epub::BlockRole;
+use epub_stream::BlockRole;
 
 /// Page represented as backend-agnostic draw commands.
 #[derive(Clone, Debug, Default, PartialEq)]

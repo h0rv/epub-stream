@@ -1,0 +1,21 @@
+[package]
+name = "epub-stream-embedded-graphics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "embedded-graphics backend for epub-stream-render"
+
+[lib]
+name = "epub_stream_embedded_graphics"
+
+[features]
+default = []
+ttf-backend = []
+
+[dependencies]
+epub_stream_render = { package = "epub-stream-render", version = "0.1.0", path = "../epub-stream-render" }
+epub_stream = { package = "epub-stream", version = "0.1.0", path = "../.." }
+embedded-graphics = "0.8"

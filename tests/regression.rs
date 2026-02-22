@@ -11,7 +11,7 @@
 
 #[test]
 fn xml_entity_ampersand_unescaped() {
-    use mu_epub::tokenizer::{tokenize_html, Token};
+    use epub_stream::tokenizer::{tokenize_html, Token};
     let html = "<p>Barnes &amp; Noble</p>";
     let tokens = tokenize_html(html).unwrap();
     let text: String = tokens
@@ -35,7 +35,7 @@ fn xml_entity_ampersand_unescaped() {
 
 #[test]
 fn xml_entity_less_greater_than_unescaped() {
-    use mu_epub::tokenizer::{tokenize_html, Token};
+    use epub_stream::tokenizer::{tokenize_html, Token};
     let html = "<p>x &lt; y &gt; z</p>";
     let tokens = tokenize_html(html).unwrap();
     let text: String = tokens
@@ -55,7 +55,7 @@ fn xml_entity_less_greater_than_unescaped() {
 
 #[test]
 fn xml_entity_numeric_unescaped() {
-    use mu_epub::tokenizer::{tokenize_html, Token};
+    use epub_stream::tokenizer::{tokenize_html, Token};
     let html = "<p>&#8220;Hello&#8221;</p>";
     let tokens = tokenize_html(html).unwrap();
     let text: String = tokens
@@ -80,8 +80,8 @@ fn xml_entity_numeric_unescaped() {
 #[cfg(feature = "layout")]
 #[test]
 fn heading_bold_does_not_bleed_into_body() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     let tokens = vec![
         Token::Heading(1),
         Token::Text("Title".to_string()),
@@ -111,7 +111,7 @@ fn heading_bold_does_not_bleed_into_body() {
 #[cfg(feature = "layout")]
 #[test]
 fn text_width_uses_char_count_not_bytes() {
-    use mu_epub::layout::{FontMetrics, TextStyle};
+    use epub_stream::layout::{FontMetrics, TextStyle};
     let metrics = FontMetrics::font_10x20();
     let width = metrics.text_width("café", TextStyle::Normal);
     assert_eq!(
@@ -123,7 +123,7 @@ fn text_width_uses_char_count_not_bytes() {
 #[cfg(feature = "layout")]
 #[test]
 fn text_width_em_dash_correct() {
-    use mu_epub::layout::{FontMetrics, TextStyle};
+    use epub_stream::layout::{FontMetrics, TextStyle};
     let metrics = FontMetrics::font_10x20();
     let width = metrics.text_width("—", TextStyle::Normal);
     assert_eq!(
@@ -135,8 +135,8 @@ fn text_width_em_dash_correct() {
 #[cfg(feature = "layout")]
 #[test]
 fn layout_new_uses_default_top_margin() {
-    use mu_epub::layout::LayoutEngine;
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::LayoutEngine;
+    use epub_stream::tokenizer::Token;
 
     let tokens = vec![Token::Text("Line one".to_string()), Token::ParagraphBreak];
     let mut engine = LayoutEngine::new(460.0, 650.0, 20.0);
@@ -158,7 +158,7 @@ fn layout_new_uses_default_top_margin() {
 
 #[test]
 fn css_line_height_unitless_parsed_as_multiplier() {
-    use mu_epub::css::{parse_stylesheet, LineHeight};
+    use epub_stream::css::{parse_stylesheet, LineHeight};
     let css = "p { line-height: 1.5; }";
     let ss = parse_stylesheet(css).unwrap();
     assert_eq!(
@@ -170,7 +170,7 @@ fn css_line_height_unitless_parsed_as_multiplier() {
 
 #[test]
 fn css_line_height_pixels_parsed_correctly() {
-    use mu_epub::css::{parse_stylesheet, LineHeight};
+    use epub_stream::css::{parse_stylesheet, LineHeight};
     let css = "p { line-height: 24px; }";
     let ss = parse_stylesheet(css).unwrap();
     assert_eq!(
@@ -186,7 +186,7 @@ fn css_line_height_pixels_parsed_correctly() {
 
 #[test]
 fn nav_label_concatenates_formatted_anchors() {
-    use mu_epub::navigation::parse_nav_xhtml;
+    use epub_stream::navigation::parse_nav_xhtml;
     let nav_xhtml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <body>
@@ -212,7 +212,7 @@ fn nav_label_concatenates_formatted_anchors() {
 
 #[test]
 fn metadata_subtitle_not_matched_as_title() {
-    use mu_epub::metadata::parse_opf;
+    use epub_stream::metadata::parse_opf;
     let opf = br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -231,7 +231,7 @@ fn metadata_subtitle_not_matched_as_title() {
 
 #[test]
 fn missing_title_and_author_distinguishable() {
-    use mu_epub::metadata::parse_opf;
+    use epub_stream::metadata::parse_opf;
     let opf = br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -258,21 +258,21 @@ fn missing_title_and_author_distinguishable() {
 
 #[test]
 fn epub_error_implements_std_error() {
-    use mu_epub::error::EpubError;
+    use epub_stream::error::EpubError;
     fn assert_error<T: std::error::Error>() {}
     assert_error::<EpubError>();
 }
 
 #[test]
 fn tokenize_error_implements_std_error() {
-    use mu_epub::tokenizer::TokenizeError;
+    use epub_stream::tokenizer::TokenizeError;
     fn assert_error<T: std::error::Error>() {}
     assert_error::<TokenizeError>();
 }
 
 #[test]
 fn zip_error_implements_std_error() {
-    use mu_epub::zip::ZipError;
+    use epub_stream::zip::ZipError;
     fn assert_error<T: std::error::Error>() {}
     assert_error::<ZipError>();
 }
@@ -283,11 +283,11 @@ fn zip_error_implements_std_error() {
 
 #[test]
 fn parser_apis_use_epub_error() {
-    use mu_epub::css::{parse_inline_style, parse_stylesheet, CssStyle, Stylesheet};
-    use mu_epub::error::EpubError;
-    use mu_epub::metadata::{parse_container_xml, parse_opf, EpubMetadata};
-    use mu_epub::navigation::{parse_nav_xhtml, parse_ncx, Navigation};
-    use mu_epub::spine::{parse_opf_spine, parse_spine, Spine};
+    use epub_stream::css::{parse_inline_style, parse_stylesheet, CssStyle, Stylesheet};
+    use epub_stream::error::EpubError;
+    use epub_stream::metadata::{parse_container_xml, parse_opf, EpubMetadata};
+    use epub_stream::navigation::{parse_nav_xhtml, parse_ncx, Navigation};
+    use epub_stream::spine::{parse_opf_spine, parse_spine, Spine};
 
     let _parse_container_xml: fn(&[u8]) -> Result<String, EpubError> = parse_container_xml;
     let _parse_opf: fn(&[u8]) -> Result<EpubMetadata, EpubError> = parse_opf;
@@ -301,7 +301,7 @@ fn parser_apis_use_epub_error() {
 
 #[test]
 fn zip_error_alias_matches_kind() {
-    use mu_epub::error::{ZipError, ZipErrorKind};
+    use epub_stream::error::{ZipError, ZipErrorKind};
 
     fn takes_zip_error(err: ZipError) -> ZipErrorKind {
         err
@@ -319,8 +319,8 @@ fn zip_error_alias_matches_kind() {
 #[cfg(feature = "layout")]
 #[test]
 fn mixed_formatting_preserved() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     let tokens = vec![
         Token::Text("normal ".to_string()),
         Token::Strong(true),
@@ -347,8 +347,8 @@ fn mixed_formatting_preserved() {
 #[cfg(feature = "layout")]
 #[test]
 fn mixed_formatting_multiple_transitions() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     // Test: normal → bold → italic → bolditalic → normal in one line
     let tokens = vec![
         Token::Text("normal ".to_string()),
@@ -400,8 +400,8 @@ fn mixed_formatting_multiple_transitions() {
 #[cfg(feature = "layout")]
 #[test]
 fn mixed_formatting_span_content_correct() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     let tokens = vec![
         Token::Text("Start ".to_string()),
         Token::Strong(true),
@@ -447,8 +447,8 @@ fn mixed_formatting_span_content_correct() {
 #[cfg(feature = "layout")]
 #[test]
 fn mixed_formatting_with_line_wrapping() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     // Create text that will wrap with mixed formatting
     let tokens = vec![
         Token::Text("First ".to_string()),
@@ -485,8 +485,8 @@ fn mixed_formatting_with_line_wrapping() {
 #[cfg(feature = "layout")]
 #[test]
 fn mixed_formatting_adjacent_styles() {
-    use mu_epub::layout::{LayoutEngine, TextStyle};
-    use mu_epub::tokenizer::Token;
+    use epub_stream::layout::{LayoutEngine, TextStyle};
+    use epub_stream::tokenizer::Token;
     // Test adjacent formatting without space between
     let tokens = vec![
         Token::Text("A".to_string()),

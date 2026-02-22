@@ -5,9 +5,9 @@ use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::{OriginDimensions, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::Pixel;
-use mu_epub::EpubBook;
-use mu_epub_embedded_graphics::{with_embedded_text_measurer, EgRenderer};
-use mu_epub_render::{CoverPageMode, RenderConfig, RenderEngine, RenderEngineOptions};
+use epub_stream::EpubBook;
+use epub_stream_embedded_graphics::{with_embedded_text_measurer, EgRenderer};
+use epub_stream_render::{CoverPageMode, RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DEFAULT_EPUB_PATH: &str = "tests/fixtures/bench/pg84-frankenstein.epub";
 
@@ -409,7 +409,7 @@ fn help_text() -> &'static str {
     r#"visualize - render EPUB pages to PGM snapshots
 
 USAGE:
-  cargo run -p mu-epub-embedded-graphics --bin visualize -- [epub_path] [options]
+  cargo run -p epub-stream-embedded-graphics --bin visualize -- [epub_path] [options]
 
 OPTIONS:
   --chapter <n>       0-based chapter index (default: 5)

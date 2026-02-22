@@ -3,8 +3,8 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use mu_epub::metadata::{parse_container_xml, parse_opf};
-use mu_epub::zip::StreamingZip;
+use epub_stream::metadata::{parse_container_xml, parse_opf};
+use epub_stream::zip::StreamingZip;
 
 fn read_entry_buffered(zip: &mut StreamingZip<File>, path: &str) -> Option<Vec<u8>> {
     let entry = zip.get_entry(path)?.clone();

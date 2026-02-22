@@ -1,9 +1,9 @@
 [workspace]
 members = [
     ".",
-    "crates/mu-epub-render",
-    "crates/mu-epub-embedded-graphics",
-    "crates/mu-epub-render-web",
+    "crates/epub-stream-render",
+    "crates/epub-stream-embedded-graphics",
+    "crates/epub-stream-render-web",
 ]
 resolver = "2"
 
@@ -13,10 +13,10 @@ edition = "2021"
 rust-version = "1.85"
 authors = ["Robby Horvath"]
 license = "MIT"
-repository = "https://github.com/h0rv/mu-epub"
+repository = "https://github.com/h0rv/epub-stream"
 
 [package]
-name = "mu-epub"
+name = "epub-stream"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -53,9 +53,12 @@ name = "epub_bench"
 harness = false
 
 [[bin]]
-name = "mu-epub"
-path = "src/bin/mu-epub.rs"
+name = "epub-stream"
+path = "src/bin/epub-stream.rs"
 required-features = ["cli"]
+
+[lib]
+name = "epub_stream"
 
 [package.metadata.docs.rs]
 all-features = true

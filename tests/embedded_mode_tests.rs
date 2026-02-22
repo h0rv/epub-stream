@@ -7,9 +7,9 @@
 
 use std::fs::File;
 
-use mu_epub::book::{ChapterEventsOptions, EpubBook, EpubBookOptions, ValidationMode};
-use mu_epub::render_prep::{FontLimits, MemoryBudget, RenderPrepOptions, StyleLimits};
-use mu_epub::zip::ZipLimits;
+use epub_stream::book::{ChapterEventsOptions, EpubBook, EpubBookOptions, ValidationMode};
+use epub_stream::render_prep::{FontLimits, MemoryBudget, RenderPrepOptions, StyleLimits};
+use epub_stream::zip::ZipLimits;
 
 const SAMPLE_EPUB_PATH: &str =
     "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub";
@@ -31,20 +31,20 @@ fn embedded_options() -> EpubBookOptions {
 /// Create render-prep options with embedded-friendly limits
 fn embedded_render_prep() -> RenderPrepOptions {
     RenderPrepOptions {
-        style: mu_epub::render_prep::StyleConfig {
+        style: epub_stream::render_prep::StyleConfig {
             limits: StyleLimits {
                 max_selectors: 128,
                 max_css_bytes: 16 * 1024,
                 max_nesting: 8,
             },
-            hints: mu_epub::render_prep::LayoutHints::default(),
+            hints: epub_stream::render_prep::LayoutHints::default(),
         },
         fonts: FontLimits {
             max_faces: 4,
             max_bytes_per_font: 64 * 1024,
             max_total_font_bytes: 128 * 1024,
         },
-        layout_hints: mu_epub::render_prep::LayoutHints::default(),
+        layout_hints: epub_stream::render_prep::LayoutHints::default(),
         memory: MemoryBudget {
             max_entry_bytes: 128 * 1024,
             max_css_bytes: 16 * 1024,

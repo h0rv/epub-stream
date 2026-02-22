@@ -1,4 +1,4 @@
-//! Unified error types for mu-epub
+//! Unified error types for epub-stream
 //!
 //! Provides a top-level `EpubError` that wraps module-specific errors,
 //! plus `From` impls so `?` works across module boundaries.
@@ -110,7 +110,7 @@ impl PhaseError {
     }
 }
 
-/// Top-level error type for mu-epub operations
+/// Top-level error type for epub-stream operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EpubError {

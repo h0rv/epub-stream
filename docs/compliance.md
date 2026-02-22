@@ -2,7 +2,7 @@
 
 Last updated: 2026-02-08
 
-This matrix tracks practical EPUB compatibility in `mu-epub` and focuses on
+This matrix tracks practical EPUB compatibility in `epub-stream` and focuses on
 high-impact features first (80/20), while making gaps explicit.
 
 Status legend:
@@ -55,7 +55,7 @@ Status legend:
 | Area | Status | Notes |
 |---|---|---|
 | Structured validator API | pass | `ValidationReport` + typed diagnostics. |
-| CLI validator command | pass | `mu-epub validate [--strict]`. |
+| CLI validator command | pass | `epub-stream validate [--strict]`. |
 | Diagnostic code stability policy | partial | Codes added; policy docs can be tightened further. |
 | Broad malformed corpus coverage | partial | Growing fixture set; still expanding edge cases. |
 | Differential/fuzz validation | planned | Recommended next for confidence at scale. |
@@ -63,7 +63,7 @@ Status legend:
 ## 80/20 Next Steps
 
 1. Expand validator diagnostics for package semantics (required manifest/media rules).
-2. Add golden tests for `mu-epub validate` JSON output and diagnostic code stability.
+2. Add golden tests for `epub-stream validate` JSON output and diagnostic code stability.
 3. Add corpus fixtures for tricky EPUB2/EPUB3 edge cases and regressions.
 4. Add differential tests against `epub-rs`/`epub-parser` on shared corpora.
 5. Add targeted fuzzing for ZIP/XML/tokenizer parsing paths.

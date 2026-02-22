@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use mu_epub::EpubBook;
-use mu_epub_render::BlockRole;
-use mu_epub_render::{DrawCommand, RenderEngine, RenderEngineOptions};
+use epub_stream::EpubBook;
+use epub_stream_render::BlockRole;
+use epub_stream_render::{DrawCommand, RenderEngine, RenderEngineOptions};
 
 fn fixture_path(name: &str) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -74,7 +74,7 @@ fn chapter_with_text_pages_min(
     engine: &RenderEngine,
     book: &mut EpubBook<std::fs::File>,
     min_pages: usize,
-) -> Option<(usize, Vec<mu_epub_render::RenderPage>)> {
+) -> Option<(usize, Vec<epub_stream_render::RenderPage>)> {
     for chapter in 0..book.chapter_count() {
         let pages = engine.prepare_chapter(book, chapter).ok()?;
         if pages.len() < min_pages {
@@ -88,7 +88,7 @@ fn chapter_with_text_pages_min(
     None
 }
 
-fn page_has_meaningful_text(page: &mu_epub_render::RenderPage) -> bool {
+fn page_has_meaningful_text(page: &epub_stream_render::RenderPage) -> bool {
     page.commands
         .iter()
         .any(|cmd| matches!(cmd, DrawCommand::Text(text) if !text.text.trim().is_empty()))
@@ -98,7 +98,7 @@ fn chapter_pages_with_text(
     engine: &RenderEngine,
     book: &mut EpubBook<std::fs::File>,
     chapter: usize,
-) -> Option<Vec<mu_epub_render::RenderPage>> {
+) -> Option<Vec<epub_stream_render::RenderPage>> {
     let pages = engine.prepare_chapter(book, chapter).ok()?;
     pages.iter().any(page_has_meaningful_text).then_some(pages)
 }
@@ -204,7 +204,7 @@ fn frankenstein_range_pages_have_consistent_metrics() {
     assert!(p_last.progress_chapter >= 0.95);
 }
 
-fn conservative_text_width_px(text: &str, style: &mu_epub_render::ResolvedTextStyle) -> f32 {
+fn conservative_text_width_px(text: &str, style: &epub_stream_render::ResolvedTextStyle) -> f32 {
     let chars = text.chars().count();
     if chars == 0 {
         return 0.0;
@@ -301,7 +301,7 @@ fn frankenstein_small_margin_no_right_edge_overrun() {
 }
 
 fn assert_no_screen_edge_overrun(
-    pages: &[mu_epub_render::RenderPage],
+    pages: &[epub_stream_render::RenderPage],
     display_width: i32,
     max_pages: usize,
 ) {
@@ -338,7 +338,7 @@ fn assert_no_screen_edge_overrun(
 }
 
 fn assert_nonterminal_body_lines_are_well_filled(
-    pages: &[mu_epub_render::RenderPage],
+    pages: &[epub_stream_render::RenderPage],
     display_width: i32,
     margin_right: i32,
     max_pages: usize,
@@ -601,7 +601,7 @@ fn gutenberg_corpus_sample_has_no_body_right_edge_overrun() {
 }
 
 fn assert_single_chapter_pagination_invariants(
-    pages: &[mu_epub_render::RenderPage],
+    pages: &[epub_stream_render::RenderPage],
     chapter_index: usize,
 ) {
     assert!(!pages.is_empty(), "expected non-empty pages");

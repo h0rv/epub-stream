@@ -1,4 +1,4 @@
-//! Render IR, layout engine, and orchestration for `mu-epub`.
+//! Render IR, layout engine, and orchestration for `epub-stream`.
 
 #![cfg_attr(
     not(test),
@@ -17,7 +17,7 @@ mod render_engine;
 mod render_ir;
 mod render_layout;
 
-pub use mu_epub::BlockRole;
+pub use epub_stream::BlockRole;
 pub use render_engine::{
     estimate_fragment_progress_in_html, remap_page_index_by_chapter_progress,
     resolve_page_index_for_chapter_progress, CancelToken, FileRenderCacheStore, LayoutSession,

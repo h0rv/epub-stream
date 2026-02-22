@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mu_epub::{EpubBook, MemoryBudget, RenderPrepOptions};
-use mu_epub_render::{
+use epub_stream::{EpubBook, MemoryBudget, RenderPrepOptions};
+use epub_stream_render::{
     CancelToken, OverlayComposer, OverlayContent, OverlayItem, OverlaySize, OverlaySlot,
     PageChromeConfig, PaginationProfileId, RenderBookPageMap, RenderCacheStore, RenderConfig,
     RenderDiagnostic, RenderEngine, RenderEngineError, RenderEngineOptions,
@@ -402,7 +402,7 @@ struct FooterOverlay;
 impl OverlayComposer for FooterOverlay {
     fn compose(
         &self,
-        metrics: &mu_epub_render::PageMetrics,
+        metrics: &epub_stream_render::PageMetrics,
         _viewport: OverlaySize,
     ) -> Vec<OverlayItem> {
         vec![OverlayItem {

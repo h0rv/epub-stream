@@ -1,6 +1,6 @@
 # Embedded Usage
 
-This guide documents the embedded-focused API surface in the `mu_epub` stack.
+This guide documents the embedded-focused API surface in the `epub_stream` stack.
 
 ## Production Tracker
 
@@ -10,7 +10,7 @@ For production-readiness gaps and priorities, see
 ## Open Lazily and Bound Navigation
 
 ```rust,no_run
-use mu_epub::{EpubBook, EpubBookOptions, OpenConfig, ZipLimits};
+use epub_stream::{EpubBook, EpubBookOptions, OpenConfig, ZipLimits};
 
 let options = EpubBookOptions {
     zip_limits: Some(ZipLimits::new(8 * 1024 * 1024, 2048)),
@@ -28,24 +28,24 @@ let mut book = EpubBook::from_reader_with_config(
 
 // Navigation parse is deferred until needed.
 let _ = book.ensure_navigation()?;
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ## Bounded Resource Streaming
 
 ```rust,no_run
-use mu_epub::EpubBook;
+use epub_stream::EpubBook;
 
 let mut book = EpubBook::open("book.epub")?;
 let mut out = Vec::new();
 book.read_resource_into_with_limit("xhtml/nav.xhtml", &mut out, 1024 * 1024)?;
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ## Stream Chapter Events
 
 ```rust,no_run
-use mu_epub::{ChapterEventsOptions, EpubBook, StyledEventOrRun};
+use epub_stream::{ChapterEventsOptions, EpubBook, StyledEventOrRun};
 
 let mut book = EpubBook::open("book.epub")?;
 let mut count = 0usize;
@@ -59,15 +59,15 @@ book.chapter_events(0, ChapterEventsOptions::default(), |item| {
     count += 1;
     Ok(())
 })?;
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ## Incremental Pagination and Cache Hooks
 
 ```rust,no_run
-use mu_epub::EpubBook;
-use mu_epub_embedded_graphics::with_embedded_text_measurer;
-use mu_epub_render::{RenderConfig, RenderEngine, RenderEngineOptions};
+use epub_stream::EpubBook;
+use epub_stream_embedded_graphics::with_embedded_text_measurer;
+use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 let mut book = EpubBook::open("book.epub")?;
 let engine = RenderEngine::new(RenderEngineOptions::for_display(480, 800));
@@ -89,8 +89,8 @@ let _ = &mut session;
 ## Memory Budgets in Render Prep
 
 ```rust,no_run
-use mu_epub::{MemoryBudget, RenderPrepOptions};
-use mu_epub_render::{RenderEngine, RenderEngineOptions};
+use epub_stream::{MemoryBudget, RenderPrepOptions};
+use epub_stream_render::{RenderEngine, RenderEngineOptions};
 
 let opts = RenderEngineOptions {
     prep: RenderPrepOptions {
@@ -113,10 +113,10 @@ let _engine = RenderEngine::new(opts);
 
 ```rust,no_run
 use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor};
-use mu_epub_embedded_graphics::{
+use epub_stream_embedded_graphics::{
     EgRenderConfig, EgRenderer, ImageFallbackPolicy, ImageRegistryLimits,
 };
-use mu_epub_render::RenderPage;
+use epub_stream_render::RenderPage;
 
 let renderer = EgRenderer::with_image_registry_limits(
     EgRenderConfig {

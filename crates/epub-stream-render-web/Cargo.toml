@@ -1,0 +1,16 @@
+[package]
+name = "epub-stream-render-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Web preview backend for epub-stream-render"
+
+[dependencies]
+epub_stream = { package = "epub-stream", version = "0.1.0", path = "../.." }
+epub_stream_render = { package = "epub-stream-render", version = "0.1.0", path = "../epub-stream-render" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

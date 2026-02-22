@@ -1,4 +1,4 @@
-//! embedded-graphics renderer for `mu-epub-render` pages.
+//! embedded-graphics renderer for `epub-stream-render` pages.
 
 #![cfg_attr(
     not(test),
@@ -27,7 +27,7 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use mu_epub_render::{
+use epub_stream_render::{
     DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeConfig,
     PageChromeKind, PageChromeTextStyle, RenderConfig, RenderPage, ResolvedTextStyle, TextCommand,
 };
@@ -446,7 +446,7 @@ impl Default for EgTextMeasurer<MonoFontBackend> {
 
 impl EgTextMeasurer<MonoFontBackend> {
     /// Create a shared measurer trait object for render-config wiring.
-    pub fn shared() -> Arc<dyn mu_epub_render::TextMeasurer> {
+    pub fn shared() -> Arc<dyn epub_stream_render::TextMeasurer> {
         Arc::new(Self::new())
     }
 }
@@ -469,7 +469,7 @@ pub fn with_embedded_text_measurer<'a>(config: RenderConfig<'a>) -> RenderConfig
     config.with_text_measurer(EgTextMeasurer::shared())
 }
 
-impl<B> mu_epub_render::TextMeasurer for EgTextMeasurer<B>
+impl<B> epub_stream_render::TextMeasurer for EgTextMeasurer<B>
 where
     B: FontBackend + Send + Sync,
 {
@@ -1945,7 +1945,7 @@ mod tests {
     use embedded_graphics::mock_display::MockDisplay;
     use std::{cell::RefCell, rc::Rc};
 
-    use mu_epub_render::{
+    use epub_stream_render::{
         BlockRole, DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeKind,
         RenderPage, ResolvedTextStyle, TextCommand, TextMeasurer,
     };
@@ -2688,7 +2688,7 @@ mod tests {
                 font_id: None,
                 style: base_style,
             }),
-            DrawCommand::Rule(mu_epub_render::RuleCommand {
+            DrawCommand::Rule(epub_stream_render::RuleCommand {
                 x: 0,
                 y: 12,
                 length: 8,

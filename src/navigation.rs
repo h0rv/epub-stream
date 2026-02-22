@@ -6,9 +6,9 @@
 //! # Usage
 //!
 //! ```rust,no_run
-//! use mu_epub::navigation::{parse_nav_xhtml, parse_ncx, Navigation};
+//! use epub_stream::navigation::{parse_nav_xhtml, parse_ncx, Navigation};
 //!
-//! # fn example() -> Result<(), mu_epub::error::EpubError> {
+//! # fn example() -> Result<(), epub_stream::error::EpubError> {
 //! // EPUB 3.x: parse the XHTML nav document
 //! let nav_xhtml_bytes = b"<html>...</html>";
 //! let nav = parse_nav_xhtml(nav_xhtml_bytes)?;

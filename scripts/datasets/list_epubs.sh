@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATASET_DIR="${MU_EPUB_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
+DATASET_DIR="${EPUB_STREAM_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
 
 if [ ! -d "$DATASET_DIR" ]; then
   echo "dataset directory not found: $DATASET_DIR"

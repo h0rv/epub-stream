@@ -1,11 +1,11 @@
-# MU-EPUB Renderer Plan and Spec
+# EPUB-STREAM Renderer Plan and Spec
 
 This document tracks completed renderer work and defines the active generic rendering spec for:
 
-- `mu-epub`
-- `mu-epub-render`
-- `mu-epub-embedded-graphics`
-- `mu-epub-render-web` (preview tooling backend)
+- `epub-stream`
+- `epub-stream-render`
+- `epub-stream-embedded-graphics`
+- `epub-stream-render-web` (preview tooling backend)
 
 No app/device/project-specific behavior is part of this contract.
 
@@ -14,25 +14,25 @@ No app/device/project-specific behavior is part of this contract.
 ## Completed
 
 1. Crate split is in place:
-- `mu-epub-render` exists as a separate crate for IR/layout/orchestration.
-- `mu-epub-embedded-graphics` exists as a separate crate for embedded-graphics execution.
+- `epub-stream-render` exists as a separate crate for IR/layout/orchestration.
+- `epub-stream-embedded-graphics` exists as a separate crate for embedded-graphics execution.
 
 2. Workspace wiring is complete:
 - Workspace members include all three crates.
 - Build/test/lint commands run across the split crates.
 
 3. Initial render stack APIs are present:
-- `RenderEngine::prepare_chapter(...)` in `mu-epub-render`.
-- `LayoutConfig` and `LayoutEngine` in `mu-epub-render`.
-- Render IR commands and page model in `mu-epub-render`.
-- `EgRenderer` command execution in `mu-epub-embedded-graphics`.
+- `RenderEngine::prepare_chapter(...)` in `epub-stream-render`.
+- `LayoutConfig` and `LayoutEngine` in `epub-stream-render`.
+- Render IR commands and page model in `epub-stream-render`.
+- `EgRenderer` command execution in `epub-stream-embedded-graphics`.
 
 4. Backend naming and references are complete:
-- Backend crate renamed to `mu-epub-embedded-graphics`.
+- Backend crate renamed to `epub-stream-embedded-graphics`.
 - README/justfile/docs references updated.
 
 5. Web-preview backend is available:
-- `mu-epub-render-web` provides an interactive web UI + local render API for TOC/image/font/layout validation with live option re-rendering.
+- `epub-stream-render-web` provides an interactive web UI + local render API for TOC/image/font/layout validation with live option re-rendering.
 
 5. Validation gates are passing:
 - `just all` (format/lint/check/tests/docs/cli).
@@ -50,15 +50,15 @@ No app/device/project-specific behavior is part of this contract.
 2. Align docs/spec status with implemented vs planned APIs before release.
 3. Drive embedded production blockers in `docs/embedded-render-tracker.md`.
 
-## MU-EPUB Renderer Spec (Generic Only)
+## EPUB-STREAM Renderer Spec (Generic Only)
 
 ## Scope
 
-Implement high-fidelity EPUB rendering in mu-epub ecosystem only:
+Implement high-fidelity EPUB rendering in epub-stream ecosystem only:
 
-- `mu-epub`
-- `mu-epub-render`
-- `mu-epub-embedded-graphics`
+- `epub-stream`
+- `epub-stream-render`
+- `epub-stream-embedded-graphics`
 
 No app/device/project-specific behavior in this spec.
 
@@ -71,26 +71,26 @@ No app/device/project-specific behavior in this spec.
 
 ## Architecture Contract
 
-1. `mu-epub`:
+1. `epub-stream`:
 
 - EPUB parsing, metadata/spine/resources.
 - CSS/style/font discovery + computed style stream.
 
-2. `mu-epub-render`:
+2. `epub-stream-render`:
 
 - Layout/pagination engine from styled stream -> backend-agnostic draw IR.
 
-3. `mu-epub-embedded-graphics`:
+3. `epub-stream-embedded-graphics`:
 
 - Draw IR execution on embedded-graphics targets with pluggable font backend.
 
-4. `mu-epub-render-web`:
+4. `epub-stream-render-web`:
 
 - Web-preview tooling that executes render IR into a browser-facing, self-contained HTML artifact.
 
 ## Required APIs
 
-In `mu-epub` (render_prep/book layer):
+In `epub-stream` (render_prep/book layer):
 
 1. `prepare_chapter_with(...)` streaming API (already present; keep stable).
 2. `prepare_chapter_with_trace_context(...)` with structured font/style trace.
@@ -102,7 +102,7 @@ In `mu-epub` (render_prep/book layer):
 - selector/declaration index
 - token/source context.
 
-In `mu-epub-render`:
+In `epub-stream-render`:
 
 1. `RenderEngine::prepare_chapter(...) -> Vec<RenderPage>`.
 2. `RenderEngine::prepare_chapter_with(...)` page streaming callback.
@@ -122,7 +122,7 @@ In `mu-epub-render`:
 
 5. Header/footer/progress must be represented in IR as commands, not backend special-casing.
 
-In `mu-epub-embedded-graphics`:
+In `epub-stream-embedded-graphics`:
 
 1. Font backend abstraction trait:
 
@@ -201,7 +201,7 @@ In `mu-epub-embedded-graphics`:
 
 - Render IR snapshots for representative EPUB fragments.
 
-3. Backend tests (`mu-epub-embedded-graphics`):
+3. Backend tests (`epub-stream-embedded-graphics`):
 
 - command execution correctness
 - justified text spacing distribution

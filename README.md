@@ -1,4 +1,4 @@
-# mu-epub (epμb)
+# epub-stream
 
 Memory-efficient EPUB parser for embedded systems.
 
@@ -23,21 +23,21 @@ Note: ZIP64 archives are currently not supported and are rejected explicitly.
 | `std`    | Standard library + ZIP   | yes     |
 | `layout` | Text layout / pagination | no      |
 | `async`  | Async file-open helpers  | no      |
-| `cli`    | `mu-epub` inspect binary | no      |
+| `cli`    | `epub-stream` inspect binary | no      |
 
 ## Usage
 
 ```toml
 [dependencies]
-mu-epub = "0.2"
+epub-stream = "0.2"
 ```
 
 ### Quick Start
 
 ```rust,no_run
-use mu_epub::EpubBook;
+use epub_stream::EpubBook;
 
-fn main() -> Result<(), mu_epub::EpubError> {
+fn main() -> Result<(), epub_stream::EpubError> {
     let mut book = EpubBook::open("book.epub")?;
 
     println!("Title: {}", book.title());
@@ -60,19 +60,19 @@ To enforce explicit limits, use either API below.
 #### Builder API
 
 ```rust,no_run
-use mu_epub::{EpubBook, ZipLimits};
+use epub_stream::{EpubBook, ZipLimits};
 
 let limits = ZipLimits::new(8 * 1024 * 1024, 1024); // explicit caps
 let mut book = EpubBook::builder()
     .with_zip_limits(limits)
     .open("book.epub")?;
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ### Chapter Ergonomics
 
 ```rust,no_run
-use mu_epub::EpubBook;
+use epub_stream::EpubBook;
 
 let mut book = EpubBook::open("book.epub")?;
 for chapter in book.chapters() {
@@ -81,33 +81,33 @@ for chapter in book.chapters() {
 
 let first_text = book.chapter_text(0)?;
 println!("chars={}", first_text.len());
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ### Rendering Stack (Decoupled Crates)
 
-`mu-epub` remains the EPUB parse/prep crate.
+`epub-stream` remains the EPUB parse/prep crate.
 Rendering is split into:
 
-1. `mu-epub-render`: render IR + layout engine + chapter-to-pages orchestration
-2. `mu-epub-embedded-graphics`: `embedded-graphics` backend executor for render commands
-3. `mu-epub-render-web`: self-contained HTML preview generator for rapid layout/font/TOC validation
+1. `epub-stream-render`: render IR + layout engine + chapter-to-pages orchestration
+2. `epub-stream-embedded-graphics`: `embedded-graphics` backend executor for render commands
+3. `epub-stream-render-web`: self-contained HTML preview generator for rapid layout/font/TOC validation
 
 Add local workspace deps:
 
 ```toml
 [dependencies]
-mu-epub = { path = "." }
-mu-epub-render = { path = "crates/mu-epub-render" }
-mu-epub-embedded-graphics = { path = "crates/mu-epub-embedded-graphics" }
-mu-epub-render-web = { path = "crates/mu-epub-render-web" }
+epub-stream = { path = "." }
+epub-stream-render = { path = "crates/epub-stream-render" }
+epub-stream-embedded-graphics = { path = "crates/epub-stream-embedded-graphics" }
+epub-stream-render-web = { path = "crates/epub-stream-render-web" }
 ```
 
 Prepare a chapter into backend-agnostic render pages:
 
 ```rust,no_run
-use mu_epub::EpubBook;
-use mu_epub_render::{RenderEngine, RenderEngineOptions};
+use epub_stream::EpubBook;
+use epub_stream_render::{RenderEngine, RenderEngineOptions};
 
 let mut book = EpubBook::open("book.epub")?;
 let engine = RenderEngine::new(RenderEngineOptions::for_display(480, 800));
@@ -121,10 +121,10 @@ Execute those pages on `embedded-graphics`:
 ```rust,no_run
 use embedded_graphics::mock_display::MockDisplay;
 use embedded_graphics::pixelcolor::BinaryColor;
-use mu_epub_embedded_graphics::EgRenderer;
+use epub_stream_embedded_graphics::EgRenderer;
 
-# use mu_epub::EpubBook;
-# use mu_epub_render::{RenderEngine, RenderEngineOptions};
+# use epub_stream::EpubBook;
+# use epub_stream_render::{RenderEngine, RenderEngineOptions};
 # let mut book = EpubBook::open("book.epub")?;
 # let engine = RenderEngine::new(RenderEngineOptions::for_display(480, 800));
 # let pages = engine.prepare_chapter(&mut book, 0)?;
@@ -158,35 +158,35 @@ just render-regression
 Install from crates.io:
 
 ```bash
-cargo install mu-epub --features cli --bin mu-epub
-mu-epub --help
+cargo install epub-stream --features cli --bin epub-stream
+epub-stream --help
 ```
 
 Inspect metadata and chapter lists:
 
 ```bash
-mu-epub metadata book.epub --pretty
-mu-epub chapters book.epub --ndjson
+epub-stream metadata book.epub --pretty
+epub-stream chapters book.epub --ndjson
 ```
 
 Extract chapter text for LLM/pipe workflows:
 
 ```bash
-mu-epub chapter-text book.epub --index 0 --raw > chapter-0.txt
-mu-epub toc book.epub --flat | jq .
+epub-stream chapter-text book.epub --index 0 --raw > chapter-0.txt
+epub-stream toc book.epub --flat | jq .
 ```
 
 Validate structure/compliance signals:
 
 ```bash
-mu-epub validate book.epub --pretty
-mu-epub validate book.epub --strict
+epub-stream validate book.epub --pretty
+epub-stream validate book.epub --strict
 ```
 
 #### Functional API
 
 ```rust,no_run
-use mu_epub::{parse_epub_file_with_options, EpubBookOptions, ZipLimits};
+use epub_stream::{parse_epub_file_with_options, EpubBookOptions, ZipLimits};
 
 let limits = ZipLimits::new(8 * 1024 * 1024, 1024);
 let options = EpubBookOptions {
@@ -196,7 +196,7 @@ let options = EpubBookOptions {
 
 let summary = parse_epub_file_with_options("book.epub", options)?;
 println!("Title: {}", summary.metadata().title);
-# Ok::<(), mu_epub::EpubError>(())
+# Ok::<(), epub_stream::EpubError>(())
 ```
 
 ## Design

@@ -1,11 +1,11 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`mu-epub` is a Rust workspace focused on memory-efficient EPUB parsing.
+`epub-stream` is a Rust workspace focused on memory-efficient EPUB parsing.
 - `src/`: core library modules (`zip`, `streaming`, `tokenizer`, `metadata`, `book`, `validate`, etc.).
-- `src/bin/mu-epub.rs`: CLI entrypoint (enabled by `cli` feature).
-- `crates/mu-epub-render`: render IR + layout orchestration.
-- `crates/mu-epub-embedded-graphics`: `embedded-graphics` backend.
+- `src/bin/epub-stream.rs`: CLI entrypoint (enabled by `cli` feature).
+- `crates/epub-stream-render`: render IR + layout orchestration.
+- `crates/epub-stream-embedded-graphics`: `embedded-graphics` backend.
 - `tests/`: integration, regression, allocation, and embedded-mode suites.
 - `tests/fixtures/`: sample EPUBs and benchmark corpus checksums.
 - `benches/epub_bench.rs`: benchmark target.

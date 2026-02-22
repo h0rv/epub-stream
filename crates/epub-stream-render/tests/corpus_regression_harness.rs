@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use mu_epub::{BlockRole, EpubBook};
-use mu_epub_render::{
+use epub_stream::{BlockRole, EpubBook};
+use epub_stream_render::{
     DrawCommand, RenderEngine, RenderEngineOptions, RenderPage, ResolvedTextStyle,
 };
 

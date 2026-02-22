@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATASET_DIR="${MU_EPUB_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
+DATASET_DIR="${EPUB_STREAM_DATASET_DIR:-$ROOT_DIR/tests/datasets}"
 CONFORMANCE_DIR="$DATASET_DIR/conformance"
 INTEROP_DIR="$DATASET_DIR/interop"
 EPUBTEST_DIR="$DATASET_DIR/a11y/epubtest"
@@ -42,7 +42,7 @@ download_gutenberg_epub() {
 
   local url="https://www.gutenberg.org/ebooks/${id}.epub.images"
   echo "downloading Gutenberg #$id"
-  if ! curl -fsSL -A "mu-epub-dataset-bootstrap/1.0" "$url" -o "$out"; then
+  if ! curl -fsSL -A "epub-stream-dataset-bootstrap/1.0" "$url" -o "$out"; then
     echo "failed Gutenberg #$id ($url)" >&2
     rm -f "$out"
     return 1

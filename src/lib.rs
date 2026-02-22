@@ -1,4 +1,4 @@
-//! mu-epub -- Memory-efficient EPUB parser for embedded systems
+//! epub-stream -- Memory-efficient EPUB parser for embedded systems
 //!
 //! Streaming EPUB parser designed for constrained devices. Provides SAX-style
 //! XML parsing, XHTML tokenization, and optional text layout/pagination.

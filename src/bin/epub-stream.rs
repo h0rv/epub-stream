@@ -1,10 +1,10 @@
 use std::env;
 use std::process::ExitCode;
 
-use mu_epub::metadata::EpubMetadata;
-use mu_epub::navigation::NavPoint;
-use mu_epub::validate::{validate_epub_file, ValidationDiagnostic, ValidationSeverity};
-use mu_epub::{ChapterRef, EpubBook, EpubError};
+use epub_stream::metadata::EpubMetadata;
+use epub_stream::navigation::NavPoint;
+use epub_stream::validate::{validate_epub_file, ValidationDiagnostic, ValidationSeverity};
+use epub_stream::{ChapterRef, EpubBook, EpubError};
 
 #[derive(Clone, Debug)]
 enum Json {
@@ -295,7 +295,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "unknown command '{}'; run `mu-epub --help` for usage",
+                "unknown command '{}'; run `epub-stream --help` for usage",
                 cmd
             ));
         }
@@ -535,10 +535,10 @@ fn display_err(err: EpubError) -> String {
 }
 
 fn print_help() {
-    let help = r#"mu-epub (epμb) - inspect EPUB files
+    let help = r#"epub-stream (epμb) - inspect EPUB files
 
 USAGE:
-  mu-epub [--pretty] <command> [args...]
+  epub-stream [--pretty] <command> [args...]
 
 COMMANDS:
   metadata <epub_path>

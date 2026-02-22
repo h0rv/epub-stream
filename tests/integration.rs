@@ -1,4 +1,4 @@
-//! Integration tests for mu-epub
+//! Integration tests for epub-stream
 //!
 //! Tests marked #[ignore] require a sample EPUB in tests/fixtures/.
 //! Run all:    cargo test --all-features -- --include-ignored
@@ -6,13 +6,13 @@
 
 use std::fs::File;
 
-use mu_epub::book::{EpubBook, ValidationMode};
+use epub_stream::book::{EpubBook, ValidationMode};
 #[cfg(feature = "layout")]
-use mu_epub::layout::LayoutEngine;
-use mu_epub::metadata::parse_opf;
-use mu_epub::spine::parse_spine;
-use mu_epub::tokenizer::{tokenize_html, Token};
-use mu_epub::zip::StreamingZip;
+use epub_stream::layout::LayoutEngine;
+use epub_stream::metadata::parse_opf;
+use epub_stream::spine::parse_spine;
+use epub_stream::tokenizer::{tokenize_html, Token};
+use epub_stream::zip::StreamingZip;
 
 const SAMPLE_EPUB_PATH: &str =
     "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub";

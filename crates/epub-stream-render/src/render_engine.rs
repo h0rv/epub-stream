@@ -1,5 +1,5 @@
-use mu_epub::navigation::NavPoint;
-use mu_epub::{
+use epub_stream::navigation::NavPoint;
+use epub_stream::{
     BlockRole, ChapterRef, EpubBook, FontPolicy, Locator, Navigation, RenderPrep, RenderPrepError,
     RenderPrepOptions, StyledEventOrRun,
 };
@@ -289,7 +289,7 @@ impl RenderBookPageMap {
         self.resolve_href(href)
     }
 
-    /// Resolve a `mu_epub::Locator` into a rendered page target.
+    /// Resolve a `epub_stream::Locator` into a rendered page target.
     ///
     /// Pass `navigation` when resolving `Locator::TocId`.
     pub fn resolve_locator(
@@ -362,7 +362,7 @@ impl RenderBookPageMap {
 
     fn resolve_position_locator(
         &self,
-        position: &mu_epub::ReadingPosition,
+        position: &epub_stream::ReadingPosition,
     ) -> Option<RenderLocatorPageTarget> {
         if let Some(href) = position.chapter_href.as_deref() {
             if let Some(anchor) = position
@@ -2372,7 +2372,7 @@ mod tests {
         PageAnnotation, PageChromeCommand, PageChromeKind, RectCommand, ResolvedTextStyle,
         RuleCommand, TextCommand,
     };
-    use mu_epub::{BlockRole, ChapterRef, ComputedTextStyle, StyledEvent, StyledRun};
+    use epub_stream::{BlockRole, ChapterRef, ComputedTextStyle, StyledEvent, StyledRun};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2500,7 +2500,7 @@ mod tests {
     fn temp_cache_root(label: &str) -> PathBuf {
         let nonce = CACHE_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "mu-epub-render-{label}-{}-{nonce}",
+            "epub-stream-render-{label}-{}-{nonce}",
             std::process::id()
         ))
     }

@@ -5,9 +5,9 @@ Last updated: 2026-02-21
 ## Scope
 This tracker covers remaining work to make embedded rendering production-grade across:
 
-- `mu_epub`
-- `mu-epub-render`
-- `mu-epub-embedded-graphics`
+- `epub_stream`
+- `epub-stream-render`
+- `epub-stream-embedded-graphics`
 
 ## Status Legend
 
@@ -19,7 +19,7 @@ This tracker covers remaining work to make embedded rendering production-grade a
 ## Current Baseline
 
 - Streaming parse + bounded prep APIs exist.
-- Render pipeline split is in place (`mu-epub-render` + `mu-epub-embedded-graphics`).
+- Render pipeline split is in place (`epub-stream-render` + `epub-stream-embedded-graphics`).
 - Web reflow regression harness exists for config mapping and text-boundary checks.
 - Embedded tiny-budget and allocation tests exist and are passing locally (`just test-embedded`, `just test-alloc`).
 - Embedded renderer now exposes deterministic fallback/budget diagnostics with low-overhead counters.
@@ -75,7 +75,7 @@ Every item below must follow `docs/memory-management.md`.
   Required tests: right-edge clipping invariants over font-size/family/spacing matrix.
 
 - [x] `EMB-005` Embedded dynamic reflow regression matrix (`done`)
-  Current: dedicated embedded matrix regression test now runs in `mu-epub-embedded-graphics` and is wired into `just render-regression`.
+  Current: dedicated embedded matrix regression test now runs in `epub-stream-embedded-graphics` and is wired into `just render-regression`.
   Done when: embedded-oriented regression matrix covers font size, line spacing, justification, family override, viewport changes.
   Memory constraints: fixture-driven tests with strict page/item limits.
   Required tests: chapter page count monotonicity, page index monotonicity, progress monotonicity, no-overflow checks.
@@ -131,7 +131,7 @@ Every item below must follow `docs/memory-management.md`.
   Done when: optional dictionary path improves breaks while preserving deterministic bounded behavior.
 
 - [ ] `EMB-016` Robust corpus regression at scale (`partial`)
-  Current: `mu-epub-render` corpus harness now discovers bench fixtures dynamically and validates multi-profile invariants (right-edge safety, monotonic progress, page metrics sanity, and sampled page-range consistency).
+  Current: `epub-stream-render` corpus harness now discovers bench fixtures dynamically and validates multi-profile invariants (right-edge safety, monotonic progress, page metrics sanity, and sampled page-range consistency).
   Done when: large fixture corpus includes layout/render invariants and expected-failure baselines.
 
 ### P2 Strategic (defer until P0/P1 stable)
@@ -150,10 +150,10 @@ Required gate set for production progression:
 - `just embedded-low-ram-matrix`
 - `just embedded-budget-telemetry`
 - `just test-alloc`
-- `cargo test -p mu-epub-embedded-graphics`
-- `cargo test -p mu-epub-render --test corpus_regression_harness`
-- `cargo test -p mu-epub-render --test typography_regression`
-- `cargo test -p mu-epub-render-web --bin web-preview`
+- `cargo test -p epub-stream-embedded-graphics`
+- `cargo test -p epub-stream-render --test corpus_regression_harness`
+- `cargo test -p epub-stream-render --test typography_regression`
+- `cargo test -p epub-stream-render-web --bin web-preview`
 - `just lint-memory`
 - `just check-no-std-layout`
 

@@ -80,7 +80,7 @@ impl std::error::Error for TokenizeError {}
 ///
 /// # Example
 /// ```
-/// use mu_epub::tokenizer::tokenize_html;
+/// use epub_stream::tokenizer::tokenize_html;
 ///
 /// let html = "<p>Hello <em>world</em></p>";
 /// let tokens = tokenize_html(html).unwrap();
@@ -821,7 +821,7 @@ impl TokenizeScratch {
     ///
     /// # Example
     /// ```
-    /// use mu_epub::tokenizer::TokenizeScratch;
+    /// use epub_stream::tokenizer::TokenizeScratch;
     ///
     /// let scratch = TokenizeScratch::new(4096, 8192);
     /// ```
@@ -900,7 +900,7 @@ impl TokenizeScratch {
 ///
 /// # Example
 /// ```
-/// use mu_epub::tokenizer::{tokenize_html_into, Token};
+/// use epub_stream::tokenizer::{tokenize_html_into, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
 /// let mut tokens: Vec<Token> = Vec::with_capacity(0);
@@ -934,7 +934,7 @@ pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(),
 ///
 /// # Example
 /// ```
-/// use mu_epub::tokenizer::{tokenize_html_with_scratch, TokenizeScratch, Token};
+/// use epub_stream::tokenizer::{tokenize_html_with_scratch, TokenizeScratch, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
 /// let mut tokens: Vec<Token> = Vec::with_capacity(0);

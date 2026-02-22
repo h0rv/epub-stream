@@ -4,9 +4,9 @@ This document captures migration updates for downstream consumers moving to the 
 
 ## Crate Split
 
-- Use `mu-epub` for EPUB parse/style/font preparation.
-- Use `mu-epub-render` for layout and render IR generation.
-- Use `mu-epub-embedded-graphics` for embedded-graphics draw execution.
+- Use `epub-stream` for EPUB parse/style/font preparation.
+- Use `epub-stream-render` for layout and render IR generation.
+- Use `epub-stream-embedded-graphics` for embedded-graphics draw execution.
 
 ## Render Engine Construction
 
@@ -29,7 +29,7 @@ If you currently rely on optional trace callbacks, switch to `RenderPrepTrace` a
 
 ## Pagination APIs
 
-- New APIs in `mu-epub-render`:
+- New APIs in `epub-stream-render`:
   - `prepare_chapter_page_range(...)`
   - `prepare_chapter_iter(...)`
   - `prepare_chapter_iter_streaming(...)` (owned-book, backpressured streaming iterator)

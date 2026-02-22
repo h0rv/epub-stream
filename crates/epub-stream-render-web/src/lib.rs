@@ -1,4 +1,4 @@
-//! Web preview helpers for `mu-epub-render`.
+//! Web preview helpers for `epub-stream-render`.
 
 /// Crate marker module.
 pub mod preview {

@@ -755,7 +755,7 @@ impl EpubBook<File> {
     ///
     /// # Example
     /// ```no_run
-    /// use mu_epub::book::{EpubBook, OpenConfig, EpubBookOptions};
+    /// use epub_stream::book::{EpubBook, OpenConfig, EpubBookOptions};
     ///
     /// let config = OpenConfig {
     ///     options: EpubBookOptions::default(),
@@ -786,8 +786,8 @@ impl EpubBook<File> {
 
         // Create temp file paths
         let temp_dir = temp_dir.as_ref();
-        let container_temp = temp_dir.join(".mu_epub_container.xml");
-        let opf_temp = temp_dir.join(".mu_epub_opf.xml");
+        let container_temp = temp_dir.join(".epub_stream_container.xml");
+        let opf_temp = temp_dir.join(".epub_stream_opf.xml");
 
         // Stream container.xml to temp file instead of loading into RAM
         let mut container_file = File::create(&container_temp)
@@ -1140,7 +1140,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// This is a bounded convenience API for consumers that need image bytes
     /// (cover extraction, inline-image prefetch, etc.) while keeping policy
-    /// and limits in `mu-epub` rather than downstream crates.
+    /// and limits in `epub-stream` rather than downstream crates.
     pub fn read_image_resource_into_with_options(
         &mut self,
         href: &str,

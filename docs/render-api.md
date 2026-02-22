@@ -2,20 +2,20 @@
 
 This guide covers the recommended render pipeline APIs across:
 
-- `mu-epub` (parse + style/font prep)
-- `mu-epub-render` (layout and render IR)
-- `mu-epub-embedded-graphics` (draw execution backend)
+- `epub-stream` (parse + style/font prep)
+- `epub-stream-render` (layout and render IR)
+- `epub-stream-embedded-graphics` (draw execution backend)
 
 ## Minimal Flow
 
 ```rust
-use mu_epub::{EpubBook, RenderPrep, RenderPrepOptions};
-use mu_epub_render::{LayoutConfig, RenderEngine, RenderEngineOptions};
+use epub_stream::{EpubBook, RenderPrep, RenderPrepOptions};
+use epub_stream_render::{LayoutConfig, RenderEngine, RenderEngineOptions};
 
 fn render_chapter_pages<R: std::io::Read + std::io::Seek>(
     book: &mut EpubBook<R>,
     chapter_index: usize,
-) -> Result<Vec<mu_epub_render::RenderPage>, Box<dyn std::error::Error>> {
+) -> Result<Vec<epub_stream_render::RenderPage>, Box<dyn std::error::Error>> {
     let opts = RenderEngineOptions {
         prep: RenderPrepOptions::default(),
         layout: LayoutConfig::default(),
@@ -29,8 +29,8 @@ fn render_chapter_pages<R: std::io::Read + std::io::Seek>(
 ## Streaming Layout Flow
 
 ```rust
-use mu_epub::{EpubBook, RenderPrep, RenderPrepOptions};
-use mu_epub_render::{LayoutConfig, RenderEngine, RenderEngineOptions, RenderPage};
+use epub_stream::{EpubBook, RenderPrep, RenderPrepOptions};
+use epub_stream_render::{LayoutConfig, RenderEngine, RenderEngineOptions, RenderPage};
 
 fn stream_pages<R: std::io::Read + std::io::Seek>(
     book: &mut EpubBook<R>,
@@ -52,8 +52,8 @@ fn stream_pages<R: std::io::Read + std::io::Seek>(
 ## Range and Lazy Pagination
 
 ```rust
-use mu_epub::{EpubBook, RenderPrep, RenderPrepOptions};
-use mu_epub_render::{LayoutConfig, RenderEngine, RenderEngineOptions};
+use epub_stream::{EpubBook, RenderPrep, RenderPrepOptions};
+use epub_stream_render::{LayoutConfig, RenderEngine, RenderEngineOptions};
 
 fn read_page_window<R: std::io::Read + std::io::Seek>(
     book: &mut EpubBook<R>,
@@ -76,7 +76,7 @@ fn read_page_window<R: std::io::Read + std::io::Seek>(
 ## Advanced Trace + Embedded Fonts
 
 ```rust
-use mu_epub::{
+use epub_stream::{
     EmbeddedFontFace, EmbeddedFontStyle, EpubBook, RenderPrep, RenderPrepOptions, StyledEventOrRun,
 };
 

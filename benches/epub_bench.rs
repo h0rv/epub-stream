@@ -6,11 +6,11 @@ use std::time::Instant;
 
 use epub::doc::EpubDoc;
 use epub_parser::Epub as EpubParser;
-use mu_epub::metadata::{parse_container_xml, parse_opf};
-use mu_epub::spine::parse_spine;
-use mu_epub::tokenizer::tokenize_html;
-use mu_epub::zip::StreamingZip;
-use mu_epub::EpubBook;
+use epub_stream::metadata::{parse_container_xml, parse_opf};
+use epub_stream::spine::parse_spine;
+use epub_stream::tokenizer::tokenize_html;
+use epub_stream::zip::StreamingZip;
+use epub_stream::EpubBook;
 
 #[derive(Clone, Copy)]
 struct Fixture {
@@ -256,7 +256,7 @@ where
 }
 
 fn main() {
-    println!("# mu-epub benchmark corpus");
+    println!("# epub-stream benchmark corpus");
     println!(
         "# warmup_iters={}, measure_iters={}",
         WARMUP_ITERS, MEASURE_ITERS
@@ -380,7 +380,7 @@ fn main() {
     }
 
     println!("# summary");
-    println!("fixture,metric,mu-epub_median_ns,other_median_ns,ratio_x,delta_percent");
+    println!("fixture,metric,epub-stream_median_ns,other_median_ns,ratio_x,delta_percent");
 
     let find_median = |fixture: &str, case: &str| -> u128 {
         results
@@ -410,17 +410,17 @@ fn main() {
         };
 
         print_compare(
-            "open_book: mu-epub vs epub-rs",
+            "open_book: epub-stream vs epub-rs",
             "high_level/open_book",
             "compare/epub-rs/open_book",
         );
         print_compare(
-            "open+read_first: mu-epub vs epub-rs",
+            "open+read_first: epub-stream vs epub-rs",
             "high_level/open_and_tokenize_first",
             "compare/epub-rs/open_and_get_current",
         );
         print_compare(
-            "open_book: mu-epub vs epub-parser(parse)",
+            "open_book: epub-stream vs epub-parser(parse)",
             "high_level/open_book",
             "compare/epub-parser/parse",
         );
@@ -428,7 +428,7 @@ fn main() {
 
     println!("# memory_summary");
     println!(
-        "fixture,metric,mu-epub_median_peak_heap_bytes,other_median_peak_heap_bytes,ratio_x,delta_percent"
+        "fixture,metric,epub-stream_median_peak_heap_bytes,other_median_peak_heap_bytes,ratio_x,delta_percent"
     );
     for fixture in FIXTURES {
         let print_mem_compare = |label: &str, base: &str, other: &str| {
@@ -443,17 +443,17 @@ fn main() {
         };
 
         print_mem_compare(
-            "open_book: mu-epub vs epub-rs",
+            "open_book: epub-stream vs epub-rs",
             "high_level/open_book",
             "compare/epub-rs/open_book",
         );
         print_mem_compare(
-            "open+read_first: mu-epub vs epub-rs",
+            "open+read_first: epub-stream vs epub-rs",
             "high_level/open_and_tokenize_first",
             "compare/epub-rs/open_and_get_current",
         );
         print_mem_compare(
-            "open_book: mu-epub vs epub-parser(parse)",
+            "open_book: epub-stream vs epub-parser(parse)",
             "high_level/open_book",
             "compare/epub-parser/parse",
         );

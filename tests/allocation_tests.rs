@@ -8,9 +8,9 @@ use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use mu_epub::book::EpubBook;
-use mu_epub::zip::StreamingZip;
-use mu_epub::zip::ZipLimits;
+use epub_stream::book::EpubBook;
+use epub_stream::zip::StreamingZip;
+use epub_stream::zip::ZipLimits;
 
 const SAMPLE_EPUB_PATH: &str =
     "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub";
