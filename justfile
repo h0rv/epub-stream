@@ -360,23 +360,31 @@ publish-order:
 package crate:
     RUSTC_WRAPPER= cargo package -p {{crate}}
 
+# Local package sanity check without dependency verification (for unpublished local deps).
+package-no-verify crate:
+    RUSTC_WRAPPER= cargo package -p {{crate}} --no-verify
+
 # Local package sanity check for all crates in publish order.
 package-all:
     just package mu-epub
-    just package mu-epub-render
-    just package mu-epub-embedded-graphics
-    just package mu-epub-render-web
+    just package-no-verify mu-epub-render
+    just package-no-verify mu-epub-embedded-graphics
+    just package-no-verify mu-epub-render-web
 
 # Dry-run publish for one crate.
 publish-dry-run crate:
     RUSTC_WRAPPER= cargo publish -p {{crate}} --dry-run
 
+# Dry-run publish without dependency verification (for unpublished local deps).
+publish-dry-run-no-verify crate:
+    RUSTC_WRAPPER= cargo publish -p {{crate}} --dry-run --no-verify
+
 # Dry-run publish for all crates in dependency order.
 publish-dry-run-all:
     just publish-dry-run mu-epub
-    just publish-dry-run mu-epub-render
-    just publish-dry-run mu-epub-embedded-graphics
-    just publish-dry-run mu-epub-render-web
+    just publish-dry-run-no-verify mu-epub-render
+    just publish-dry-run-no-verify mu-epub-embedded-graphics
+    just publish-dry-run-no-verify mu-epub-render-web
 
 # Full release preflight before publishing.
 release-preflight:
