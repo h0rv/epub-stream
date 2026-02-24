@@ -2979,7 +2979,10 @@ mod tests {
                 saw_run = true;
                 let font_trace = trace.font_trace().expect("run should include font trace");
                 assert_eq!(run.font_id, font_trace.face.font_id);
-                assert_eq!(run.resolved_family, font_trace.face.family);
+                assert_eq!(
+                    run.resolved_family.as_deref(),
+                    Some(font_trace.face.family.as_str())
+                );
             }
         })
         .expect("prepare_chapter_with_trace_context should succeed");
@@ -3013,7 +3016,10 @@ mod tests {
                     RenderPrepTrace::Run { style, font } => {
                         assert_eq!(style.as_ref(), &run.style);
                         assert_eq!(font.face.font_id, run.font_id);
-                        assert_eq!(font.face.family, run.resolved_family);
+                        assert_eq!(
+                            Some(font.face.family.as_str()),
+                            run.resolved_family.as_deref()
+                        );
                     }
                     RenderPrepTrace::Event => panic!("run item should produce run trace context"),
                 }

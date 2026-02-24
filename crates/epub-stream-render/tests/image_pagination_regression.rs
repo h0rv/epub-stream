@@ -16,7 +16,7 @@ fn body_run(text: &str) -> StyledEventOrRun {
             block_role: BlockRole::Body,
         },
         font_id: 0,
-        resolved_family: "serif".to_string(),
+        resolved_family: Some("serif".into()),
     })
 }
 
