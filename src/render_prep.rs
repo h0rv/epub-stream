@@ -10,6 +10,7 @@ use core::cmp::min;
 use core::fmt;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::book::EpubBook;
@@ -420,7 +421,7 @@ pub enum BlockRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComputedTextStyle {
     /// Ordered family preference stack.
-    pub family_stack: Vec<String>,
+    pub family_stack: SmallVec<[String; 2]>,
     /// Numeric weight.
     pub weight: u16,
     /// Italic toggle.
@@ -958,7 +959,11 @@ impl Styler {
             .font_family
             .as_ref()
             .map(|fam| split_family_stack(fam))
-            .unwrap_or_else(|| vec!["serif".to_string()]);
+            .unwrap_or_else(|| {
+                let mut stack = SmallVec::new();
+                stack.push("serif".to_string());
+                stack
+            });
         let letter_spacing = resolved.letter_spacing.unwrap_or(0.0);
 
         ComputedTextStyle {
@@ -2026,7 +2031,7 @@ fn resolve_item_assets_for_chapter(
     item
 }
 
-fn split_family_stack(value: &str) -> Vec<String> {
+fn split_family_stack(value: &str) -> SmallVec<[String; 2]> {
     value
         .split(',')
         .map(|part| part.trim().trim_matches('"').trim_matches('\''))
@@ -3104,7 +3109,7 @@ mod tests {
     fn font_resolver_trace_reports_fallback_chain() {
         let resolver = FontResolver::new(FontPolicy::serif_default());
         let style = ComputedTextStyle {
-            family_stack: vec!["A".to_string(), "B".to_string()],
+            family_stack: vec!["A".to_string(), "B".to_string()].into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -3142,7 +3147,7 @@ mod tests {
             .register_epub_fonts(faces, |_href| Ok(vec![1, 2, 3]))
             .expect("register should succeed");
         let style = ComputedTextStyle {
-            family_stack: vec!["Literata".to_string()],
+            family_stack: vec!["Literata".to_string()].into(),
             weight: 680,
             italic: true,
             size_px: 16.0,
@@ -3159,7 +3164,7 @@ mod tests {
     fn font_resolver_reports_missing_glyph_risk_for_non_ascii_fallback() {
         let resolver = FontResolver::new(FontPolicy::serif_default());
         let style = ComputedTextStyle {
-            family_stack: vec!["NoSuchFamily".to_string()],
+            family_stack: vec!["NoSuchFamily".to_string()].into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -3192,7 +3197,7 @@ mod tests {
             .register_epub_fonts(vec![face.clone(), face], |_href| Ok(vec![1, 2, 3]))
             .expect("register should succeed");
         let style = ComputedTextStyle {
-            family_stack: vec!["Literata".to_string()],
+            family_stack: vec!["Literata".to_string()].into(),
             weight: 400,
             italic: false,
             size_px: 16.0,

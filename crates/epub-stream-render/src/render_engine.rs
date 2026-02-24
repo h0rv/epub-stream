@@ -2381,7 +2381,7 @@ mod tests {
         StyledEventOrRun::Run(StyledRun {
             text: text.to_string(),
             style: ComputedTextStyle {
-                family_stack: vec!["serif".to_string()],
+                family_stack: vec!["serif".to_string()].into(),
                 weight: 400,
                 italic: false,
                 size_px: 16.0,
