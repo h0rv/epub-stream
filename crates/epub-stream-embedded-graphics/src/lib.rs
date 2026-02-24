@@ -340,7 +340,7 @@ impl ImageRegistry {
         Self {
             limits,
             total_pixels: 0,
-            entries: Vec::with_capacity(0),
+            entries: Vec::with_capacity(8),
         }
     }
 
@@ -756,8 +756,13 @@ impl Default for TtfBackendOptions {
     }
 }
 
+/// Maximum selectable font faces in the TTF backend.
+///
+/// Face IDs are encoded in 5 bits (`0b0001_1111` = 31 max index), limiting
+/// the maximum to 32 faces. This is a structural constraint of the compact
+/// `FontId` encoding and cannot be raised without changing the face ID format.
 #[cfg(feature = "ttf-backend")]
-const TTF_MAX_SELECTABLE_FACES: usize = 32;
+pub const TTF_MAX_SELECTABLE_FACES: usize = 32;
 #[cfg(feature = "ttf-backend")]
 const TTF_FACE_ID_MARKER: u8 = 0b1000_0000;
 #[cfg(feature = "ttf-backend")]
@@ -805,7 +810,18 @@ impl Default for TtfFontBackend {
 #[cfg(feature = "ttf-backend")]
 impl TtfFontBackend {
     /// Create a TTF backend with explicit options.
+    ///
+    /// If `options.max_faces` exceeds [`TTF_MAX_SELECTABLE_FACES`] (32), it is
+    /// clamped and a warning is logged.
     pub fn new(options: TtfBackendOptions) -> Self {
+        if options.max_faces > TTF_MAX_SELECTABLE_FACES {
+            log::warn!(
+                "TtfBackendOptions.max_faces ({}) exceeds TTF backend cap ({}), clamping to {}",
+                options.max_faces,
+                TTF_MAX_SELECTABLE_FACES,
+                TTF_MAX_SELECTABLE_FACES,
+            );
+        }
         Self {
             mono_fallback: MonoFontBackend,
             options,
@@ -1893,7 +1909,7 @@ fn fallback_image_label(image: &ImageObjectCommand) -> Option<String> {
 
 fn truncate_ascii_with_ellipsis(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
-        return String::with_capacity(0);
+        return String::with_capacity(32);
     }
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {

@@ -19,7 +19,7 @@ use std::path::Path;
 use crate::error::{
     EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
 };
-use crate::metadata::{extract_metadata, EpubMetadata};
+use crate::metadata::{extract_metadata_with_limits, EpubMetadata, MetadataLimits};
 use crate::navigation::{parse_nav_xhtml, parse_ncx, NavPoint, Navigation};
 use crate::render_prep::{
     parse_font_faces_from_css, parse_stylesheet_links, ChapterStylesheets, EmbeddedFontFace,
@@ -53,6 +53,8 @@ pub struct EpubBookOptions {
     pub validation_mode: ValidationMode,
     /// Optional cap for navigation payload bytes.
     pub max_nav_bytes: Option<usize>,
+    /// Limits for metadata/spine parsing (manifest items, spine items, etc.).
+    pub metadata_limits: MetadataLimits,
 }
 
 impl Default for EpubBookOptions {
@@ -61,6 +63,7 @@ impl Default for EpubBookOptions {
             zip_limits: None,
             validation_mode: ValidationMode::Lenient,
             max_nav_bytes: None,
+            metadata_limits: MetadataLimits::default(),
         }
     }
 }
@@ -773,7 +776,7 @@ impl EpubBook<File> {
         temp_dir: TP,
         config: OpenConfig,
     ) -> Result<Self, EpubError> {
-        use crate::metadata::{parse_container_xml_file, parse_opf_file};
+        use crate::metadata::{parse_container_xml_file, parse_opf_file_with_limits};
 
         let options = config.options;
         let mut zip = StreamingZip::new_with_limits(
@@ -814,7 +817,7 @@ impl EpubBook<File> {
             uncompressed_size: opf_entry.uncompressed_size,
             local_header_offset: opf_entry.local_header_offset,
             crc32: opf_entry.crc32,
-            filename: String::with_capacity(0),
+            filename: String::with_capacity(32),
         };
 
         // Stream OPF to temp file instead of loading into RAM
@@ -825,14 +828,15 @@ impl EpubBook<File> {
         drop(opf_file);
 
         // Parse OPF from file
-        let mut metadata = parse_opf_file(&opf_temp)
+        let mut metadata = parse_opf_file_with_limits(&opf_temp, &options.metadata_limits)
             .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
 
         // Store the OPF path in metadata
         metadata.opf_path = Some(opf_path.clone());
 
         // Parse spine from file to avoid full OPF buffering
-        let spine = crate::spine::parse_spine_file(&opf_temp)?;
+        let spine =
+            crate::spine::parse_spine_file_with_limits(&opf_temp, &options.metadata_limits)?;
 
         // Clean up OPF temp file
         let _ = std::fs::remove_file(&opf_temp);
@@ -909,8 +913,8 @@ impl<R: Read + Seek> EpubBook<R> {
         let container = read_entry(&mut zip, "META-INF/container.xml")?;
         let opf_path = crate::metadata::parse_container_xml(&container)?;
         let opf = read_entry(&mut zip, &opf_path)?;
-        let metadata = extract_metadata(&container, &opf)?;
-        let spine = crate::spine::parse_spine(&opf)?;
+        let metadata = extract_metadata_with_limits(&container, &opf, &options.metadata_limits)?;
+        let spine = crate::spine::parse_spine_with_limits(&opf, &options.metadata_limits)?;
         validate_open_invariants(&metadata, &spine, options.validation_mode)?;
         let (navigation, navigation_loaded) = if config.lazy_navigation {
             (None, false)
@@ -1083,7 +1087,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For bounded allocation, use `read_resource_into_with_limit`.
     pub fn read_resource(&mut self, href: &str) -> Result<Vec<u8>, EpubError> {
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         self.read_resource_into(href, &mut out)?;
         Ok(out)
     }
@@ -1207,7 +1211,7 @@ impl<R: Read + Seek> EpubBook<R> {
             candidates.rotate_left(1);
         }
 
-        let mut doc_buf = Vec::with_capacity(0);
+        let mut doc_buf = Vec::with_capacity(8);
         for candidate in candidates {
             let zip_path = resolve_opf_relative_path(&self.opf_path, &candidate.href);
             if is_supported_image_resource(
@@ -1307,7 +1311,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For bounded allocation, use `chapter_html_into_with_limit`.
     pub fn chapter_html(&mut self, index: usize) -> Result<String, EpubError> {
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         self.chapter_html_into(index, &mut out)?;
         Ok(out)
     }
@@ -1331,7 +1335,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ) -> Result<(), EpubError> {
         out.clear();
         let chapter = self.chapter(index)?;
-        let mut bytes = Vec::with_capacity(0);
+        let mut bytes = Vec::with_capacity(8);
         self.read_resource_into_with_hard_cap(&chapter.href, &mut bytes, max_bytes)?;
         let mut html = String::from_utf8(bytes)
             .map_err(|_| EpubError::ChapterNotUtf8 { href: chapter.href })?;
@@ -1353,7 +1357,7 @@ impl<R: Read + Seek> EpubBook<R> {
         let chapter = self.chapter(index)?;
         let html = self.chapter_html(index)?;
         let links = parse_stylesheet_links(&chapter.href, &html);
-        let mut sources = Vec::with_capacity(0);
+        let mut sources = Vec::with_capacity(8);
 
         for href in links {
             let bytes = self.read_resource(&href)?;
@@ -1538,7 +1542,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ) -> Result<StyledChapter, EpubError> {
         let mut prep = RenderPrep::new(options).with_serif_default();
         let prepared = prep.prepare_chapter(self, index).map_err(EpubError::from)?;
-        let mut items = Vec::with_capacity(0);
+        let mut items = Vec::with_capacity(8);
         for item in prepared.iter() {
             items.push(item.clone());
         }
@@ -1677,7 +1681,7 @@ impl<R: Read + Seek> EpubBook<R> {
 
         // Read chapter into caller-provided buffer using scratch for I/O
         let use_entry = CdEntry {
-            filename: String::with_capacity(0),
+            filename: String::with_capacity(32),
             method: entry.method,
             compressed_size: entry.compressed_size,
             uncompressed_size: entry.uncompressed_size,
@@ -1758,7 +1762,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For lower memory usage, prefer `chapter_text_into`/`chapter_text_with_limit`.
     pub fn chapter_text(&mut self, index: usize) -> Result<String, EpubError> {
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         self.chapter_text_into(index, &mut out)?;
         Ok(out)
     }
@@ -1784,7 +1788,7 @@ impl<R: Read + Seek> EpubBook<R> {
         index: usize,
         max_bytes: usize,
     ) -> Result<String, EpubError> {
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         self.chapter_text_into_with_limit(index, max_bytes, &mut out)?;
         Ok(out)
     }
@@ -1845,7 +1849,7 @@ impl<R: Read + Seek> EpubBook<R> {
                 .filter(|item| item.media_type == "text/css")
                 .map(|item| item.href.clone())
                 .collect();
-            let mut out = Vec::with_capacity(0);
+            let mut out = Vec::with_capacity(8);
             for href in css_hrefs {
                 let bytes = self.read_resource(&href)?;
                 let css = String::from_utf8(bytes)
@@ -1875,8 +1879,8 @@ fn load_summary_from_zip<R: Read + Seek>(
     let container = read_entry(zip, "META-INF/container.xml")?;
     let opf_path = crate::metadata::parse_container_xml(&container)?;
     let opf = read_entry(zip, &opf_path)?;
-    let metadata = extract_metadata(&container, &opf)?;
-    let spine = crate::spine::parse_spine(&opf)?;
+    let metadata = extract_metadata_with_limits(&container, &opf, &options.metadata_limits)?;
+    let spine = crate::spine::parse_spine_with_limits(&opf, &options.metadata_limits)?;
     validate_open_invariants(&metadata, &spine, options.validation_mode)?;
     let navigation = parse_navigation(
         zip,
@@ -2012,7 +2016,7 @@ fn validate_open_invariants(
 }
 
 fn read_entry<R: Read + Seek>(zip: &mut StreamingZip<R>, path: &str) -> Result<Vec<u8>, EpubError> {
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     read_entry_into(zip, path, &mut buf)?;
     Ok(buf)
 }
@@ -2053,7 +2057,7 @@ fn read_entry_into_with_limit<R: Read + Seek, W: Write>(
         uncompressed_size,
         local_header_offset,
         crc32,
-        filename: String::with_capacity(0),
+        filename: String::with_capacity(32),
     };
     zip.read_file_to_writer(&entry, writer)
         .map_err(EpubError::Zip)
@@ -2080,7 +2084,7 @@ fn resolve_opf_relative_path(opf_path: &str, href: &str) -> String {
 }
 
 fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::with_capacity(0);
+    let mut parts: Vec<&str> = Vec::with_capacity(8);
     for part in path.split('/') {
         match part {
             "" | "." => {}
@@ -2218,7 +2222,7 @@ fn extract_plain_text_limited(
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = false;
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut skip_depth = 0usize;
     let mut done = false;
 
@@ -2362,7 +2366,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let n = book
             .read_resource_into("xhtml/nav.xhtml", &mut out)
             .expect("resource should stream");
@@ -2378,7 +2382,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let err = book
             .read_resource_into_with_hard_cap("xhtml/nav.xhtml", &mut out, 8)
             .expect_err("hard cap should fail");
@@ -2393,7 +2397,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let n = book
             .read_resource_into_with_limit("xhtml/nav.xhtml", &mut out, 1024 * 1024)
             .expect("limit should allow nav payload");
@@ -2439,7 +2443,7 @@ mod tests {
             .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let err = book
             .read_cover_image_into_with_options(
                 &mut out,
@@ -2462,7 +2466,7 @@ mod tests {
         )
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let err = book
             .read_image_resource_into_with_options(
                 "xhtml/nav.xhtml",
@@ -2535,7 +2539,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
         let baseline = book.chapter_text(0).expect("chapter text should extract");
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         book.chapter_text_into(0, &mut out)
             .expect("chapter text into should extract");
         assert_eq!(baseline, out);
@@ -2550,7 +2554,7 @@ mod tests {
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
         let baseline = book.chapter_html(0).expect("chapter html should extract");
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         book.chapter_html_into(0, &mut out)
             .expect("chapter html into should extract");
         assert_eq!(baseline, out);
@@ -2564,7 +2568,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         let err = book
             .chapter_html_into_with_limit(0, 8, &mut out)
             .expect_err("hard cap should fail");
@@ -2616,7 +2620,7 @@ mod tests {
     #[test]
     fn test_extract_plain_text_limited_preserves_utf8_boundaries() {
         let html = "<p>hello 😀 world</p>";
-        let mut out = String::with_capacity(0);
+        let mut out = String::with_capacity(32);
         extract_plain_text_limited(html.as_bytes(), 8, &mut out).expect("extract should succeed");
         assert!(out.len() <= 8);
         assert!(core::str::from_utf8(out.as_bytes()).is_ok());
@@ -2798,7 +2802,7 @@ mod tests {
             .with_serif_default()
             .with_embedded_fonts_from_book(&mut book)
             .expect("font registration should succeed");
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         prep.prepare_chapter_into(&mut book, index, &mut out)
             .expect("prepare_chapter_into should succeed");
         assert!(!out.is_empty());
@@ -2899,10 +2903,10 @@ mod tests {
             toc: vec![NavPoint {
                 label: "intro".to_string(),
                 href: "text/ch2.xhtml#start".to_string(),
-                children: Vec::with_capacity(0),
+                children: Vec::with_capacity(8),
             }],
-            page_list: Vec::with_capacity(0),
-            landmarks: Vec::with_capacity(0),
+            page_list: Vec::with_capacity(8),
+            landmarks: Vec::with_capacity(8),
         };
         let mut session = ReadingSession::new(chapters, Some(nav));
         let resolved = session

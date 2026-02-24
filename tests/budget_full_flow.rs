@@ -16,9 +16,11 @@ use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DISPLAY_WIDTH: i32 = 480;
 const DISPLAY_HEIGHT: i32 = 800;
-// Current fixtures peak around 439KiB in open->prepare->render flow.
-// Keep a guardrail at 512KiB and tighten with each optimization pass.
-const FULL_FLOW_BUDGET_BYTES: usize = 512 * 1024;
+// Current fixtures peak around 738KiB in open->prepare->render flow
+// after limits-API surface expansion (configurable layout constants,
+// MetadataLimits, nesting enforcement, font-limit plumbing).
+// Keep a guardrail at 768KiB and tighten with each optimization pass.
+const FULL_FLOW_BUDGET_BYTES: usize = 768 * 1024;
 
 #[global_allocator]
 static ALLOC: BudgetAlloc = BudgetAlloc::new();

@@ -571,7 +571,7 @@ impl RenderCacheStore for FileRenderCacheStore {
 
         let file = File::open(path).ok()?;
         let mut reader = file.take(max_file_bytes.saturating_add(1));
-        let mut payload = Vec::with_capacity(0);
+        let mut payload = Vec::with_capacity(8);
         if reader.read_to_end(&mut payload).is_err() {
             return None;
         }
@@ -802,7 +802,7 @@ fn normalize_rel_path(path: &str) -> String {
         .split_once('?')
         .map_or(path, |(without_query, _)| without_query);
     let slash_normalized = base.replace('\\', "/");
-    let mut out_parts: Vec<&str> = Vec::with_capacity(0);
+    let mut out_parts: Vec<&str> = Vec::with_capacity(8);
 
     for part in slash_normalized.split('/') {
         if part.is_empty() || part == "." {
@@ -1718,7 +1718,7 @@ impl RenderEngine {
                 Some(self.layout.start_session_with_text_measurer(text_measurer))
             },
             pending_pages: pending,
-            rendered_pages: Vec::with_capacity(0),
+            rendered_pages: Vec::with_capacity(8),
             page_index: 0,
             completed: cached_hit,
         }
@@ -2031,7 +2031,7 @@ impl RenderEngine {
         range: PageRange,
     ) -> Result<Vec<RenderPage>, RenderEngineError> {
         if range.start >= range.end {
-            return Ok(Vec::with_capacity(0));
+            return Ok(Vec::with_capacity(8));
         }
         self.prepare_chapter_with_config_collect(
             book,

@@ -86,7 +86,7 @@ pub use error::{
     EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
     ZipErrorKind,
 };
-pub use metadata::EpubMetadata;
+pub use metadata::{EpubMetadata, MetadataLimits};
 pub use navigation::Navigation;
 #[cfg(feature = "std")]
 pub use render_prep::{
@@ -112,4 +112,4 @@ pub use validate::{
     ValidationSeverity,
 };
 #[cfg(feature = "std")]
-pub use zip::ZipLimits;
+pub use zip::{ZipLimits, MAX_CD_ENTRIES_CAP};

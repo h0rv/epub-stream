@@ -21,6 +21,14 @@ const DEFAULT_ZIP_SCRATCH_BYTES: usize = 8 * 1024;
 /// Maximum number of central directory entries to cache
 const MAX_CD_ENTRIES: usize = 256;
 
+/// Compile-time cap for central directory entries.
+///
+/// Because the backing store is a `heapless::Vec<CdEntry, 256>`, runtime
+/// values of `ZipLimits::max_cd_entries` above this cap are silently
+/// clamped.  Exposed so callers can discover the structural maximum
+/// without relying on magic numbers.
+pub const MAX_CD_ENTRIES_CAP: usize = MAX_CD_ENTRIES;
+
 /// Maximum filename length in ZIP entries
 const MAX_FILENAME_LEN: usize = 256;
 
@@ -35,6 +43,15 @@ pub struct ZipLimits {
     pub strict: bool,
     /// Maximum bytes scanned from file tail while searching for EOCD.
     pub max_eocd_scan: usize,
+    /// Maximum central directory entries to load.
+    ///
+    /// Capped at the compile-time backing store capacity (256) due to
+    /// `heapless::Vec` usage for no-alloc parsing. Values above 256 are
+    /// silently clamped. Set lower to reduce memory on constrained devices.
+    pub max_cd_entries: usize,
+    /// Maximum filename length accepted in ZIP entries. Entries with
+    /// longer names are skipped during central-directory parsing.
+    pub max_filename_len: usize,
 }
 
 impl ZipLimits {
@@ -45,6 +62,8 @@ impl ZipLimits {
             max_mimetype_size,
             strict: false,
             max_eocd_scan: MAX_EOCD_SCAN,
+            max_cd_entries: MAX_CD_ENTRIES,
+            max_filename_len: MAX_FILENAME_LEN,
         }
     }
 
@@ -57,6 +76,25 @@ impl ZipLimits {
     /// Set a cap for EOCD tail scan bytes.
     pub fn with_max_eocd_scan(mut self, max_eocd_scan: usize) -> Self {
         self.max_eocd_scan = max_eocd_scan.max(EOCD_MIN_SIZE);
+        self
+    }
+
+    /// Set the maximum number of central directory entries to load.
+    ///
+    /// Values above [`MAX_CD_ENTRIES_CAP`] (256) are silently clamped at
+    /// parse time because the backing store is a fixed-capacity
+    /// `heapless::Vec`.
+    pub fn with_max_cd_entries(mut self, max_cd_entries: usize) -> Self {
+        self.max_cd_entries = max_cd_entries;
+        self
+    }
+
+    /// Set the maximum filename length accepted in ZIP entries.
+    ///
+    /// Central-directory entries whose filename exceeds this limit are
+    /// skipped (their bytes are consumed but no `CdEntry` is produced).
+    pub fn with_max_filename_len(mut self, max_filename_len: usize) -> Self {
+        self.max_filename_len = max_filename_len;
         self
     }
 }
@@ -129,7 +167,7 @@ impl CdEntry {
             uncompressed_size: 0,
             local_header_offset: 0,
             crc32: 0,
-            filename: String::with_capacity(0),
+            filename: String::with_capacity(32),
         }
     }
 }
@@ -162,7 +200,11 @@ impl<F: Read + Seek> StreamingZip<F> {
             .unwrap_or(MAX_EOCD_SCAN);
         let eocd = Self::find_eocd(&mut file, max_eocd_scan)?;
         let strict = limits.is_some_and(|l| l.strict);
-        if strict && eocd.num_entries > MAX_CD_ENTRIES as u64 {
+        // Caller's max_cd_entries, clamped to heapless backing store capacity.
+        let effective_max_cd =
+            limits.map_or(MAX_CD_ENTRIES, |l| l.max_cd_entries.min(MAX_CD_ENTRIES));
+        let effective_max_filename = limits.map_or(MAX_FILENAME_LEN, |l| l.max_filename_len);
+        if strict && eocd.num_entries > effective_max_cd as u64 {
             return Err(ZipError::CentralDirFull);
         }
 
@@ -176,7 +218,7 @@ impl<F: Read + Seek> StreamingZip<F> {
             .checked_add(eocd.cd_size)
             .ok_or(ZipError::InvalidFormat)?;
 
-        let entries_to_scan = core::cmp::min(eocd.num_entries, MAX_CD_ENTRIES as u64);
+        let entries_to_scan = core::cmp::min(eocd.num_entries, effective_max_cd as u64);
         for _ in 0..entries_to_scan {
             let pos = file.stream_position().map_err(|_| ZipError::IoError)?;
             if pos >= cd_end {
@@ -185,7 +227,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 }
                 break;
             }
-            if let Some(entry) = Self::read_cd_entry(&mut file)? {
+            if let Some(entry) = Self::read_cd_entry(&mut file, effective_max_filename)? {
                 entries.push(entry).map_err(|_| ZipError::CentralDirFull)?;
             } else if strict {
                 return Err(ZipError::InvalidFormat);
@@ -194,12 +236,12 @@ impl<F: Read + Seek> StreamingZip<F> {
             }
         }
 
-        if eocd.num_entries > MAX_CD_ENTRIES as u64 {
+        if eocd.num_entries > effective_max_cd as u64 {
             log::warn!(
                 "[ZIP] Archive has {} entries but only {} were loaded (max: {})",
                 eocd.num_entries,
                 entries.len(),
-                MAX_CD_ENTRIES
+                effective_max_cd
             );
         }
 
@@ -396,7 +438,7 @@ impl<F: Read + Seek> StreamingZip<F> {
     }
 
     /// Read a central directory entry from file
-    fn read_cd_entry(file: &mut F) -> Result<Option<CdEntry>, ZipError> {
+    fn read_cd_entry(file: &mut F, max_filename_len: usize) -> Result<Option<CdEntry>, ZipError> {
         let mut sig_buf = [0u8; 4];
         if file.read_exact(&mut sig_buf).is_err() {
             return Ok(None);
@@ -430,12 +472,12 @@ impl<F: Read + Seek> StreamingZip<F> {
         entry.local_header_offset = local_header_offset_32 as u64;
 
         // Read filename
-        if name_len > 0 && name_len <= MAX_FILENAME_LEN {
+        if name_len > 0 && name_len <= max_filename_len {
             let mut name_buf = alloc::vec![0u8; name_len];
             file.read_exact(&mut name_buf)
                 .map_err(|_| ZipError::IoError)?;
             entry.filename = String::from_utf8_lossy(&name_buf).to_string();
-        } else if name_len > MAX_FILENAME_LEN {
+        } else if name_len > max_filename_len {
             // Skip over filename bytes we can't store
             file.seek(SeekFrom::Current(name_len as i64))
                 .map_err(|_| ZipError::IoError)?;
@@ -1027,7 +1069,7 @@ mod tests {
         let content_len = content.len() as u32;
         let crc = crc32fast::hash(content);
 
-        let mut zip = Vec::with_capacity(0);
+        let mut zip = Vec::with_capacity(8);
 
         // -- Local file header --
         let local_offset = zip.len() as u32;
@@ -1087,7 +1129,7 @@ mod tests {
         let content_len = content.len() as u64;
         let crc = crc32fast::hash(content);
 
-        let mut zip = Vec::with_capacity(0);
+        let mut zip = Vec::with_capacity(8);
 
         // -- Local file header --
         let local_offset = zip.len() as u64;
@@ -1236,7 +1278,7 @@ mod tests {
     fn test_strict_rejects_too_many_cd_entries() {
         let mut zip_data = build_single_file_zip("mimetype", b"application/epub+zip");
         let eocd_pos = zip_data.len() - EOCD_MIN_SIZE;
-        let count = (MAX_CD_ENTRIES as u16) + 1;
+        let count = (MAX_CD_ENTRIES_CAP as u16) + 1;
         zip_data[eocd_pos + 8..eocd_pos + 10].copy_from_slice(&count.to_le_bytes());
         zip_data[eocd_pos + 10..eocd_pos + 12].copy_from_slice(&count.to_le_bytes());
         let cursor = std::io::Cursor::new(zip_data);
@@ -1326,7 +1368,7 @@ mod tests {
         let mut zip = StreamingZip::new(cursor).unwrap();
         let entry = zip.get_entry("mimetype").unwrap().clone();
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let mut input = [0u8; 16];
         let mut output = [0u8; 16];
         let n = zip
@@ -1344,7 +1386,7 @@ mod tests {
         let mut zip = StreamingZip::new(cursor).unwrap();
         let entry = zip.get_entry("mimetype").unwrap().clone();
 
-        let mut out = Vec::with_capacity(0);
+        let mut out = Vec::with_capacity(8);
         let mut input = [];
         let mut output = [0u8; 16];
         let err = zip

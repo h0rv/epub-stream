@@ -10,12 +10,17 @@ use crate::render_ir::{
 };
 
 const SOFT_HYPHEN: char = '\u{00AD}';
-const LINE_FIT_GUARD_PX: f32 = 6.0;
+
+/// Default pixel slack before forcing a line break.
+const DEFAULT_LINE_FIT_GUARD_PX: f32 = 6.0;
+/// Default paragraph optimiser word window (disabled on espidf).
 #[cfg(target_os = "espidf")]
-const MAX_BUFFERED_PARAGRAPH_WORDS: usize = 0;
+const DEFAULT_MAX_BUFFERED_PARAGRAPH_WORDS: usize = 0;
+/// Default paragraph optimiser word window.
 #[cfg(not(target_os = "espidf"))]
-const MAX_BUFFERED_PARAGRAPH_WORDS: usize = 64;
-const MAX_BUFFERED_PARAGRAPH_CHARS: usize = 1200;
+const DEFAULT_MAX_BUFFERED_PARAGRAPH_WORDS: usize = 64;
+/// Default paragraph character accumulation cap.
+const DEFAULT_MAX_BUFFERED_PARAGRAPH_CHARS: usize = 1200;
 
 /// Optional text measurement hook for glyph-accurate line fitting.
 pub trait TextMeasurer: Send + Sync {
@@ -103,6 +108,27 @@ pub struct LayoutConfig {
     pub object_layout: ObjectLayoutConfig,
     /// Theme/render intent surface.
     pub render_intent: RenderIntent,
+    /// Pixel slack subtracted from available width before forcing a line break.
+    ///
+    /// A small guard band prevents single-pixel overflows that cause spurious
+    /// wrapping, especially with proportional fonts.
+    pub line_fit_guard_px: f32,
+    /// Maximum words the paragraph optimiser will buffer before flushing.
+    ///
+    /// Set to `0` to disable paragraph-level optimisation entirely (the
+    /// default on `espidf` targets).
+    pub max_buffered_paragraph_words: usize,
+    /// Maximum characters (Unicode scalar count) accumulated across buffered
+    /// paragraph words before forcing a flush.
+    pub max_buffered_paragraph_chars: usize,
+    /// Maximum number of pages to hold in memory during batch layout.
+    ///
+    /// When non-zero, [`LayoutEngine::layout_items`] will stop collecting pages
+    /// once the limit is reached and log a warning. The incremental/streaming
+    /// APIs are unaffected since they drain pages eagerly.
+    ///
+    /// A value of `0` means unlimited (no cap).
+    pub max_pages_in_memory: usize,
 }
 
 impl LayoutConfig {
@@ -149,6 +175,10 @@ impl Default for LayoutConfig {
             typography: TypographyConfig::default(),
             object_layout: ObjectLayoutConfig::default(),
             render_intent: RenderIntent::default(),
+            line_fit_guard_px: DEFAULT_LINE_FIT_GUARD_PX,
+            max_buffered_paragraph_words: DEFAULT_MAX_BUFFERED_PARAGRAPH_WORDS,
+            max_buffered_paragraph_chars: DEFAULT_MAX_BUFFERED_PARAGRAPH_CHARS,
+            max_pages_in_memory: 0,
         }
     }
 }
@@ -192,12 +222,26 @@ impl LayoutEngine {
     }
 
     /// Layout styled items into pages.
+    ///
+    /// When [`LayoutConfig::max_pages_in_memory`] is non-zero, collection stops
+    /// at the configured cap and a warning is logged. Use the streaming
+    /// [`layout_with`](Self::layout_with) API to avoid this limit.
     pub fn layout_items<I>(&self, items: I) -> Vec<RenderPage>
     where
         I: IntoIterator<Item = StyledEventOrRun>,
     {
+        let limit = self.cfg.max_pages_in_memory;
         let mut pages = Vec::with_capacity(8);
-        self.layout_with(items, |page| pages.push(page));
+        self.layout_with(items, |page| {
+            if limit > 0 && pages.len() >= limit {
+                log::warn!(
+                    "Batch layout reached max_pages_in_memory ({}); dropping further pages",
+                    limit
+                );
+                return;
+            }
+            pages.push(page);
+        });
         pages
     }
 
@@ -457,7 +501,7 @@ impl LayoutState {
             lines_on_current_paragraph_page: 0,
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
-            paragraph_words: Vec::with_capacity(MAX_BUFFERED_PARAGRAPH_WORDS),
+            paragraph_words: Vec::with_capacity(cfg.max_buffered_paragraph_words),
             paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
@@ -575,7 +619,7 @@ impl LayoutState {
         image_w = image_w.max(1);
         image_h = image_h.max(1);
 
-        let mut caption = String::with_capacity(0);
+        let mut caption = String::with_capacity(32);
         if enable_caption && self.cfg.object_layout.alt_text_fallback {
             let alt = image.alt.trim();
             if !alt.is_empty() {
@@ -688,8 +732,8 @@ impl LayoutState {
                 .paragraph_chars
                 .saturating_add(sanitized_word.chars().count())
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
-            if self.paragraph_words.len() >= MAX_BUFFERED_PARAGRAPH_WORDS
-                || projected_chars > MAX_BUFFERED_PARAGRAPH_CHARS
+            if self.paragraph_words.len() >= self.cfg.max_buffered_paragraph_words
+                || projected_chars > self.cfg.max_buffered_paragraph_chars
             {
                 self.flush_buffered_paragraph(false, false);
             }
@@ -768,7 +812,7 @@ impl LayoutState {
         };
         let word_w = self.measure_text(&display_word, &style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
-            - line_fit_guard_px(&style))
+            - line_fit_guard_px(self.cfg.line_fit_guard_px, &style))
         .max(1.0);
 
         let projected = line.width_px + space_w + word_w;
@@ -945,7 +989,7 @@ impl LayoutState {
         let words = &self.paragraph_words;
         let n = words.len();
         if n == 0 {
-            return Some(Vec::with_capacity(0));
+            return Some(Vec::with_capacity(8));
         }
         if n == 1 {
             return Some(vec![1]);
@@ -953,7 +997,7 @@ impl LayoutState {
 
         for (idx, word) in words.iter().enumerate() {
             let available = ((self.cfg.content_width() - word.left_inset_px).max(1) as f32
-                - line_fit_guard_px(&word.style))
+                - line_fit_guard_px(self.cfg.line_fit_guard_px, &word.style))
             .max(1.0);
             if word.width_px > available && idx == 0 {
                 return None;
@@ -969,7 +1013,7 @@ impl LayoutState {
 
         for i in (0..n).rev() {
             let available = ((self.cfg.content_width() - words[i].left_inset_px).max(1) as f32
-                - line_fit_guard_px(&words[i].style))
+                - line_fit_guard_px(self.cfg.line_fit_guard_px, &words[i].style))
             .max(1.0);
             let mut line_width = 0.0f32;
             for j in i..n {
@@ -1241,7 +1285,8 @@ impl LayoutState {
         }
 
         let available_width = ((self.cfg.content_width() - line.left_inset_px) as f32
-            - line_fit_guard_px(&line.style)) as i32;
+            - line_fit_guard_px(self.cfg.line_fit_guard_px, &line.style))
+            as i32;
         let quality_remainder = if matches!(
             effective_justification_strategy(&self.cfg),
             JustificationStrategy::AdaptiveInterWord
@@ -1646,10 +1691,10 @@ fn line_height_px(style: &ResolvedTextStyle, cfg: &LayoutConfig) -> i32 {
         .clamp(min_lh as f32, max_lh as f32) as i32
 }
 
-fn line_fit_guard_px(style: &ResolvedTextStyle) -> f32 {
+fn line_fit_guard_px(base_guard: f32, style: &ResolvedTextStyle) -> f32 {
     let family = style.family.to_ascii_lowercase();
     let proportional = !(family.contains("mono") || family.contains("fixed"));
-    let mut guard = LINE_FIT_GUARD_PX;
+    let mut guard = base_guard;
     // Proportional and larger sizes can have right-side overhangs in rendered
     // glyph bitmaps; reserve a tiny extra safety band to avoid clipping.
     if proportional {
@@ -1760,7 +1805,7 @@ fn split_word_at_char_boundary(word: &str, split_chars: usize) -> Option<(&str, 
 fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
     let chars: Vec<char> = word.chars().collect();
     if chars.len() < 7 {
-        return Vec::with_capacity(0);
+        return Vec::with_capacity(8);
     }
     let mut candidates = Vec::with_capacity(chars.len() / 2);
     if let Some(exception) = english_hyphenation_exception(word) {
@@ -2698,8 +2743,9 @@ mod tests {
             if words < 4 {
                 continue;
             }
-            let available =
-                ((cfg.content_width()).max(1) as f32 - line_fit_guard_px(&line.style)).max(1.0);
+            let available = ((cfg.content_width()).max(1) as f32
+                - line_fit_guard_px(cfg.line_fit_guard_px, &line.style))
+            .max(1.0);
             let ratio = heuristic_measure_text(&line.text, &line.style) / available;
             assert!(
                 ratio >= 0.60,

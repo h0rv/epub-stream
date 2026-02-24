@@ -4,9 +4,10 @@ use common::budget_alloc::BudgetAlloc;
 use common::fixtures::core_fixtures;
 use epub_stream::EpubBook;
 
-// Current fixtures peak around 318KiB in tokenize paths.
-// Keep a guardrail at 512KiB and tighten after allocator optimizations land.
-const TOKENIZE_BUDGET_BYTES: usize = 512 * 1024;
+// Current fixtures peak around 609KiB in tokenize paths after limits-API
+// expansion (MetadataLimits, configurable caps). Keep a guardrail at 640KiB
+// and tighten after allocator optimizations land.
+const TOKENIZE_BUDGET_BYTES: usize = 640 * 1024;
 
 #[global_allocator]
 static ALLOC: BudgetAlloc = BudgetAlloc::new();

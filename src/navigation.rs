@@ -83,7 +83,7 @@ impl Navigation {
 
     /// Flatten the TOC into a linear list of (depth, NavPoint) pairs
     pub fn toc_flat(&self) -> Vec<(usize, &NavPoint)> {
-        let mut result = Vec::with_capacity(0);
+        let mut result = Vec::with_capacity(8);
         flatten_nav_points(&self.toc, 0, &mut result);
         result
     }
@@ -121,7 +121,7 @@ impl PartialNavPoint {
         Self {
             href: None,
             label: None,
-            children: Vec::with_capacity(0),
+            children: Vec::with_capacity(8),
         }
     }
 
@@ -149,14 +149,14 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
     reader.config_mut().trim_text(true);
 
     let mut nav = Navigation::new();
-    let mut buf = alloc::vec::Vec::with_capacity(0);
+    let mut buf = alloc::vec::Vec::with_capacity(8);
 
     // State: which nav section we're inside (None = outside any nav)
     let mut current_nav_type: Option<NavType> = None;
     // Stack of list items being built (one per <li> nesting level)
-    let mut item_stack: Vec<PartialNavPoint> = Vec::with_capacity(0);
+    let mut item_stack: Vec<PartialNavPoint> = Vec::with_capacity(8);
     // Completed top-level results for the current nav section
-    let mut results: Vec<NavPoint> = Vec::with_capacity(0);
+    let mut results: Vec<NavPoint> = Vec::with_capacity(8);
     // Whether we're inside an <a> tag (collecting label text)
     let mut in_anchor = false;
 
@@ -329,12 +329,12 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
     reader.config_mut().trim_text(true);
 
     let mut nav = Navigation::new();
-    let mut buf = alloc::vec::Vec::with_capacity(0);
+    let mut buf = alloc::vec::Vec::with_capacity(8);
 
     // State tracking
     let mut in_nav_map = false;
     let mut in_page_list = false;
-    let mut nav_point_stack: Vec<NavPoint> = Vec::with_capacity(0);
+    let mut nav_point_stack: Vec<NavPoint> = Vec::with_capacity(8);
     let mut current_label: Option<String> = None;
     let mut current_src: Option<String> = None;
     let mut in_text = false;
@@ -360,9 +360,9 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                     }
                     "navPoint" if in_nav_map => {
                         nav_point_stack.push(NavPoint {
-                            label: String::with_capacity(0),
-                            href: String::with_capacity(0),
-                            children: Vec::with_capacity(0),
+                            label: String::with_capacity(32),
+                            href: String::with_capacity(32),
+                            children: Vec::with_capacity(8),
                         });
                     }
                     "pageTarget" if in_page_list => {
@@ -439,7 +439,7 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                             nav.page_list.push(NavPoint {
                                 label,
                                 href: src,
-                                children: Vec::with_capacity(0),
+                                children: Vec::with_capacity(8),
                             });
                         }
                         in_page_target = false;
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn test_parse_nav_xhtml_large_toc() {
         // Build a nav document with 25 entries to check for off-by-one errors
-        let mut items = alloc::string::String::with_capacity(0);
+        let mut items = alloc::string::String::with_capacity(32);
         for i in 1..=25 {
             items.push_str(&alloc::format!(
                 "    <li><a href=\"ch{}.xhtml\">Chapter {}</a></li>\n",
@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn test_parse_ncx_large_toc() {
         // Build an NCX with 20+ entries
-        let mut nav_points = alloc::string::String::with_capacity(0);
+        let mut nav_points = alloc::string::String::with_capacity(32);
         for i in 1..=22 {
             nav_points.push_str(&alloc::format!(
                 r#"    <navPoint id="ch{}" playOrder="{}">

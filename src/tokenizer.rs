@@ -88,7 +88,8 @@ impl std::error::Error for TokenizeError {}
 pub fn tokenize_html(html: &str) -> Result<Vec<Token>, TokenizeError> {
     // Estimate token count: roughly 1 token per 10 bytes of HTML
     let estimated_tokens = html.len() / 10;
-    let mut tokens = Vec::with_capacity(estimated_tokens.min(10000));
+    let cap = TokenizeLimits::default().max_initial_capacity;
+    let mut tokens = Vec::with_capacity(estimated_tokens.min(cap));
     tokenize_html_into(html, &mut tokens)?;
     Ok(tokens)
 }
@@ -102,6 +103,11 @@ pub struct TokenizeLimits {
     pub max_nesting: usize,
     /// Maximum text node size in bytes before truncation.
     pub max_text_bytes: usize,
+    /// Cap on the initial `Vec` capacity allocated from an estimate.
+    ///
+    /// Prevents a single large document from reserving an outsized
+    /// allocation up-front.
+    pub max_initial_capacity: usize,
 }
 
 impl Default for TokenizeLimits {
@@ -110,6 +116,7 @@ impl Default for TokenizeLimits {
             max_tokens: 100_000,
             max_nesting: 256,
             max_text_bytes: 64 * 1024,
+            max_initial_capacity: 10_000,
         }
     }
 }
@@ -121,6 +128,7 @@ impl TokenizeLimits {
             max_tokens: 10_000,
             max_nesting: 64,
             max_text_bytes: 8 * 1024,
+            max_initial_capacity: 2_000,
         }
     }
 }
@@ -156,7 +164,7 @@ pub fn tokenize_html_limited(
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = false;
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut tokens = Vec::with_capacity(limits.max_tokens.min(1024));
 
     // Stack to track nested elements for proper closing
@@ -903,7 +911,7 @@ impl TokenizeScratch {
 /// use epub_stream::tokenizer::{tokenize_html_into, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
-/// let mut tokens: Vec<Token> = Vec::with_capacity(0);
+/// let mut tokens: Vec<Token> = Vec::with_capacity(8);
 /// tokenize_html_into(html, &mut tokens).unwrap();
 /// ```
 pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(), TokenizeError> {
@@ -937,7 +945,7 @@ pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(),
 /// use epub_stream::tokenizer::{tokenize_html_with_scratch, TokenizeScratch, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
-/// let mut tokens: Vec<Token> = Vec::with_capacity(0);
+/// let mut tokens: Vec<Token> = Vec::with_capacity(8);
 /// let mut scratch = TokenizeScratch::embedded();
 /// tokenize_html_with_scratch(html, &mut tokens, &mut scratch).unwrap();
 ///
@@ -1697,7 +1705,7 @@ mod tests {
             tokens,
             vec![Token::Image {
                 src: "photo.jpg".to_string(),
-                alt: String::with_capacity(0),
+                alt: String::with_capacity(32),
             }]
         );
     }
@@ -1962,7 +1970,7 @@ mod tests {
     fn test_tokenize_html_with_matches_tokenize_html() {
         let html = "<h1>T</h1><p>Hello <em>world</em><br/>line 2</p>";
         let baseline = tokenize_html(html).unwrap();
-        let mut streamed = Vec::with_capacity(0);
+        let mut streamed = Vec::with_capacity(8);
         tokenize_html_with(html, |token| streamed.push(token)).unwrap();
         assert_eq!(baseline, streamed);
     }

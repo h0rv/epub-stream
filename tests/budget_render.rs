@@ -8,9 +8,11 @@ use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DISPLAY_WIDTH: i32 = 480;
 const DISPLAY_HEIGHT: i32 = 800;
-// Current fixtures peak around 439KiB in render-prep paths.
-// Keep a guardrail at 512KiB and ratchet downward as memory work lands.
-const RENDER_PREP_BUDGET_BYTES: usize = 512 * 1024;
+// Current fixtures peak around 738KiB in render-prep paths after
+// limits-API expansion (configurable layout constants, MetadataLimits,
+// nesting enforcement, font-limit plumbing).
+// Keep a guardrail at 768KiB and ratchet downward as memory work lands.
+const RENDER_PREP_BUDGET_BYTES: usize = 768 * 1024;
 
 #[global_allocator]
 static ALLOC: BudgetAlloc = BudgetAlloc::new();

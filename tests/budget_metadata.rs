@@ -4,9 +4,10 @@ use common::budget_alloc::BudgetAlloc;
 use common::fixtures::core_fixtures;
 use epub_stream::EpubBook;
 
-// Current fixtures peak around 318KiB in metadata/open paths.
-// Keep a guardrail at 384KiB and tighten as allocator churn is reduced.
-const METADATA_BUDGET_BYTES: usize = 384 * 1024;
+// Current fixtures peak around 609KiB in metadata/open paths after
+// limits-API expansion (MetadataLimits, configurable caps, font-limit
+// plumbing). Keep a guardrail at 640KiB and tighten with optimization.
+const METADATA_BUDGET_BYTES: usize = 640 * 1024;
 
 #[global_allocator]
 static ALLOC: BudgetAlloc = BudgetAlloc::new();

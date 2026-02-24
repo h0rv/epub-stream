@@ -28,22 +28,22 @@ pub struct ScratchBuffers {
 
 impl ScratchBuffers {
     /// Create scratch buffers with specified capacities.
-    pub fn new(read_capacity: usize, xml_capacity: usize) -> Self {
+    pub fn new(read_capacity: usize, xml_capacity: usize, text_capacity: usize) -> Self {
         Self {
             read_buf: Vec::with_capacity(read_capacity),
             xml_buf: Vec::with_capacity(xml_capacity),
-            text_buf: String::with_capacity(4096),
+            text_buf: String::with_capacity(text_capacity),
         }
     }
 
     /// Create buffers suitable for embedded use (small, bounded).
     pub fn embedded() -> Self {
-        Self::new(8192, 4096)
+        Self::new(8192, 4096, 2048)
     }
 
     /// Create buffers for desktop use (larger, more performant).
     pub fn desktop() -> Self {
-        Self::new(65536, 32768)
+        Self::new(65536, 32768, 4096)
     }
 
     /// Clear all buffers without deallocating.
@@ -67,15 +67,21 @@ pub struct ChunkLimits {
     pub max_events_per_yield: usize,
     /// Maximum depth for element stack.
     pub max_stack_depth: usize,
+    /// Initial capacity for [`PaginationContext::element_stack`].
+    pub element_stack_capacity: usize,
+    /// Initial capacity for [`PaginationContext::text_accumulator`].
+    pub text_accumulator_capacity: usize,
 }
 
 impl Default for ChunkLimits {
     fn default() -> Self {
         Self {
-            max_read_chunk: 16384,       // 16KB read chunks
-            max_text_accumulation: 8192, // 8KB text buffer
-            max_events_per_yield: 1000,  // Process 1000 events at a time
-            max_stack_depth: 256,        // 256 levels of nesting
+            max_read_chunk: 16384,           // 16KB read chunks
+            max_text_accumulation: 8192,     // 8KB text buffer
+            max_events_per_yield: 1000,      // Process 1000 events at a time
+            max_stack_depth: 256,            // 256 levels of nesting
+            element_stack_capacity: 32,      // 32 element stack slots
+            text_accumulator_capacity: 4096, // 4KB text accumulator
         }
     }
 }
@@ -84,10 +90,12 @@ impl ChunkLimits {
     /// Conservative limits for embedded environments.
     pub fn embedded() -> Self {
         Self {
-            max_read_chunk: 4096,        // 4KB read chunks
-            max_text_accumulation: 2048, // 2KB text buffer
-            max_events_per_yield: 500,   // Process 500 events at a time
-            max_stack_depth: 64,         // 64 levels of nesting
+            max_read_chunk: 4096,            // 4KB read chunks
+            max_text_accumulation: 2048,     // 2KB text buffer
+            max_events_per_yield: 500,       // Process 500 events at a time
+            max_stack_depth: 64,             // 64 levels of nesting
+            element_stack_capacity: 16,      // 16 element stack slots
+            text_accumulator_capacity: 2048, // 2KB text accumulator
         }
     }
 }
@@ -126,6 +134,17 @@ impl PaginationContext {
     /// Create a new context for starting at the beginning.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a context with capacities derived from [`ChunkLimits`].
+    pub fn with_limits(limits: &ChunkLimits) -> Self {
+        Self {
+            byte_offset: 0,
+            event_index: 0,
+            element_stack: Vec::with_capacity(limits.element_stack_capacity),
+            text_accumulator: String::with_capacity(limits.text_accumulator_capacity),
+            page_number: 0,
+        }
     }
 
     /// Reset for a new chapter.

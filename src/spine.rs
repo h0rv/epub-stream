@@ -12,9 +12,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
 use crate::error::EpubError;
-
-/// Maximum number of spine items (fixed-size constraint)
-const MAX_SPINE_ITEMS: usize = 256;
+use crate::metadata::MetadataLimits;
 
 /// A single item in the EPUB spine (chapter reference)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,13 +186,22 @@ impl Spine {
 
 /// Parse spine from OPF content
 ///
-/// Extracts the ordered list of itemrefs from the spine element.
+/// Extracts the ordered list of itemrefs from the spine element (default limits).
 #[cfg(not(feature = "std"))]
 pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
+    parse_spine_with_limits(content, &MetadataLimits::default())
+}
+
+/// Extracts the ordered list of itemrefs with caller-provided limits.
+#[cfg(not(feature = "std"))]
+pub fn parse_spine_with_limits(
+    content: &[u8],
+    limits: &MetadataLimits,
+) -> Result<Spine, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut spine = Spine::new();
     let mut in_spine = false;
 
@@ -231,7 +238,7 @@ pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
                     }
                 }
 
-                if in_spine && name == "itemref" && spine.items.len() < MAX_SPINE_ITEMS {
+                if in_spine && name == "itemref" && spine.items.len() < limits.max_spine_items {
                     if let Some(item) = parse_spine_item(&e, &reader)? {
                         spine.items.push(item);
                     }
@@ -259,11 +266,14 @@ pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
 }
 
 #[cfg(feature = "std")]
-fn parse_spine_reader<R: std::io::BufRead>(reader: R) -> Result<Spine, EpubError> {
+fn parse_spine_reader<R: std::io::BufRead>(
+    reader: R,
+    limits: &MetadataLimits,
+) -> Result<Spine, EpubError> {
     let mut reader = Reader::from_reader(reader);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut spine = Spine::new();
     let mut in_spine = false;
 
@@ -299,7 +309,7 @@ fn parse_spine_reader<R: std::io::BufRead>(reader: R) -> Result<Spine, EpubError
                     }
                 }
 
-                if in_spine && name == "itemref" && spine.items.len() < MAX_SPINE_ITEMS {
+                if in_spine && name == "itemref" && spine.items.len() < limits.max_spine_items {
                     if let Some(item) = parse_spine_item_reader(&e, &reader)? {
                         spine.items.push(item);
                     }
@@ -327,18 +337,36 @@ fn parse_spine_reader<R: std::io::BufRead>(reader: R) -> Result<Spine, EpubError
 }
 
 #[cfg(feature = "std")]
-/// Parse spine from OPF content.
+/// Parse spine from OPF content (default limits).
 pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
-    parse_spine_reader(content)
+    parse_spine_reader(content, &MetadataLimits::default())
 }
 
 #[cfg(feature = "std")]
-/// Parse spine from a file-backed OPF stream.
+/// Parse spine from OPF content with caller-provided limits.
+pub fn parse_spine_with_limits(
+    content: &[u8],
+    limits: &MetadataLimits,
+) -> Result<Spine, EpubError> {
+    parse_spine_reader(content, limits)
+}
+
+#[cfg(feature = "std")]
+/// Parse spine from a file-backed OPF stream (default limits).
 pub fn parse_spine_file<P: AsRef<std::path::Path>>(path: P) -> Result<Spine, EpubError> {
+    parse_spine_file_with_limits(path, &MetadataLimits::default())
+}
+
+#[cfg(feature = "std")]
+/// Parse spine from a file-backed OPF stream with caller-provided limits.
+pub fn parse_spine_file_with_limits<P: AsRef<std::path::Path>>(
+    path: P,
+    limits: &MetadataLimits,
+) -> Result<Spine, EpubError> {
     let file = std::fs::File::open(path)
         .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
     let reader = std::io::BufReader::new(file);
-    parse_spine_reader(reader)
+    parse_spine_reader(reader, limits)
 }
 
 /// Parse a spine itemref from XML element attributes
@@ -683,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_very_large_spine() {
-        let mut idrefs = Vec::with_capacity(0);
+        let mut idrefs = Vec::with_capacity(8);
         for i in 0..150 {
             idrefs.push(alloc::format!("chapter{}", i));
         }

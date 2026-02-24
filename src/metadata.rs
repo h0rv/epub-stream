@@ -13,17 +13,53 @@ use quick_xml::reader::Reader;
 
 use crate::error::EpubError;
 
-/// Maximum number of manifest items kept in memory.
-#[cfg(target_os = "espidf")]
-const MAX_MANIFEST_ITEMS: usize = 256;
-#[cfg(not(target_os = "espidf"))]
-const MAX_MANIFEST_ITEMS: usize = 1024;
+/// Caller-configurable limits for EPUB metadata parsing.
+///
+/// Controls how many manifest items, spine items, subject tags, and guide
+/// references are kept in memory during OPF parsing. Entries beyond these
+/// limits are silently dropped. Callers on constrained devices should lower
+/// these values; callers on desktop can raise them freely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetadataLimits {
+    /// Maximum number of manifest items kept in memory.
+    pub max_manifest_items: usize,
+    /// Maximum number of spine items (chapters in reading order).
+    pub max_spine_items: usize,
+    /// Maximum number of subject tags (`dc:subject`).
+    pub max_subjects: usize,
+    /// Maximum number of EPUB 2.0 guide references.
+    pub max_guide_refs: usize,
+}
 
-/// Maximum number of subject tags
-const MAX_SUBJECTS: usize = 64;
+impl Default for MetadataLimits {
+    fn default() -> Self {
+        #[cfg(target_os = "espidf")]
+        {
+            Self::embedded()
+        }
+        #[cfg(not(target_os = "espidf"))]
+        {
+            Self {
+                max_manifest_items: 1024,
+                max_spine_items: 1024,
+                max_subjects: 64,
+                max_guide_refs: 64,
+            }
+        }
+    }
+}
 
-/// Maximum number of guide references
-const MAX_GUIDE_REFS: usize = 64;
+impl MetadataLimits {
+    /// Conservative limits for embedded / memory-constrained environments.
+    pub fn embedded() -> Self {
+        Self {
+            max_manifest_items: 256,
+            max_spine_items: 256,
+            max_subjects: 64,
+            max_guide_refs: 64,
+        }
+    }
+}
 
 /// A single item in the EPUB manifest (id -> href mapping)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,20 +131,20 @@ pub struct EpubMetadata {
 impl Default for EpubMetadata {
     fn default() -> Self {
         Self {
-            title: String::with_capacity(0),
-            author: String::with_capacity(0),
+            title: String::with_capacity(32),
+            author: String::with_capacity(32),
             language: String::from("en"),
-            manifest: Vec::with_capacity(0),
+            manifest: Vec::with_capacity(8),
             cover_id: None,
             date: None,
             publisher: None,
             rights: None,
             description: None,
-            subjects: Vec::with_capacity(0),
+            subjects: Vec::with_capacity(8),
             identifier: None,
             modified: None,
             rendition_layout: None,
-            guide: Vec::with_capacity(0),
+            guide: Vec::with_capacity(8),
             opf_path: None,
         }
     }
@@ -188,7 +224,7 @@ pub fn extract_cover_image_href_from_xhtml(content: &[u8]) -> Option<String> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
@@ -229,7 +265,7 @@ pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut opf_path: Option<String> = None;
 
     loop {
@@ -278,7 +314,7 @@ fn parse_container_xml_reader<R: std::io::BufRead>(reader: R) -> Result<String, 
     let mut reader = Reader::from_reader(reader);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut opf_path: Option<String> = None;
 
     loop {
@@ -333,15 +369,22 @@ fn local_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
-/// Parse content.opf to extract metadata and manifest
-///
-/// Uses SAX-style parsing with quick-xml
+/// Parse content.opf to extract metadata and manifest (default limits).
 #[cfg(not(feature = "std"))]
 pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
+    parse_opf_with_limits(content, &MetadataLimits::default())
+}
+
+/// Parse content.opf to extract metadata and manifest with caller-provided limits.
+#[cfg(not(feature = "std"))]
+pub fn parse_opf_with_limits(
+    content: &[u8],
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut metadata = EpubMetadata::new();
 
     // State tracking
@@ -372,7 +415,10 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                 }
 
                 // Parse manifest item
-                if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
+                if in_manifest
+                    && local == "item"
+                    && metadata.manifest.len() < limits.max_manifest_items
+                {
                     if let Some(item) = parse_manifest_item(&e, &reader)? {
                         if !should_keep_manifest_item(&item) {
                             buf.clear();
@@ -433,7 +479,8 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                 }
 
                 // Parse guide reference (Start variant, in case it has children)
-                if in_guide && local == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
+                if in_guide && local == "reference" && metadata.guide.len() < limits.max_guide_refs
+                {
                     if let Some(guide_ref) = parse_guide_reference(&e, &reader)? {
                         metadata.guide.push(guide_ref);
                     }
@@ -492,7 +539,7 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                             metadata.description = Some(text);
                         }
                         "subject" => {
-                            if metadata.subjects.len() < MAX_SUBJECTS {
+                            if metadata.subjects.len() < limits.max_subjects {
                                 metadata.subjects.push(text);
                             }
                         }
@@ -532,11 +579,14 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
 }
 
 #[cfg(feature = "std")]
-fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, EpubError> {
+fn parse_opf_reader<R: std::io::BufRead>(
+    reader: R,
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
     let mut reader = Reader::from_reader(reader);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::with_capacity(0);
+    let mut buf = Vec::with_capacity(8);
     let mut metadata = EpubMetadata::new();
 
     let mut current_element: Option<String> = None;
@@ -564,7 +614,10 @@ fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, Epub
                     _ => {}
                 }
 
-                if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
+                if in_manifest
+                    && local == "item"
+                    && metadata.manifest.len() < limits.max_manifest_items
+                {
                     if let Some(item) = parse_manifest_item_reader(&e, &reader)? {
                         if !should_keep_manifest_item(&item) {
                             buf.clear();
@@ -620,7 +673,8 @@ fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, Epub
                     }
                 }
 
-                if in_guide && local == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
+                if in_guide && local == "reference" && metadata.guide.len() < limits.max_guide_refs
+                {
                     if let Some(guide_ref) = parse_guide_reference_reader(&e, &reader)? {
                         metadata.guide.push(guide_ref);
                     }
@@ -645,7 +699,7 @@ fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, Epub
                         "rights" => metadata.rights = Some(text),
                         "description" => metadata.description = Some(text),
                         "subject" => {
-                            if metadata.subjects.len() < MAX_SUBJECTS {
+                            if metadata.subjects.len() < limits.max_subjects {
                                 metadata.subjects.push(text);
                             }
                         }
@@ -689,9 +743,18 @@ fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, Epub
 }
 
 #[cfg(feature = "std")]
-/// Parse content.opf to extract metadata and manifest.
+/// Parse content.opf to extract metadata and manifest (default limits).
 pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
-    parse_opf_reader(content)
+    parse_opf_reader(content, &MetadataLimits::default())
+}
+
+#[cfg(feature = "std")]
+/// Parse content.opf to extract metadata and manifest with caller-provided limits.
+pub fn parse_opf_with_limits(
+    content: &[u8],
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
+    parse_opf_reader(content, limits)
 }
 
 /// Parse a manifest item from XML element attributes
@@ -862,25 +925,23 @@ fn parse_guide_reference_reader<'a, R: std::io::BufRead>(
     }
 }
 
-/// Full EPUB metadata extraction from both container.xml and content.opf
-///
-/// This is a convenience function that takes both file contents and returns
-/// the complete metadata structure. The function parses container.xml to
-/// extract the rootfile path and stores it in the metadata result.
+/// Full EPUB metadata extraction from both container.xml and content.opf (default limits).
 pub fn extract_metadata(
     container_xml: &[u8],
     opf_content: &[u8],
 ) -> Result<EpubMetadata, EpubError> {
-    // Parse container.xml to get the OPF path from rootfile element
+    extract_metadata_with_limits(container_xml, opf_content, &MetadataLimits::default())
+}
+
+/// Full EPUB metadata extraction with caller-provided limits.
+pub fn extract_metadata_with_limits(
+    container_xml: &[u8],
+    opf_content: &[u8],
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
     let opf_path = parse_container_xml(container_xml)?;
-
-    // Parse the OPF content
-    let mut metadata = parse_opf(opf_content)?;
-
-    // Store the OPF path in the metadata (we use the cover_id field's Option<String> type pattern)
-    // Adding opf_path field to track which path was used
+    let mut metadata = parse_opf_with_limits(opf_content, limits)?;
     metadata.opf_path = Some(opf_path);
-
     Ok(metadata)
 }
 
@@ -893,33 +954,45 @@ pub fn parse_container_xml_file<P: AsRef<std::path::Path>>(path: P) -> Result<St
     parse_container_xml_reader(reader)
 }
 
-/// Parse content.opf from a file path (SD card backed)
+/// Parse content.opf from a file path (SD card backed, default limits).
 #[cfg(feature = "std")]
 pub fn parse_opf_file<P: AsRef<std::path::Path>>(path: P) -> Result<EpubMetadata, EpubError> {
+    parse_opf_file_with_limits(path, &MetadataLimits::default())
+}
+
+/// Parse content.opf from a file path with caller-provided limits.
+#[cfg(feature = "std")]
+pub fn parse_opf_file_with_limits<P: AsRef<std::path::Path>>(
+    path: P,
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
     let file = std::fs::File::open(path)
         .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
     let reader = std::io::BufReader::new(file);
-    parse_opf_reader(reader)
+    parse_opf_reader(reader, limits)
 }
 
-/// Full EPUB metadata extraction using file-based parsing
+/// Full EPUB metadata extraction using file-based parsing (default limits).
 ///
-/// This is a memory-efficient alternative that reads from temp files
-/// on SD card instead of loading everything into RAM.
+/// Memory-efficient alternative that reads from files instead of loading into RAM.
 #[cfg(feature = "std")]
 pub fn extract_metadata_from_files<P: AsRef<std::path::Path>>(
     container_path: P,
     opf_path: P,
 ) -> Result<EpubMetadata, EpubError> {
-    // Parse container.xml from file to get the OPF path
+    extract_metadata_from_files_with_limits(container_path, opf_path, &MetadataLimits::default())
+}
+
+/// Full EPUB metadata extraction using file-based parsing with caller-provided limits.
+#[cfg(feature = "std")]
+pub fn extract_metadata_from_files_with_limits<P: AsRef<std::path::Path>>(
+    container_path: P,
+    opf_path: P,
+    limits: &MetadataLimits,
+) -> Result<EpubMetadata, EpubError> {
     let opf_relative_path = parse_container_xml_file(&container_path)?;
-
-    // Parse the OPF content from file
-    let mut metadata = parse_opf_file(&opf_path)?;
-
-    // Store the OPF path in the metadata
+    let mut metadata = parse_opf_file_with_limits(&opf_path, limits)?;
     metadata.opf_path = Some(opf_relative_path);
-
     Ok(metadata)
 }
 
