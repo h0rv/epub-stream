@@ -4,6 +4,7 @@ members = [
     "crates/epub-stream-render",
     "crates/epub-stream-embedded-graphics",
     "crates/epub-stream-render-web",
+    "crates/epub-stream-heap-profile",
 ]
 resolver = "2"
 
@@ -45,6 +46,7 @@ log = { version = "0.4", default-features = false, optional = true }
 tokio = { version = "1", features = ["fs"], optional = true }
 
 [dev-dependencies]
+dhat = "0.3"
 embedded-graphics = "0.8"
 epub_stream_embedded_graphics = { package = "epub-stream-embedded-graphics", version = "0.1.0", path = "crates/epub-stream-embedded-graphics" }
 epub_stream_render = { package = "epub-stream-render", version = "0.1.0", path = "crates/epub-stream-render" }

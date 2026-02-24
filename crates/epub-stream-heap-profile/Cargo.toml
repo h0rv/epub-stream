@@ -1,0 +1,20 @@
+[package]
+name = "epub-stream-heap-profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DHAT heap profiler for epub-stream"
+publish = false
+
+[[bin]]
+name = "heap-profile"
+path = "src/main.rs"
+
+[dependencies]
+dhat = "0.3"
+epub-stream = { path = "../..", features = ["std"] }
+epub-stream-render = { path = "../epub-stream-render" }
+epub-stream-embedded-graphics = { path = "../epub-stream-embedded-graphics" }

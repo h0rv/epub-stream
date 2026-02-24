@@ -1,7 +1,5 @@
 # Analysis, benchmarking, and dataset validation recipes.
 
-profile_memory_script := justfile_directory() + "/scripts/profile_memory.sh"
-
 # Install all analysis tools.
 setup:
     just analysis install-all
@@ -19,11 +17,6 @@ check-tools:
     @cargo size --help >/dev/null 2>&1 || echo "  cargo-size missing (run: just analysis install-all)"
     @cargo nm --help >/dev/null 2>&1 || echo "  cargo-nm missing (run: just analysis install-all)"
     @cargo +nightly miri --help >/dev/null 2>&1 || echo "  miri missing (run: just analysis setup)"
-    @if [ "$(uname -s)" = "Darwin" ]; then \
-        command -v xctrace >/dev/null 2>&1 || echo "  xctrace missing (install full Xcode)"; \
-      elif [ "$(uname -s)" = "Linux" ]; then \
-        command -v heaptrack >/dev/null 2>&1 || echo "  heaptrack missing (install via system package manager)"; \
-      fi
     @echo "Analysis tools check complete"
 
 # --- Static binary analysis ---
@@ -70,15 +63,41 @@ analyze-static crates_n="20" symbols_n="30" nm_lines="40":
 
 # --- Runtime profiling ---
 
-# Heap allocation profiling (xctrace on macOS, heaptrack on Linux).
-mem-profile mode="quick":
-    @test -f "{{ profile_memory_script }}" || (echo "profile script not found: {{ profile_memory_script }}" && exit 1)
-    "{{ profile_memory_script }}" {{ mode }}
+# DHAT heap profile for a single pipeline phase.
+heap-profile phase="render" *files:
+    @mkdir -p target/memory
+    cargo run -p epub-stream-heap-profile --release -- --phase {{ phase }} --out-dir target/memory {{ files }}
 
-# Heap allocation profiling with custom output directory.
-mem-profile-out mode="quick" out="target/memory":
-    @test -f "{{ profile_memory_script }}" || (echo "profile script not found: {{ profile_memory_script }}" && exit 1)
-    "{{ profile_memory_script }}" {{ mode }} {{ out }}
+# DHAT heap profile for all pipeline phases.
+heap-profile-all *files:
+    @mkdir -p target/memory
+    cargo run -p epub-stream-heap-profile --release -- --phase open --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase tokenize --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase render --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase full --out-dir target/memory {{ files }}
+    @echo ""
+    @echo "Profiles saved to target/memory/dhat-{open,tokenize,render,full}.json"
+    @echo "Open with: just analysis heap-view <phase>"
+
+# Open the DHAT viewer in the browser and list available profiles.
+heap-view:
+    @just analysis heap-list
+    @echo ""
+    open "https://nnethercote.github.io/dh_view/dh_view.html"
+    @echo "Drag a JSON file from target/memory/ into the viewer."
+
+# List available DHAT profile files.
+heap-list:
+    @if [ -d target/memory ]; then \
+        ls -lh target/memory/dhat-*.json 2>/dev/null || echo "No profiles found. Run: just analysis heap-profile"; \
+    else \
+        echo "No profiles found. Run: just analysis heap-profile"; \
+    fi
+
+# Profile and immediately open the viewer.
+heap-profile-view phase="render" *files:
+    just analysis heap-profile {{ phase }} {{ files }}
+    just analysis heap-view
 
 # Run Miri to detect undefined behavior in unsafe code.
 miri:

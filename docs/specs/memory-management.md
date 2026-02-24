@@ -258,6 +258,6 @@ Areas where the codebase doesn't yet fully follow these patterns:
 - `just testing lint-memory` — `no_std` core/alloc discipline + renderer allocation-intent checks.
 - `just testing test-alloc` — allocation-counter stress tests.
 - `just testing test-embedded` — tiny-budget embedded-path tests.
-- `just analysis mem-profile` — heap allocation profiling (xctrace/heaptrack).
+- `just analysis heap-profile` — DHAT heap allocation profiling (cross-platform).
 - `just analysis analyze-static` — binary bloat + symbol analysis.
 - `just analysis dataset-profile-gutenberg` — per-book timings across corpus.

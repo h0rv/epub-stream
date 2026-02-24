@@ -42,11 +42,63 @@ New violations above baseline fail CI.
 | `nm-cli-top` | Largest linked symbols by size — finds outlier monomorphizations | `target/analysis/nm-cli-top.txt` |
 | `lint-perf` | Clippy perf lints (large enums, redundant clones, rc buffers) | terminal |
 
-### Runtime profiling
+### Heap profiling (DHAT)
+
+Uses [dhat-rs](https://docs.rs/dhat) — a pure-Rust, cross-platform heap profiler that
+replaces the global allocator and records every allocation/deallocation. Outputs
+JSON files viewable in the [DHAT viewer](https://nnethercote.github.io/dh_view/dh_view.html).
+
+| Recipe | What it does | Output |
+|--------|-------------|--------|
+| `heap-profile` | Profile a single pipeline phase (default: `render`), one JSON per file | `target/memory/dhat-<phase>-<book>.json` |
+| `heap-profile-all` | Profile all phases (open, tokenize, render, full) | per-phase per-file JSONs |
+| `heap-profile-view` | Profile a phase and open the viewer | browser + JSON |
+| `heap-view` | Open the DHAT viewer and list available profiles | browser |
+| `heap-list` | List available profile files | terminal |
+
+By default, each EPUB gets its own clean DHAT profile (separate process), so
+allocations from one book don't bleed into another. Pass `--aggregate` to get
+a single combined profile for all files.
+
+The DHAT viewer shows:
+- **Total bytes allocated** and **peak heap usage** per call site
+- **Allocation hotspots** — which functions allocate the most
+- **Short-lived allocations** — objects allocated and freed quickly (optimization candidates)
+- **Call tree** — full backtrace for every allocation site
+
+Usage:
+
+```sh
+# Profile the render phase (one JSON per Gutenberg book)
+just analysis heap-profile
+
+# Profile all phases
+just analysis heap-profile-all
+
+# Profile and immediately open the viewer
+just analysis heap-profile-view render
+
+# Open the viewer and list available profiles
+just analysis heap-view
+
+# List available profiles
+just analysis heap-list
+
+# Profile a specific file
+just analysis heap-profile render path/to/book.epub
+
+# Profile the full pipeline (all chapters) for a specific file
+just analysis heap-profile full path/to/book.epub
+```
+
+After profiling, open a JSON file in the
+[DHAT viewer](https://nnethercote.github.io/dh_view/dh_view.html) to explore
+allocation patterns interactively.
+
+### Runtime
 
 | Recipe | What it catches | Output |
 |--------|----------------|--------|
-| `mem-profile` | Heap allocation hotspots during real EPUB operations (uses xctrace on macOS, heaptrack on Linux) | `target/memory/` |
 | `bench` / `bench-quick` | Parse/tokenize/layout throughput regressions | `target/bench/latest.txt` |
 | `bench-report` | Timestamped benchmark snapshot for A/B comparison | `target/bench/bench-<timestamp>.txt` |
 | `miri` | Undefined behavior in unsafe code (runs under Miri interpreter) | terminal |
@@ -63,7 +115,7 @@ New violations above baseline fail CI.
 - **After any code change**: `just testing lint-memory` — catches allocation anti-patterns at introduction time.
 - **After perf-sensitive changes** (hot-path refactors, new allocations, dependency bumps): `just analysis analyze-static` + `just analysis bench-quick`.
 - **Before a release**: `just analysis analyze-static` + `just analysis bench-report` to capture a baseline snapshot.
-- **Investigating OOM or allocation growth**: `just analysis mem-profile` to capture a heap trace, then compare against the budgets in the memory-management spec.
+- **Investigating OOM or allocation growth**: `just analysis heap-profile-all` to capture heap profiles for every pipeline phase, then compare allocation hotspots against the budgets in the memory-management spec.
 - **After unsafe changes**: `just analysis miri`.
 
 ## Feedback loop
@@ -72,6 +124,6 @@ Results from analysis inform the [memory-management spec](../specs/memory-manage
 
 1. `lint-memory` catches anti-patterns at introduction time — the first line of defense.
 2. `bloat-cli-crates` reveals dependency weight — if a crate grows past expectations, evaluate alternatives or feature-gate it.
-3. `mem-profile` traces map directly to the audit checklist (no per-chapter allocations, scratch reuse, streaming chunks).
+3. `heap-profile` traces map directly to the audit checklist (no per-chapter allocations, scratch reuse, streaming chunks).
 4. `bench-report` snapshots track whether performance targets in [architecture.md](../architecture.md) still hold.
 5. `miri` validates that unsafe blocks (ZIP CRC, buffer tricks) remain sound.
