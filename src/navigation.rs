@@ -27,6 +27,42 @@ use alloc::vec::Vec;
 
 use crate::error::EpubError;
 
+/// Limits for navigation parsing and structure growth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavigationLimits {
+    /// Maximum number of total navigation points across TOC/page-list/landmarks.
+    pub max_points: usize,
+    /// Maximum allowed nav tree depth.
+    pub max_depth: usize,
+    /// Maximum UTF-8 byte length for labels.
+    pub max_label_bytes: usize,
+    /// Maximum UTF-8 byte length for href values.
+    pub max_href_bytes: usize,
+}
+
+impl Default for NavigationLimits {
+    fn default() -> Self {
+        Self {
+            max_points: 4096,
+            max_depth: 64,
+            max_label_bytes: 4096,
+            max_href_bytes: 4096,
+        }
+    }
+}
+
+impl NavigationLimits {
+    /// Embedded-focused preset with smaller bounds.
+    pub fn embedded() -> Self {
+        Self {
+            max_points: 1024,
+            max_depth: 32,
+            max_label_bytes: 1024,
+            max_href_bytes: 2048,
+        }
+    }
+}
+
 /// A single navigation point (table of contents entry)
 ///
 /// Navigation points can be nested to represent hierarchical structures
@@ -145,6 +181,14 @@ impl PartialNavPoint {
 /// The nav document uses nested `<ol>/<li>/<a>` structures within
 /// `<nav>` elements identified by `epub:type` attributes.
 pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
+    parse_nav_xhtml_with_limits(content, NavigationLimits::default())
+}
+
+/// Parse an EPUB 3.x XHTML navigation document with explicit limits.
+pub fn parse_nav_xhtml_with_limits(
+    content: &[u8],
+    limits: NavigationLimits,
+) -> Result<Navigation, EpubError> {
     let mut reader = quick_xml::reader::Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
@@ -159,6 +203,7 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
     let mut results: Vec<NavPoint> = Vec::with_capacity(8);
     // Whether we're inside an <a> tag (collecting label text)
     let mut in_anchor = false;
+    let mut point_count = 0usize;
 
     use quick_xml::events::Event;
 
@@ -190,6 +235,13 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
                         }
                     }
                     "li" if current_nav_type.is_some() => {
+                        if item_stack.len() >= limits.max_depth {
+                            return Err(EpubError::Navigation(alloc::format!(
+                                "Navigation depth exceeds max_depth ({} > {})",
+                                item_stack.len() + 1,
+                                limits.max_depth
+                            )));
+                        }
                         item_stack.push(PartialNavPoint::new());
                     }
                     "a" if current_nav_type.is_some() => {
@@ -205,6 +257,13 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
                                     .decode(&attr.value)
                                     .unwrap_or_default()
                                     .to_string();
+                                if href.len() > limits.max_href_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation href exceeds max_href_bytes ({} > {})",
+                                        href.len(),
+                                        limits.max_href_bytes
+                                    )));
+                                }
                                 if let Some(item) = item_stack.last_mut() {
                                     item.href = Some(href);
                                 }
@@ -229,8 +288,24 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
                                     existing.push(' ');
                                 }
                                 existing.push_str(&text);
+                                if existing.len() > limits.max_label_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation label exceeds max_label_bytes ({} > {})",
+                                        existing.len(),
+                                        limits.max_label_bytes
+                                    )));
+                                }
                             }
-                            None => item.label = Some(text),
+                            None => {
+                                if text.len() > limits.max_label_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation label exceeds max_label_bytes ({} > {})",
+                                        text.len(),
+                                        limits.max_label_bytes
+                                    )));
+                                }
+                                item.label = Some(text);
+                            }
                         }
                     }
                 }
@@ -250,6 +325,14 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
                         // Pop the current item and finalize it
                         if let Some(partial) = item_stack.pop() {
                             if let Some(point) = partial.into_nav_point() {
+                                point_count += 1;
+                                if point_count > limits.max_points {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation points exceed max_points ({} > {})",
+                                        point_count,
+                                        limits.max_points
+                                    )));
+                                }
                                 if let Some(parent) = item_stack.last_mut() {
                                     // Nested: add as child of parent item
                                     parent.children.push(point);
@@ -298,6 +381,13 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
                                 .decode(&attr.value)
                                 .unwrap_or_default()
                                 .to_string();
+                            if href.len() > limits.max_href_bytes {
+                                return Err(EpubError::Navigation(alloc::format!(
+                                    "Navigation href exceeds max_href_bytes ({} > {})",
+                                    href.len(),
+                                    limits.max_href_bytes
+                                )));
+                            }
                             if let Some(item) = item_stack.last_mut() {
                                 item.href = Some(href);
                             }
@@ -325,6 +415,14 @@ pub fn parse_nav_xhtml(content: &[u8]) -> Result<Navigation, EpubError> {
 /// Extracts the navigation map (`<navMap>`) and optional page list
 /// (`<pageList>`) from the NCX XML.
 pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
+    parse_ncx_with_limits(content, NavigationLimits::default())
+}
+
+/// Parse an EPUB 2.0 NCX navigation document with explicit limits.
+pub fn parse_ncx_with_limits(
+    content: &[u8],
+    limits: NavigationLimits,
+) -> Result<Navigation, EpubError> {
     let mut reader = quick_xml::reader::Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
@@ -339,6 +437,7 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
     let mut current_src: Option<String> = None;
     let mut in_text = false;
     let mut in_page_target = false;
+    let mut point_count = 0usize;
 
     use quick_xml::events::Event;
 
@@ -359,6 +458,13 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                         in_page_list = true;
                     }
                     "navPoint" if in_nav_map => {
+                        if nav_point_stack.len() >= limits.max_depth {
+                            return Err(EpubError::Navigation(alloc::format!(
+                                "Navigation depth exceeds max_depth ({} > {})",
+                                nav_point_stack.len() + 1,
+                                limits.max_depth
+                            )));
+                        }
                         nav_point_stack.push(NavPoint {
                             label: String::with_capacity(32),
                             href: String::with_capacity(32),
@@ -385,6 +491,13 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                                     .decode(&attr.value)
                                     .unwrap_or_default()
                                     .to_string();
+                                if src.len() > limits.max_href_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation href exceeds max_href_bytes ({} > {})",
+                                        src.len(),
+                                        limits.max_href_bytes
+                                    )));
+                                }
                                 if in_page_target {
                                     current_src = Some(src);
                                 } else if let Some(point) = nav_point_stack.last_mut() {
@@ -401,14 +514,46 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                     let text = reader.decoder().decode(&e).unwrap_or_default().to_string();
                     if in_page_target {
                         match &mut current_label {
-                            Some(existing) => existing.push_str(&text),
-                            None => current_label = Some(text),
+                            Some(existing) => {
+                                existing.push_str(&text);
+                                if existing.len() > limits.max_label_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation label exceeds max_label_bytes ({} > {})",
+                                        existing.len(),
+                                        limits.max_label_bytes
+                                    )));
+                                }
+                            }
+                            None => {
+                                if text.len() > limits.max_label_bytes {
+                                    return Err(EpubError::Navigation(alloc::format!(
+                                        "Navigation label exceeds max_label_bytes ({} > {})",
+                                        text.len(),
+                                        limits.max_label_bytes
+                                    )));
+                                }
+                                current_label = Some(text);
+                            }
                         }
                     } else if let Some(point) = nav_point_stack.last_mut() {
                         if point.label.is_empty() {
+                            if text.len() > limits.max_label_bytes {
+                                return Err(EpubError::Navigation(alloc::format!(
+                                    "Navigation label exceeds max_label_bytes ({} > {})",
+                                    text.len(),
+                                    limits.max_label_bytes
+                                )));
+                            }
                             point.label = text;
                         } else {
                             point.label.push_str(&text);
+                            if point.label.len() > limits.max_label_bytes {
+                                return Err(EpubError::Navigation(alloc::format!(
+                                    "Navigation label exceeds max_label_bytes ({} > {})",
+                                    point.label.len(),
+                                    limits.max_label_bytes
+                                )));
+                            }
                         }
                     }
                 }
@@ -426,6 +571,14 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                     }
                     "navPoint" => {
                         if let Some(completed) = nav_point_stack.pop() {
+                            point_count += 1;
+                            if point_count > limits.max_points {
+                                return Err(EpubError::Navigation(alloc::format!(
+                                    "Navigation points exceed max_points ({} > {})",
+                                    point_count,
+                                    limits.max_points
+                                )));
+                            }
                             if let Some(parent) = nav_point_stack.last_mut() {
                                 parent.children.push(completed);
                             } else {
@@ -436,6 +589,14 @@ pub fn parse_ncx(content: &[u8]) -> Result<Navigation, EpubError> {
                     "pageTarget" => {
                         if let (Some(label), Some(src)) = (current_label.take(), current_src.take())
                         {
+                            point_count += 1;
+                            if point_count > limits.max_points {
+                                return Err(EpubError::Navigation(alloc::format!(
+                                    "Navigation points exceed max_points ({} > {})",
+                                    point_count,
+                                    limits.max_points
+                                )));
+                            }
                             nav.page_list.push(NavPoint {
                                 label,
                                 href: src,
@@ -1103,5 +1264,63 @@ mod tests {
         assert!(!nav.has_toc());
         assert!(nav.has_page_list());
         assert!(nav.has_landmarks());
+    }
+
+    #[test]
+    fn test_parse_nav_xhtml_respects_max_points_limit() {
+        let nav_xhtml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+<nav epub:type="toc">
+  <ol>
+    <li><a href="ch1.xhtml">Chapter 1</a></li>
+    <li><a href="ch2.xhtml">Chapter 2</a></li>
+  </ol>
+</nav>
+</body>
+</html>"#;
+
+        let err = parse_nav_xhtml_with_limits(
+            nav_xhtml,
+            NavigationLimits {
+                max_points: 1,
+                ..NavigationLimits::default()
+            },
+        )
+        .expect_err("navigation should fail when max_points is exceeded");
+        match err {
+            EpubError::Navigation(msg) => assert!(msg.contains("max_points")),
+            other => panic!("expected navigation error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_ncx_respects_depth_limit() {
+        let ncx = br#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>Root</text></navLabel>
+      <content src="root.xhtml"/>
+      <navPoint id="n2" playOrder="2">
+        <navLabel><text>Child</text></navLabel>
+        <content src="child.xhtml"/>
+      </navPoint>
+    </navPoint>
+  </navMap>
+</ncx>"#;
+
+        let err = parse_ncx_with_limits(
+            ncx,
+            NavigationLimits {
+                max_depth: 1,
+                ..NavigationLimits::default()
+            },
+        )
+        .expect_err("navigation should fail when max_depth is exceeded");
+        match err {
+            EpubError::Navigation(msg) => assert!(msg.contains("max_depth")),
+            other => panic!("expected navigation error, got {:?}", other),
+        }
     }
 }

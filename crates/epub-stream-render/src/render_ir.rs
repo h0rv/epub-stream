@@ -44,17 +44,62 @@ impl RenderPage {
 
     /// Push a content-layer command.
     pub fn push_content_command(&mut self, cmd: DrawCommand) {
+        #[cfg(not(target_os = "espidf"))]
+        self.commands.push(cmd.clone());
         self.content_commands.push(cmd);
     }
 
     /// Push a chrome-layer command.
     pub fn push_chrome_command(&mut self, cmd: DrawCommand) {
+        #[cfg(not(target_os = "espidf"))]
+        self.commands.push(cmd.clone());
         self.chrome_commands.push(cmd);
     }
 
     /// Push an overlay-layer command.
     pub fn push_overlay_command(&mut self, cmd: DrawCommand) {
+        #[cfg(not(target_os = "espidf"))]
+        self.commands.push(cmd.clone());
         self.overlay_commands.push(cmd);
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    fn merged_command_at(&self, idx: usize) -> Option<&DrawCommand> {
+        let content_len = self.content_commands.len();
+        if idx < content_len {
+            return self.content_commands.get(idx);
+        }
+        let chrome_len = self.chrome_commands.len();
+        let chrome_idx = idx.saturating_sub(content_len);
+        if chrome_idx < chrome_len {
+            return self.chrome_commands.get(chrome_idx);
+        }
+        self.overlay_commands
+            .get(chrome_idx.saturating_sub(chrome_len))
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    fn append_synced_tail_from(&mut self, mut cursor: usize) {
+        let content_len = self.content_commands.len();
+        let chrome_len = self.chrome_commands.len();
+        let content_and_chrome = content_len + chrome_len;
+
+        if cursor < content_len {
+            self.commands
+                .extend(self.content_commands[cursor..].iter().cloned());
+            cursor = content_len;
+        }
+        if cursor < content_and_chrome {
+            let chrome_start = cursor.saturating_sub(content_len);
+            self.commands
+                .extend(self.chrome_commands[chrome_start..].iter().cloned());
+            cursor = content_and_chrome;
+        }
+        let overlay_start = cursor.saturating_sub(content_and_chrome);
+        if overlay_start < self.overlay_commands.len() {
+            self.commands
+                .extend(self.overlay_commands[overlay_start..].iter().cloned());
+        }
     }
 
     /// Rebuild legacy merged `commands` from split layers.
@@ -68,7 +113,29 @@ impl RenderPage {
         }
         #[cfg(not(target_os = "espidf"))]
         {
+            let expected = self.content_commands.len()
+                + self.chrome_commands.len()
+                + self.overlay_commands.len();
+            let cursor = self.commands.len();
+            if cursor == expected {
+                return;
+            }
+
+            if cursor < expected {
+                // Fast path: if merged stream is a valid prefix, append only the missing tail.
+                let prefix_is_valid = cursor == 0
+                    || self
+                        .merged_command_at(cursor - 1)
+                        .is_some_and(|cmd| self.commands[cursor - 1] == *cmd);
+                if prefix_is_valid {
+                    self.commands.reserve(expected - cursor);
+                    self.append_synced_tail_from(cursor);
+                    return;
+                }
+            }
+
             self.commands.clear();
+            self.commands.reserve(expected);
             self.commands.extend(self.content_commands.iter().cloned());
             self.commands.extend(self.chrome_commands.iter().cloned());
             self.commands.extend(self.overlay_commands.iter().cloned());

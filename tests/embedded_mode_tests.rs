@@ -9,6 +9,7 @@ use std::fs::File;
 
 use epub_stream::book::{ChapterEventsOptions, EpubBook, EpubBookOptions, ValidationMode};
 use epub_stream::metadata::MetadataLimits;
+use epub_stream::navigation::NavigationLimits;
 use epub_stream::render_prep::{FontLimits, MemoryBudget, RenderPrepOptions, StyleLimits};
 use epub_stream::zip::ZipLimits;
 
@@ -26,6 +27,7 @@ fn embedded_options() -> EpubBookOptions {
         zip_limits: Some(ZipLimits::new(256 * 1024, 128)), // 256KB max file, 128B mimetype
         validation_mode: ValidationMode::Lenient,
         max_nav_bytes: Some(64 * 1024), // 64KB nav limit
+        navigation_limits: NavigationLimits::embedded(),
         metadata_limits: MetadataLimits::default(),
     }
 }

@@ -87,7 +87,10 @@ pub use error::{
     ZipErrorKind,
 };
 pub use metadata::{EpubMetadata, MetadataLimits};
-pub use navigation::Navigation;
+pub use navigation::{
+    parse_nav_xhtml, parse_nav_xhtml_with_limits, parse_ncx, parse_ncx_with_limits, Navigation,
+    NavigationLimits,
+};
 #[cfg(feature = "std")]
 pub use render_prep::{
     BlockRole, ChapterStylesheets, ComputedTextStyle, EmbeddedFontFace, EmbeddedFontStyle,

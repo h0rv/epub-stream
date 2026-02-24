@@ -177,11 +177,13 @@ pub fn tokenize_html_limited(
     let mut pending_heading_close: Option<u8> = None;
 
     let mut token_count: usize = 0;
+    let mut entity_buf = String::with_capacity(16);
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Check if we should skip this element and its children
                 if should_skip_element(&name) {
@@ -228,7 +230,7 @@ pub fn tokenize_html_limited(
                     pending_paragraph_break = true;
                 }
 
-                match name.as_str() {
+                match &*name {
                     "p" | "div" => {
                         element_stack.push(ElementType::Paragraph);
                     }
@@ -343,11 +345,10 @@ pub fn tokenize_html_limited(
 
                 let text = e
                     .decode()
-                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                    .to_string();
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
 
                 // Normalize whitespace: collapse multiple spaces/newlines
-                let normalized = normalize_whitespace_limited(&text, limits.max_text_bytes);
+                let normalized = normalize_whitespace_limited(text.as_ref(), limits.max_text_bytes);
 
                 if !normalized.is_empty() {
                     // Flush any pending heading close
@@ -372,7 +373,8 @@ pub fn tokenize_html_limited(
                 }
             }
             Ok(Event::End(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Check if we're ending a skip element
                 if should_skip_element(&name) {
@@ -454,7 +456,8 @@ pub fn tokenize_html_limited(
                 }
             }
             Ok(Event::Empty(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Skip empty elements inside script/style blocks
                 if skip_depth > 0 {
@@ -487,7 +490,7 @@ pub fn tokenize_html_limited(
                     pending_paragraph_break = true;
                 }
 
-                match name.as_str() {
+                match &*name {
                     "br" => {
                         if token_count >= limits.max_tokens {
                             return Err(TokenizeError::InvalidStructure(format!(
@@ -543,10 +546,10 @@ pub fn tokenize_html_limited(
                     let text = reader
                         .decoder()
                         .decode(&e)
-                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                        .to_string();
+                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
 
-                    let normalized = normalize_whitespace_limited(&text, limits.max_text_bytes);
+                    let normalized =
+                        normalize_whitespace_limited(text.as_ref(), limits.max_text_bytes);
                     if !normalized.is_empty() {
                         if let Some(level) = pending_heading_close.take() {
                             if token_count >= limits.max_tokens {
@@ -578,13 +581,15 @@ pub fn tokenize_html_limited(
                 let entity_name = e
                     .decode()
                     .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
-                // Reconstruct the entity string and unescape it
-                let entity_str = format!("&{};", entity_name);
-                let resolved = unescape(&entity_str)
-                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?
-                    .to_string();
+                entity_buf.clear();
+                entity_buf.push('&');
+                entity_buf.push_str(entity_name.as_ref());
+                entity_buf.push(';');
+                let resolved = unescape(&entity_buf)
+                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?;
+                let resolved_str = resolved.as_ref();
 
-                if !resolved.is_empty() {
+                if !resolved_str.is_empty() {
                     // Flush any pending heading close
                     if let Some(level) = pending_heading_close.take() {
                         if token_count >= limits.max_tokens {
@@ -598,8 +603,8 @@ pub fn tokenize_html_limited(
                     }
                     // Append to the last Text token if possible, otherwise create new one
                     if let Some(Token::Text(ref mut last_text)) = tokens.last_mut() {
-                        if last_text.len() + resolved.len() <= limits.max_text_bytes {
-                            last_text.push_str(&resolved);
+                        if last_text.len() + resolved_str.len() <= limits.max_text_bytes {
+                            last_text.push_str(resolved_str);
                         }
                     } else {
                         if token_count >= limits.max_tokens {
@@ -608,7 +613,7 @@ pub fn tokenize_html_limited(
                                 limits.max_tokens
                             )));
                         }
-                        tokens.push(Token::Text(resolved));
+                        tokens.push(Token::Text(resolved.into_owned()));
                         token_count += 1;
                     }
                 }
@@ -971,11 +976,13 @@ pub fn tokenize_html_with_scratch(
     let mut pending_paragraph_break: bool = false;
     // Track if we need a heading close after text content
     let mut pending_heading_close: Option<u8> = None;
+    let mut entity_buf = String::with_capacity(16);
 
     loop {
         match reader.read_event_into(&mut scratch.xml_buf) {
             Ok(Event::Start(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Check if we should skip this element and its children
                 if should_skip_element(&name) {
@@ -1000,7 +1007,7 @@ pub fn tokenize_html_with_scratch(
                     pending_paragraph_break = true;
                 }
 
-                match name.as_str() {
+                match &*name {
                     "p" | "div" => {
                         scratch.element_buf.push(ElementType::Paragraph);
                     }
@@ -1066,11 +1073,10 @@ pub fn tokenize_html_with_scratch(
 
                 let text = e
                     .decode()
-                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                    .to_string();
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
 
                 // Normalize whitespace: collapse multiple spaces/newlines
-                let normalized = normalize_whitespace(&text);
+                let normalized = normalize_whitespace(text.as_ref());
 
                 if !normalized.is_empty() {
                     // Flush any pending heading close
@@ -1081,7 +1087,8 @@ pub fn tokenize_html_with_scratch(
                 }
             }
             Ok(Event::End(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Check if we're ending a skip element
                 if should_skip_element(&name) {
@@ -1128,7 +1135,8 @@ pub fn tokenize_html_with_scratch(
                 }
             }
             Ok(Event::Empty(e)) => {
-                let name = decode_name(e.name().as_ref(), &reader)?;
+                let qname = e.name();
+                let name = decode_name(qname.as_ref(), &reader)?;
 
                 // Skip empty elements inside script/style blocks
                 if skip_depth > 0 {
@@ -1147,7 +1155,7 @@ pub fn tokenize_html_with_scratch(
                     pending_paragraph_break = true;
                 }
 
-                match name.as_str() {
+                match &*name {
                     "br" => {
                         tokens_out.push(Token::LineBreak);
                     }
@@ -1182,10 +1190,9 @@ pub fn tokenize_html_with_scratch(
                     let text = reader
                         .decoder()
                         .decode(&e)
-                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
-                        .to_string();
+                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
 
-                    let normalized = normalize_whitespace(&text);
+                    let normalized = normalize_whitespace(text.as_ref());
                     if !normalized.is_empty() {
                         // Flush any pending heading close
                         if let Some(level) = pending_heading_close.take() {
@@ -1204,22 +1211,24 @@ pub fn tokenize_html_with_scratch(
                 let entity_name = e
                     .decode()
                     .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
-                // Reconstruct the entity string and unescape it
-                let entity_str = format!("&{};", entity_name);
-                let resolved = unescape(&entity_str)
-                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?
-                    .to_string();
+                entity_buf.clear();
+                entity_buf.push('&');
+                entity_buf.push_str(entity_name.as_ref());
+                entity_buf.push(';');
+                let resolved = unescape(&entity_buf)
+                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?;
+                let resolved_str = resolved.as_ref();
 
-                if !resolved.is_empty() {
+                if !resolved_str.is_empty() {
                     // Flush any pending heading close
                     if let Some(level) = pending_heading_close.take() {
                         tokens_out.push(Token::Heading(level));
                     }
                     // Append to the last Text token if possible, otherwise create new one
                     if let Some(Token::Text(ref mut last_text)) = tokens_out.last_mut() {
-                        last_text.push_str(&resolved);
+                        last_text.push_str(resolved_str);
                     } else {
-                        tokens_out.push(Token::Text(resolved));
+                        tokens_out.push(Token::Text(resolved.into_owned()));
                     }
                 }
             }

@@ -651,6 +651,7 @@ impl Styler {
         let mut nesting_overflow = 0usize;
         let max_nesting = self.config.limits.max_nesting;
         let mut table_row_cells: Vec<usize> = Vec::with_capacity(8);
+        let mut entity_buf = String::with_capacity(16);
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -769,20 +770,17 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let text = e
-                        .decode()
-                        .map_err(|err| {
-                            RenderPrepError::new(
-                                "STYLE_TOKENIZE_ERROR",
-                                format!("Decode error: {:?}", err),
-                            )
-                            .with_phase(ErrorPhase::Style)
-                            .with_source("text node decode")
-                            .with_token_offset(reader_token_offset(&reader))
-                        })?
-                        .to_string();
+                    let text = e.decode().map_err(|err| {
+                        RenderPrepError::new(
+                            "STYLE_TOKENIZE_ERROR",
+                            format!("Decode error: {:?}", err),
+                        )
+                        .with_phase(ErrorPhase::Style)
+                        .with_source("text node decode")
+                        .with_token_offset(reader_token_offset(&reader))
+                    })?;
                     let preserve_ws = is_preformatted_context(&stack);
-                    let normalized = normalize_plain_text_whitespace(&text, preserve_ws);
+                    let normalized = normalize_plain_text_whitespace(text.as_ref(), preserve_ws);
                     if normalized.is_empty() {
                         buf.clear();
                         continue;
@@ -801,21 +799,17 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let text = reader
-                        .decoder()
-                        .decode(&e)
-                        .map_err(|err| {
-                            RenderPrepError::new(
-                                "STYLE_TOKENIZE_ERROR",
-                                format!("Decode error: {:?}", err),
-                            )
-                            .with_phase(ErrorPhase::Style)
-                            .with_source("cdata decode")
-                            .with_token_offset(reader_token_offset(&reader))
-                        })?
-                        .to_string();
+                    let text = reader.decoder().decode(&e).map_err(|err| {
+                        RenderPrepError::new(
+                            "STYLE_TOKENIZE_ERROR",
+                            format!("Decode error: {:?}", err),
+                        )
+                        .with_phase(ErrorPhase::Style)
+                        .with_source("cdata decode")
+                        .with_token_offset(reader_token_offset(&reader))
+                    })?;
                     let preserve_ws = is_preformatted_context(&stack);
-                    let normalized = normalize_plain_text_whitespace(&text, preserve_ws);
+                    let normalized = normalize_plain_text_whitespace(text.as_ref(), preserve_ws);
                     if normalized.is_empty() {
                         buf.clear();
                         continue;
@@ -843,9 +837,12 @@ impl Styler {
                         .with_source("entity decode")
                         .with_token_offset(reader_token_offset(&reader))
                     })?;
-                    let entity = format!("&{};", entity_name);
-                    let resolved_entity = quick_xml::escape::unescape(&entity)
-                        .map_err(|err| {
+                    entity_buf.clear();
+                    entity_buf.push('&');
+                    entity_buf.push_str(entity_name.as_ref());
+                    entity_buf.push(';');
+                    let resolved_entity =
+                        quick_xml::escape::unescape(&entity_buf).map_err(|err| {
                             RenderPrepError::new(
                                 "STYLE_TOKENIZE_ERROR",
                                 format!("Unescape error: {:?}", err),
@@ -853,10 +850,10 @@ impl Styler {
                             .with_phase(ErrorPhase::Style)
                             .with_source("entity unescape")
                             .with_token_offset(reader_token_offset(&reader))
-                        })?
-                        .to_string();
+                        })?;
                     let preserve_ws = is_preformatted_context(&stack);
-                    let normalized = normalize_plain_text_whitespace(&resolved_entity, preserve_ws);
+                    let normalized =
+                        normalize_plain_text_whitespace(resolved_entity.as_ref(), preserve_ws);
                     if normalized.is_empty() {
                         buf.clear();
                         continue;
@@ -889,8 +886,15 @@ impl Styler {
     }
 
     fn resolve_tag_style(&self, tag: &str, classes: &[String]) -> CssStyle {
-        let class_refs: Vec<&str> = classes.iter().map(String::as_str).collect();
         let mut style = CssStyle::new();
+        if classes.is_empty() {
+            for ss in &self.parsed {
+                style.merge(&ss.resolve(tag, &[]));
+            }
+            return style;
+        }
+        let mut class_refs = Vec::with_capacity(classes.len());
+        class_refs.extend(classes.iter().map(String::as_str));
         for ss in &self.parsed {
             style.merge(&ss.resolve(tag, &class_refs));
         }
@@ -1178,15 +1182,12 @@ impl FontResolver {
                 break;
             }
             let requested = normalize_family(family);
-            let mut candidates: Vec<(usize, EmbeddedFontFace)> = self
-                .faces
-                .iter()
-                .enumerate()
-                .filter(|(_, face)| normalize_family(&face.family) == requested)
-                .map(|(idx, face)| (idx, face.clone()))
-                .collect();
-            if !candidates.is_empty() {
-                candidates.sort_by_key(|(_, face)| {
+            let mut best_candidate: Option<(usize, u32)> = None;
+            for (idx, face) in self.faces.iter().enumerate() {
+                if normalize_family(&face.family) != requested {
+                    continue;
+                }
+                let score = {
                     let weight_delta = (face.weight as i32 - style.weight as i32).unsigned_abs();
                     let style_penalty = if style.italic {
                         if matches!(
@@ -1203,8 +1204,17 @@ impl FontResolver {
                         1000
                     };
                     weight_delta + style_penalty
-                });
-                let (chosen_idx, chosen) = candidates[0].clone();
+                };
+                let should_replace = match best_candidate {
+                    Some((_, best_score)) => score < best_score,
+                    None => true,
+                };
+                if should_replace {
+                    best_candidate = Some((idx, score));
+                }
+            }
+            if let Some((chosen_idx, _)) = best_candidate {
+                let chosen = &self.faces[chosen_idx];
                 reasons.push(format!(
                     "matched embedded family '{}' via nearest weight/style",
                     family
@@ -1213,7 +1223,7 @@ impl FontResolver {
                     face: ResolvedFontFace {
                         font_id: chosen_idx as u32 + 1,
                         family: chosen.family.clone(),
-                        embedded: Some(chosen),
+                        embedded: Some(chosen.clone()),
                     },
                     reason_chain: reasons,
                 };
@@ -1728,25 +1738,17 @@ fn first_non_empty_declaration_index(style_attr: &str) -> Option<usize> {
 }
 
 fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderPrepError> {
-    reader
-        .decoder()
-        .decode(raw)
-        .map(|v| v.to_string())
-        .map_err(|err| {
-            RenderPrepError::new_with_phase(
-                ErrorPhase::Style,
-                "STYLE_TOKENIZE_ERROR",
-                format!("Decode error: {:?}", err),
-            )
-            .with_source("tag name decode")
-            .with_token_offset(reader_token_offset(reader))
-        })
-        .map(|tag| {
-            tag.rsplit(':')
-                .next()
-                .unwrap_or(tag.as_str())
-                .to_ascii_lowercase()
-        })
+    let decoded = reader.decoder().decode(raw).map_err(|err| {
+        RenderPrepError::new_with_phase(
+            ErrorPhase::Style,
+            "STYLE_TOKENIZE_ERROR",
+            format!("Decode error: {:?}", err),
+        )
+        .with_source("tag name decode")
+        .with_token_offset(reader_token_offset(reader))
+    })?;
+    let local_name = decoded.rsplit(':').next().unwrap_or(decoded.as_ref());
+    Ok(local_name.to_ascii_lowercase())
 }
 
 fn element_ctx_from_start(

@@ -20,7 +20,9 @@ use crate::error::{
     EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
 };
 use crate::metadata::{extract_metadata_with_limits, EpubMetadata, MetadataLimits};
-use crate::navigation::{parse_nav_xhtml, parse_ncx, NavPoint, Navigation};
+use crate::navigation::{
+    parse_nav_xhtml_with_limits, parse_ncx_with_limits, NavPoint, Navigation, NavigationLimits,
+};
 use crate::render_prep::{
     parse_font_faces_from_css, parse_stylesheet_links, ChapterStylesheets, EmbeddedFontFace,
     FontLimits, RenderPrep, RenderPrepOptions, StyleLimits, StyledChapter, StyledEventOrRun,
@@ -53,6 +55,8 @@ pub struct EpubBookOptions {
     pub validation_mode: ValidationMode,
     /// Optional cap for navigation payload bytes.
     pub max_nav_bytes: Option<usize>,
+    /// Navigation parsing limits (depth/points/label/href bounds).
+    pub navigation_limits: NavigationLimits,
     /// Limits for metadata/spine parsing (manifest items, spine items, etc.).
     pub metadata_limits: MetadataLimits,
 }
@@ -63,8 +67,23 @@ impl Default for EpubBookOptions {
             zip_limits: None,
             validation_mode: ValidationMode::Lenient,
             max_nav_bytes: None,
+            navigation_limits: NavigationLimits::default(),
             metadata_limits: MetadataLimits::default(),
         }
+    }
+}
+
+impl EpubBookOptions {
+    /// Set an explicit navigation payload byte cap.
+    pub fn with_max_nav_bytes(mut self, max_nav_bytes: usize) -> Self {
+        self.max_nav_bytes = Some(max_nav_bytes);
+        self
+    }
+
+    /// Set explicit navigation parsing limits.
+    pub fn with_navigation_limits(mut self, limits: NavigationLimits) -> Self {
+        self.navigation_limits = limits;
+        self
     }
 }
 
@@ -83,6 +102,26 @@ impl From<EpubBookOptions> for OpenConfig {
             options,
             lazy_navigation: false,
         }
+    }
+}
+
+impl OpenConfig {
+    /// Enable or disable lazy navigation parsing.
+    pub fn with_lazy_navigation(mut self, lazy_navigation: bool) -> Self {
+        self.lazy_navigation = lazy_navigation;
+        self
+    }
+
+    /// Set explicit navigation parsing limits.
+    pub fn with_navigation_limits(mut self, limits: NavigationLimits) -> Self {
+        self.options = self.options.with_navigation_limits(limits);
+        self
+    }
+
+    /// Set an explicit navigation payload byte cap.
+    pub fn with_max_nav_bytes(mut self, max_nav_bytes: usize) -> Self {
+        self.options = self.options.with_max_nav_bytes(max_nav_bytes);
+        self
     }
 }
 
@@ -245,6 +284,7 @@ pub struct ChapterStreamResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct EpubBookBuilder {
     options: EpubBookOptions,
+    lazy_navigation: bool,
 }
 
 impl EpubBookBuilder {
@@ -277,14 +317,38 @@ impl EpubBookBuilder {
         self
     }
 
+    /// Set explicit navigation parsing limits.
+    pub fn with_navigation_limits(mut self, limits: NavigationLimits) -> Self {
+        self.options.navigation_limits = limits;
+        self
+    }
+
+    /// Enable or disable lazy navigation parsing for open flows.
+    pub fn with_lazy_navigation(mut self, lazy_navigation: bool) -> Self {
+        self.lazy_navigation = lazy_navigation;
+        self
+    }
+
     /// Open an EPUB from a file path.
     pub fn open<P: AsRef<Path>>(self, path: P) -> Result<EpubBook<File>, EpubError> {
-        EpubBook::open_with_options(path, self.options)
+        EpubBook::open_with_config(
+            path,
+            OpenConfig {
+                options: self.options,
+                lazy_navigation: self.lazy_navigation,
+            },
+        )
     }
 
     /// Open an EPUB from an arbitrary reader.
     pub fn from_reader<R: Read + Seek>(self, reader: R) -> Result<EpubBook<R>, EpubError> {
-        EpubBook::from_reader_with_options(reader, self.options)
+        EpubBook::from_reader_with_config(
+            reader,
+            OpenConfig {
+                options: self.options,
+                lazy_navigation: self.lazy_navigation,
+            },
+        )
     }
 
     /// Parse summary metadata from a file path.
@@ -360,6 +424,7 @@ pub struct EpubBook<R: Read + Seek> {
     spine: Spine,
     validation_mode: ValidationMode,
     max_nav_bytes: Option<usize>,
+    navigation_limits: NavigationLimits,
     navigation_loaded: bool,
     navigation: Option<Navigation>,
     embedded_fonts_cache: Option<Vec<EmbeddedFontFace>>,
@@ -855,6 +920,7 @@ impl EpubBook<File> {
                     &opf_path,
                     options.validation_mode,
                     options.max_nav_bytes,
+                    options.navigation_limits,
                 )?,
                 true,
             )
@@ -867,6 +933,7 @@ impl EpubBook<File> {
             spine,
             validation_mode: options.validation_mode,
             max_nav_bytes: options.max_nav_bytes,
+            navigation_limits: options.navigation_limits,
             navigation_loaded,
             navigation,
             embedded_fonts_cache: None,
@@ -927,6 +994,7 @@ impl<R: Read + Seek> EpubBook<R> {
                     &opf_path,
                     options.validation_mode,
                     options.max_nav_bytes,
+                    options.navigation_limits,
                 )?,
                 true,
             )
@@ -939,6 +1007,7 @@ impl<R: Read + Seek> EpubBook<R> {
             spine,
             validation_mode: options.validation_mode,
             max_nav_bytes: options.max_nav_bytes,
+            navigation_limits: options.navigation_limits,
             navigation_loaded,
             navigation,
             embedded_fonts_cache: None,
@@ -985,6 +1054,7 @@ impl<R: Read + Seek> EpubBook<R> {
                 &self.opf_path,
                 self.validation_mode,
                 self.max_nav_bytes,
+                self.navigation_limits,
             )?;
             self.navigation_loaded = true;
         }
@@ -1333,13 +1403,28 @@ impl<R: Read + Seek> EpubBook<R> {
         max_bytes: usize,
         out: &mut String,
     ) -> Result<(), EpubError> {
+        let mut scratch = Vec::with_capacity(8);
+        self.chapter_html_into_with_limit_and_scratch(index, max_bytes, out, &mut scratch)
+    }
+
+    /// Read chapter HTML into caller output using caller-provided byte scratch.
+    ///
+    /// This is the strict scratch-first variant for constrained environments.
+    pub fn chapter_html_into_with_limit_and_scratch(
+        &mut self,
+        index: usize,
+        max_bytes: usize,
+        out: &mut String,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), EpubError> {
         out.clear();
         let chapter = self.chapter(index)?;
-        let mut bytes = Vec::with_capacity(8);
-        self.read_resource_into_with_hard_cap(&chapter.href, &mut bytes, max_bytes)?;
-        let mut html = String::from_utf8(bytes)
-            .map_err(|_| EpubError::ChapterNotUtf8 { href: chapter.href })?;
-        core::mem::swap(out, &mut html);
+        scratch.clear();
+        self.read_resource_into_with_hard_cap(&chapter.href, scratch, max_bytes)?;
+        let html = str::from_utf8(scratch).map_err(|_| EpubError::ChapterNotUtf8 {
+            href: chapter.href.clone(),
+        })?;
+        out.push_str(html);
         Ok(())
     }
 
@@ -1354,27 +1439,14 @@ impl<R: Read + Seek> EpubBook<R> {
         index: usize,
         limits: StyleLimits,
     ) -> Result<ChapterStylesheets, EpubError> {
-        let chapter = self.chapter(index)?;
-        let html = self.chapter_html(index)?;
-        let links = parse_stylesheet_links(&chapter.href, &html);
-        let mut sources = Vec::with_capacity(8);
-
-        for href in links {
-            let bytes = self.read_resource(&href)?;
-            if bytes.len() > limits.max_css_bytes {
-                return Err(EpubError::Parse(format!(
-                    "Stylesheet exceeds max_css_bytes ({} > {}) at '{}'",
-                    bytes.len(),
-                    limits.max_css_bytes,
-                    href
-                )));
-            }
-            let css = String::from_utf8(bytes)
-                .map_err(|_| EpubError::Parse(format!("Stylesheet is not UTF-8: {}", href)))?;
-            sources.push(StylesheetSource { href, css });
-        }
-
-        Ok(ChapterStylesheets { sources })
+        let mut scratch = Vec::with_capacity(8);
+        let mut chapter_html = String::with_capacity(32);
+        self.chapter_stylesheets_with_scratch_and_html(
+            index,
+            limits,
+            &mut chapter_html,
+            &mut scratch,
+        )
     }
 
     /// Backward-compatible alias for chapter stylesheet discovery with explicit limits.
@@ -1401,9 +1473,31 @@ impl<R: Read + Seek> EpubBook<R> {
         limits: StyleLimits,
         scratch_buf: &mut Vec<u8>,
     ) -> Result<ChapterStylesheets, EpubError> {
+        let mut chapter_html = String::with_capacity(32);
+        self.chapter_stylesheets_with_scratch_and_html(
+            index,
+            limits,
+            &mut chapter_html,
+            scratch_buf,
+        )
+    }
+
+    /// Resolve chapter stylesheet sources with caller-provided chapter/html scratch.
+    pub fn chapter_stylesheets_with_scratch_and_html(
+        &mut self,
+        index: usize,
+        limits: StyleLimits,
+        chapter_html: &mut String,
+        scratch_buf: &mut Vec<u8>,
+    ) -> Result<ChapterStylesheets, EpubError> {
         let chapter = self.chapter(index)?;
-        let html = self.chapter_html(index)?;
-        let links = parse_stylesheet_links(&chapter.href, &html);
+        self.chapter_html_into_with_limit_and_scratch(
+            index,
+            usize::MAX,
+            chapter_html,
+            scratch_buf,
+        )?;
+        let links = parse_stylesheet_links(&chapter.href, chapter_html);
         let mut sources = Vec::with_capacity(links.len());
 
         for href in links {
@@ -1420,10 +1514,12 @@ impl<R: Read + Seek> EpubBook<R> {
                 });
             }
 
-            let css = String::from_utf8(scratch_buf.clone())
+            let css = str::from_utf8(scratch_buf)
                 .map_err(|_| EpubError::ChapterNotUtf8 { href: href.clone() })?;
-
-            sources.push(StylesheetSource { href, css });
+            sources.push(StylesheetSource {
+                href,
+                css: css.to_owned(),
+            });
         }
 
         Ok(ChapterStylesheets { sources })
@@ -1501,12 +1597,12 @@ impl<R: Read + Seek> EpubBook<R> {
                 continue; // Skip oversized CSS
             }
 
-            let css = match String::from_utf8(scratch_buf.clone()) {
+            let css = match str::from_utf8(scratch_buf) {
                 Ok(s) => s,
                 Err(_) => continue, // Skip non-UTF8 CSS
             };
 
-            let faces = parse_font_faces_from_css(&href, &css);
+            let faces = parse_font_faces_from_css(&href, css);
             for face in faces {
                 if out.len() >= limits.max_faces {
                     break;
@@ -1802,14 +1898,29 @@ impl<R: Read + Seek> EpubBook<R> {
         max_bytes: usize,
         out: &mut String,
     ) -> Result<(), EpubError> {
+        let mut scratch = Vec::with_capacity(8);
+        self.chapter_text_into_with_limit_and_scratch(index, max_bytes, out, &mut scratch)
+    }
+
+    /// Extract plain text into caller-provided storage using caller-provided byte scratch.
+    ///
+    /// This is the strict scratch-first variant for constrained environments.
+    pub fn chapter_text_into_with_limit_and_scratch(
+        &mut self,
+        index: usize,
+        max_bytes: usize,
+        out: &mut String,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), EpubError> {
         out.clear();
         if max_bytes == 0 {
             return Ok(());
         }
 
         let chapter = self.chapter(index)?;
-        let bytes = self.read_resource(&chapter.href)?;
-        extract_plain_text_limited(&bytes, max_bytes, out)
+        scratch.clear();
+        self.read_resource_into(&chapter.href, scratch)?;
+        extract_plain_text_limited(scratch, max_bytes, out)
     }
 
     /// Tokenize spine item content by index.
@@ -1850,11 +1961,13 @@ impl<R: Read + Seek> EpubBook<R> {
                 .map(|item| item.href.clone())
                 .collect();
             let mut out = Vec::with_capacity(8);
+            let mut scratch = Vec::with_capacity(8);
             for href in css_hrefs {
-                let bytes = self.read_resource(&href)?;
-                let css = String::from_utf8(bytes)
+                scratch.clear();
+                self.read_resource_into(&href, &mut scratch)?;
+                let css = str::from_utf8(&scratch)
                     .map_err(|_| EpubError::Parse(format!("Stylesheet is not UTF-8: {}", href)))?;
-                out.extend(parse_font_faces_from_css(&href, &css));
+                out.extend(parse_font_faces_from_css(&href, css));
             }
             self.embedded_fonts_cache = Some(out);
         }
@@ -1889,6 +2002,7 @@ fn load_summary_from_zip<R: Read + Seek>(
         &opf_path,
         options.validation_mode,
         options.max_nav_bytes,
+        options.navigation_limits,
     )?;
 
     Ok(EpubSummary {
@@ -1905,6 +2019,7 @@ fn parse_navigation<R: Read + Seek>(
     opf_path: &str,
     validation_mode: ValidationMode,
     max_nav_bytes: Option<usize>,
+    navigation_limits: NavigationLimits,
 ) -> Result<Option<Navigation>, EpubError> {
     let nav_item = spine
         .toc_id()
@@ -1973,14 +2088,19 @@ fn parse_navigation<R: Read + Seek>(
     let parsed = if nav_item.media_type == "application/x-dtbncx+xml"
         || nav_item.href.to_ascii_lowercase().ends_with(".ncx")
     {
-        parse_ncx(&nav_bytes)
+        parse_ncx_with_limits(&nav_bytes, navigation_limits)
     } else {
-        parse_nav_xhtml(&nav_bytes)
+        parse_nav_xhtml_with_limits(&nav_bytes, navigation_limits)
     };
 
     match parsed {
         Ok(nav) => Ok(Some(nav)),
         Err(err) => {
+            let is_limit_error = matches!(&err, EpubError::LimitExceeded { .. })
+                || matches!(&err, EpubError::Navigation(msg) if msg.contains("max_"));
+            if is_limit_error {
+                return Err(err);
+            }
             if matches!(validation_mode, ValidationMode::Strict) {
                 Err(EpubError::Navigation(err.to_string()))
             } else {
@@ -2507,6 +2627,32 @@ mod tests {
                 assert_eq!(limit.limit, 8);
             }
             other => panic!("expected phase error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_open_enforces_navigation_point_limits() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let err = match EpubBook::from_reader_with_options(
+            file,
+            EpubBookOptions {
+                navigation_limits: NavigationLimits {
+                    max_href_bytes: 0,
+                    ..NavigationLimits::default()
+                },
+                ..EpubBookOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("open should fail when navigation points exceed cap"),
+            Err(err) => err,
+        };
+
+        match err {
+            EpubError::Navigation(msg) => assert!(msg.contains("max_href_bytes")),
+            other => panic!("expected navigation error, got {:?}", other),
         }
     }
 

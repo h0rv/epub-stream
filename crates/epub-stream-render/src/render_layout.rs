@@ -676,7 +676,6 @@ impl LayoutState {
                     value: Some(image.src),
                 });
         }
-        self.page.sync_commands();
         self.cursor_y = (image_y + image_h).max(self.cursor_y);
 
         if enable_caption && !caption.is_empty() {
@@ -692,7 +691,6 @@ impl LayoutState {
                     font_id: caption_style.font_id,
                     style: caption_style,
                 }));
-            self.page.sync_commands();
             self.cursor_y += caption_line_h;
         }
         if enable_caption {
@@ -1098,32 +1096,46 @@ impl LayoutState {
         if line.text.is_empty() || incoming_word.is_empty() {
             return None;
         }
-        let mut words: Vec<&str> = line.text.split_whitespace().collect();
-        words.push(incoming_word);
+        let mut combined = String::with_capacity(line.text.len() + 1 + incoming_word.len());
+        combined.push_str(&line.text);
+        combined.push(' ');
+        combined.push_str(incoming_word);
+
+        let mut words = Vec::with_capacity(8);
+        let mut word_start = None;
+        for (idx, ch) in combined.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(start) = word_start.take() {
+                    words.push((start, idx));
+                }
+            } else if word_start.is_none() {
+                word_start = Some(idx);
+            }
+        }
+        if let Some(start) = word_start {
+            words.push((start, combined.len()));
+        }
         if words.len() < 3 {
             return None;
         }
-        let mut best: Option<(String, String, f32, f32, i32)> = None;
+        let mut best: Option<(usize, usize, f32, f32, i32)> = None;
         // Keep at least one word on each side.
         for break_idx in 1..words.len() {
-            let left_words = &words[..break_idx];
-            let right_words = &words[break_idx..];
-            let left = left_words.join(" ");
-            let right = right_words.join(" ");
-            let left_w = self.measure_text(&left, style);
+            let left_end = words[break_idx - 1].1;
+            let right_start = words[break_idx].0;
+            let left = &combined[..left_end];
+            let right = &combined[right_start..];
+            let left_w = self.measure_text(left, style);
             if left_w > max_width {
                 continue;
             }
-            let right_w = self.measure_text(&right, style);
+            let right_w = self.measure_text(right, style);
             let slack = (max_width - left_w).max(0.0);
-            let last_left_len = left_words
-                .last()
-                .map(|w| w.chars().count() as i32)
-                .unwrap_or_default();
-            let first_right_len = right_words
-                .first()
-                .map(|w| w.chars().count() as i32)
-                .unwrap_or_default();
+            let (last_left_start, last_left_end) = words[break_idx - 1];
+            let (first_right_start, first_right_end) = words[break_idx];
+            let last_left_len = combined[last_left_start..last_left_end].chars().count() as i32;
+            let first_right_len =
+                combined[first_right_start..first_right_end].chars().count() as i32;
             let mut score = (slack * slack).round() as i32;
             if last_left_len <= 2 {
                 score += 1400;
@@ -1131,15 +1143,22 @@ impl LayoutState {
             if first_right_len <= 2 {
                 score += 900;
             }
-            if right_words.len() == 1 {
+            if words.len() - break_idx == 1 {
                 score += 400;
             }
             match best {
                 Some((_, _, _, _, best_score)) if score >= best_score => {}
-                _ => best = Some((left, right, left_w, right_w, score)),
+                _ => best = Some((left_end, right_start, left_w, right_w, score)),
             }
         }
-        best.map(|(left, right, left_w, right_w, _)| (left, right, left_w, right_w))
+        best.map(|(left_end, right_start, left_w, right_w, _)| {
+            (
+                combined[..left_end].to_owned(),
+                combined[right_start..].to_owned(),
+                left_w,
+                right_w,
+            )
+        })
     }
 
     fn try_break_word_at_soft_hyphen(
@@ -1150,21 +1169,35 @@ impl LayoutState {
         max_width: f32,
         space_w: f32,
     ) -> bool {
-        let parts: Vec<&str> = raw_word.split(SOFT_HYPHEN).collect();
-        if parts.len() < 2 {
+        let mut cleaned = String::with_capacity(raw_word.len());
+        let mut split_points = Vec::with_capacity(4);
+        for ch in raw_word.chars() {
+            if ch == SOFT_HYPHEN {
+                if !cleaned.is_empty() && split_points.last().copied() != Some(cleaned.len()) {
+                    split_points.push(cleaned.len());
+                }
+            } else {
+                cleaned.push(ch);
+            }
+        }
+        if split_points.is_empty() || cleaned.is_empty() {
             return false;
         }
 
-        let mut best_prefix: Option<(String, String)> = None;
-        let mut candidate_buf = String::with_capacity(raw_word.len() + 1);
-        for i in 1..parts.len() {
-            let prefix = parts[..i].concat();
-            let suffix = parts[i..].concat();
+        let mut best_split = None;
+        let mut best_candidate_w = 0.0f32;
+        let mut candidate_buf = String::with_capacity(cleaned.len() + 1);
+        for split in split_points {
+            if split == 0 || split >= cleaned.len() {
+                continue;
+            }
+            let prefix = &cleaned[..split];
+            let suffix = &cleaned[split..];
             if prefix.is_empty() || suffix.is_empty() {
                 continue;
             }
             candidate_buf.clear();
-            candidate_buf.push_str(&prefix);
+            candidate_buf.push_str(prefix);
             candidate_buf.push('-');
             let candidate_w = self.measure_text(&candidate_buf, style);
             let added = if line.text.is_empty() {
@@ -1173,22 +1206,26 @@ impl LayoutState {
                 space_w + candidate_w
             };
             if line.width_px + added <= max_width {
-                best_prefix = Some((candidate_buf.clone(), suffix));
+                best_split = Some(split);
+                best_candidate_w = candidate_w;
             } else {
                 break;
             }
         }
 
-        let Some((prefix_with_hyphen, remainder)) = best_prefix else {
+        let Some(split) = best_split else {
             return false;
         };
+        let prefix = &cleaned[..split];
+        let remainder = cleaned[split..].to_owned();
 
         if !line.text.is_empty() {
             line.text.push(' ');
             line.width_px += space_w;
         }
-        line.text.push_str(&prefix_with_hyphen);
-        line.width_px += self.measure_text(&prefix_with_hyphen, style);
+        line.text.push_str(prefix);
+        line.text.push('-');
+        line.width_px += best_candidate_w;
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
@@ -1360,7 +1397,6 @@ impl LayoutState {
                 font_id: line.style.font_id,
                 style: line.style,
             }));
-        self.page.sync_commands();
 
         self.cursor_y += line.line_height_px + self.cfg.line_gap_px;
         if self.in_paragraph {
@@ -1803,36 +1839,51 @@ fn split_word_at_char_boundary(word: &str, split_chars: usize) -> Option<(&str, 
 }
 
 fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
-    let chars: Vec<char> = word.chars().collect();
-    if chars.len() < 7 {
+    let char_count = word.chars().count();
+    if char_count < 7 {
         return Vec::with_capacity(8);
     }
-    let mut candidates = Vec::with_capacity(chars.len() / 2);
+    let mut candidates = Vec::with_capacity(char_count / 2);
     if let Some(exception) = english_hyphenation_exception(word) {
         candidates.extend_from_slice(exception);
     }
     let is_vowel = |c: char| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
 
-    for i in 3..(chars.len().saturating_sub(3)) {
-        let prev = chars[i - 1];
-        let next = chars[i];
-        if !prev.is_ascii_alphabetic() || !next.is_ascii_alphabetic() {
-            continue;
+    let mut prev: Option<char> = None;
+    for (boundary, ch) in word.chars().enumerate() {
+        if let Some(prev_ch) = prev {
+            if boundary >= 3
+                && boundary + 3 <= char_count
+                && prev_ch.is_ascii_alphabetic()
+                && ch.is_ascii_alphabetic()
+                && is_vowel(prev_ch) != is_vowel(ch)
+            {
+                candidates.push(boundary);
+            }
         }
-        if is_vowel(prev) != is_vowel(next) {
-            candidates.push(i);
-        }
+        prev = Some(ch);
     }
 
-    const SUFFIXES: &[&str] = &[
-        "tion", "sion", "ment", "ness", "less", "able", "ible", "ally", "ingly", "edly", "ing",
-        "ed", "ly",
+    const SUFFIXES: &[(&str, usize)] = &[
+        ("tion", 4),
+        ("sion", 4),
+        ("ment", 4),
+        ("ness", 4),
+        ("less", 4),
+        ("able", 4),
+        ("ible", 4),
+        ("ally", 4),
+        ("ingly", 5),
+        ("edly", 4),
+        ("ing", 3),
+        ("ed", 2),
+        ("ly", 2),
     ];
     let lower = word.to_ascii_lowercase();
-    for suffix in SUFFIXES {
+    for (suffix, suffix_len) in SUFFIXES {
         if lower.ends_with(suffix) {
-            let split = chars.len().saturating_sub(suffix.chars().count());
-            if split >= 3 && split + 3 <= chars.len() {
+            let split = char_count.saturating_sub(*suffix_len);
+            if split >= 3 && split + 3 <= char_count {
                 candidates.push(split);
             }
         }
