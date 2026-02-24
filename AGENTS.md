@@ -42,6 +42,16 @@ Target Rust 2021 (`rust-version = 1.85`).
 - PRs should include: what changed, why, affected features (`std`/`layout`/`async`/`cli`), and exact commands run.
 - For CLI or performance/memory changes, include sample output or benchmark/allocation evidence (`just analysis bench`, `just testing test-alloc`).
 
-## Memory Management
+## Documentation
 
-See `docs/specs/memory-management.md`
+Read these when the context calls for it:
+
+- `docs/architecture.md` — Start here. Pipeline, crate stack, memory budgets, perf targets.
+- `docs/specs/memory-management.md` — Before writing any allocation, buffer, or limit code. The three-tier pattern and gap analysis.
+- `docs/specs/render.md` — Before touching render/layout/font code. API contracts and migration notes.
+- `docs/specs/spec-compliance.md` — When adding EPUB feature support. What's done, what's not.
+- `docs/specs/embedded-render-tracker.md` — For prioritizing embedded render work. P0/P1/P2 backlog.
+- `docs/guides/embedded.md` — API examples for embedded-focused usage paths.
+- `docs/guides/analysis.md` — Before profiling or investigating memory/perf issues. What tools exist and when to run them.
+- `docs/guides/datasets.md` — When working with test corpora or validation.
+- `docs/guides/publishing.md` — Release procedures.

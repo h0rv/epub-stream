@@ -9,7 +9,7 @@
 Design contracts and acceptance criteria.
 
 - [specs/render.md](specs/render.md) — Renderer spec, required APIs, typography/font/memory requirements, migration notes.
-- [specs/memory-management.md](specs/memory-management.md) — Memory rules, buffer-reuse patterns, audit checklist.
+- [specs/memory-management.md](specs/memory-management.md) — Design philosophy, three-tier allocation strategy, limits reference, gap analysis.
 - [specs/spec-compliance.md](specs/spec-compliance.md) — EPUB feature matrix (container, OPF, nav, content, CSS, layout, fonts).
 - [specs/embedded-render-tracker.md](specs/embedded-render-tracker.md) — Production readiness tracker (P0/P1/P2 feature backlog).
 
