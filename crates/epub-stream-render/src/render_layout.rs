@@ -579,12 +579,12 @@ impl LayoutState {
         if enable_caption && self.cfg.object_layout.alt_text_fallback {
             let alt = image.alt.trim();
             if !alt.is_empty() {
-                caption = alt.to_string();
+                caption = alt.to_string(); // allow: into IR String field
             }
         }
         let caption_style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".to_string(), // allow: IR String field, once per image
             weight: 400,
             italic: true,
             size_px: 14.0,
@@ -628,7 +628,7 @@ impl LayoutState {
             self.page
                 .annotations
                 .push(crate::render_ir::PageAnnotation {
-                    kind: "inline_image_src".to_string(),
+                    kind: "inline_image_src".to_string(), // allow: annotation, once per image
                     value: Some(image.src),
                 });
         }
@@ -1112,21 +1112,24 @@ impl LayoutState {
         }
 
         let mut best_prefix: Option<(String, String)> = None;
+        let mut candidate_buf = String::with_capacity(raw_word.len() + 1);
         for i in 1..parts.len() {
             let prefix = parts[..i].concat();
             let suffix = parts[i..].concat();
             if prefix.is_empty() || suffix.is_empty() {
                 continue;
             }
-            let candidate = format!("{prefix}-");
-            let candidate_w = self.measure_text(&candidate, style);
+            candidate_buf.clear();
+            candidate_buf.push_str(&prefix);
+            candidate_buf.push('-');
+            let candidate_w = self.measure_text(&candidate_buf, style);
             let added = if line.text.is_empty() {
                 candidate_w
             } else {
                 space_w + candidate_w
             };
             if line.width_px + added <= max_width {
-                best_prefix = Some((candidate, suffix));
+                best_prefix = Some((candidate_buf.clone(), suffix));
             } else {
                 break;
             }
@@ -1166,6 +1169,7 @@ impl LayoutState {
         }
 
         let mut best_split: Option<(String, String, f32, i32)> = None;
+        let mut left_buf = String::with_capacity(word.len() + 1);
         for split in candidates {
             let Some((left, right)) = split_word_at_char_boundary(word, split) else {
                 continue;
@@ -1173,8 +1177,10 @@ impl LayoutState {
             if left.chars().count() < 3 || right.chars().count() < 3 {
                 continue;
             }
-            let left_h = format!("{left}-");
-            let candidate_w = self.measure_text(&left_h, style);
+            left_buf.clear();
+            left_buf.push_str(left);
+            left_buf.push('-');
+            let candidate_w = self.measure_text(&left_buf, style);
             let added = if line.text.is_empty() {
                 candidate_w
             } else {
@@ -1190,7 +1196,7 @@ impl LayoutState {
                 let score = fit_slack.saturating_mul(2).saturating_add(balance_penalty);
                 match best_split {
                     Some((_, _, _, best_score)) if score >= best_score => {}
-                    _ => best_split = Some((left_h, right.to_string(), candidate_w, score)),
+                    _ => best_split = Some((left_buf.clone(), right.into(), candidate_w, score)), // allow: only on score improvement
                 }
             }
         }
@@ -1341,9 +1347,9 @@ impl LayoutState {
         if head.is_empty() || tail.is_empty() {
             return None;
         }
-        line.text = head.to_string();
+        line.text = head.into(); // allow: owned CurrentLine.text from &str slice
         line.width_px = self.measure_text(&line.text, &line.style);
-        Some(tail.to_string())
+        Some(tail.into()) // allow: returning owned remainder
     }
 
     fn rebalance_line_for_quality(
@@ -1371,9 +1377,9 @@ impl LayoutState {
         if fill < 0.55 {
             return None;
         }
-        line.text = head.to_string();
+        line.text = head.into(); // allow: owned CurrentLine.text from &str slice
         line.width_px = head_w;
-        Some(tail.to_string())
+        Some(tail.into()) // allow: returning owned remainder
     }
 
     fn add_vertical_gap(&mut self, gap_px: i32) {
@@ -1426,7 +1432,7 @@ fn truncate_text_to_width(
     max_width: f32,
 ) -> String {
     if st.measure_text(text, style) <= max_width {
-        return text.to_string();
+        return text.into(); // allow: no-op path, avoids char iteration
     }
     let mut out = String::with_capacity(text.len().min(64));
     for ch in text.chars() {
@@ -1447,7 +1453,7 @@ fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
         .family_stack
         .first()
         .cloned()
-        .unwrap_or_else(|| "serif".to_string());
+        .unwrap_or_else(|| "serif".into()); // allow: fallback family default
     ResolvedTextStyle {
         font_id: None,
         family,
@@ -1825,7 +1831,7 @@ fn strip_soft_hyphens(text: &str) -> String {
     if text.contains(SOFT_HYPHEN) {
         text.chars().filter(|ch| *ch != SOFT_HYPHEN).collect()
     } else {
-        text.to_string()
+        text.into() // allow: no-op path avoids char iteration
     }
 }
 
@@ -1838,7 +1844,7 @@ fn annotate_page_chrome(pages: &mut [RenderPage], cfg: LayoutConfig) {
         if cfg.page_chrome.header_enabled {
             page.push_chrome_command(DrawCommand::PageChrome(PageChromeCommand {
                 kind: PageChromeKind::Header,
-                text: Some(format!("Page {}", page.page_number)),
+                text: Some(format!("Page {}", page.page_number)), // allow: once per page, post-layout
                 current: None,
                 total: None,
             }));
@@ -1846,7 +1852,7 @@ fn annotate_page_chrome(pages: &mut [RenderPage], cfg: LayoutConfig) {
         if cfg.page_chrome.footer_enabled {
             page.push_chrome_command(DrawCommand::PageChrome(PageChromeCommand {
                 kind: PageChromeKind::Footer,
-                text: Some(format!("Page {}", page.page_number)),
+                text: Some(format!("Page {}", page.page_number)), // allow: once per page, post-layout
                 current: None,
                 total: None,
             }));

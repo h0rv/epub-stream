@@ -14,7 +14,7 @@ total_hits=0
 
 # Known baseline: number of existing hits that are reviewed and acceptable.
 # Bump this down as you fix them; the lint fails if hits > BASELINE.
-BASELINE=30
+BASELINE=0
 
 # Files to scan: hot-path production code only (not tests, not CLI).
 HOT_PATHS=(

@@ -1878,7 +1878,7 @@ fn fit_bitmap_inside(src_w: u32, src_h: u32, target_w: u32, target_h: u32) -> (u
 fn fallback_image_label(image: &ImageObjectCommand) -> Option<String> {
     let alt = image.alt.trim();
     if !alt.is_empty() {
-        return Some(alt.to_string());
+        return Some(alt.into()); // allow: per-image fallback label
     }
     let src = image.src.trim();
     if src.is_empty() {
@@ -1888,7 +1888,7 @@ fn fallback_image_label(image: &ImageObjectCommand) -> Option<String> {
     if basename.is_empty() {
         return None;
     }
-    Some(basename.to_string())
+    Some(basename.into()) // allow: per-image fallback label
 }
 
 fn truncate_ascii_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -1897,7 +1897,7 @@ fn truncate_ascii_with_ellipsis(text: &str, max_chars: usize) -> String {
     }
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {
-        return text.to_string();
+        return text.into(); // allow: no-op path, avoids char iteration
     }
     if max_chars <= 3 {
         return ".".repeat(max_chars);

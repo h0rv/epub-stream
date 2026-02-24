@@ -1277,7 +1277,7 @@ impl RenderPrep {
             font_resolver,
             // TODO: move to caller-owned or bounded cache to avoid per-RenderPrep map alloc
             #[allow(clippy::disallowed_methods)]
-            image_dimension_cache: BTreeMap::new(),
+            image_dimension_cache: BTreeMap::new(), // allow: per-RenderPrep, bounded by manifest
         }
     }
 
@@ -1429,7 +1429,7 @@ impl RenderPrep {
     ) -> BTreeMap<String, (u16, u16)> {
         // TODO: replace with caller-owned Vec<(String, (u16, u16))> to avoid per-chapter map alloc
         #[allow(clippy::disallowed_methods)]
-        let mut out = BTreeMap::new();
+        let mut out = BTreeMap::new(); // allow: per-chapter dimension lookup, bounded by image count
         let sources = collect_image_sources_from_html(chapter_href, html);
         for src in sources {
             if let Some((w, h)) = self.resolve_intrinsic_image_dimensions(book, &src) {

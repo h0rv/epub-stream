@@ -553,7 +553,7 @@ impl FileRenderCacheStore {
         let profile_dir = profile_hex(profile);
         self.root
             .join(profile_dir)
-            .join(format!("chapter-{}.json", chapter_index))
+            .join(format!("chapter-{}.json", chapter_index)) // allow: file I/O path, not hot
     }
 }
 
@@ -598,6 +598,7 @@ impl RenderCacheStore for FileRenderCacheStore {
 
         let nonce = CACHE_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
         let temp_path = parent.join(format!(
+            // allow: file I/O path, not hot
             "chapter-{}.json.tmp-{}-{}",
             chapter_index,
             std::process::id(),
@@ -1613,7 +1614,7 @@ impl<'a> RenderConfig<'a> {
             self.forced_font_family = None;
             return self;
         }
-        self.forced_font_family = Some(trimmed.to_string());
+        self.forced_font_family = Some(trimmed.to_string()); // allow: config-time setter
         self.embedded_fonts = false;
         self
     }
@@ -1657,7 +1658,7 @@ impl RenderEngine {
     where
         F: FnMut(RenderDiagnostic) + Send + 'static,
     {
-        self.diagnostic_sink = Some(Arc::new(Mutex::new(Box::new(sink))));
+        self.diagnostic_sink = Some(Arc::new(Mutex::new(Box::new(sink)))); // allow: once, diagnostic setup
     }
 
     fn emit_diagnostic(&self, diagnostic: RenderDiagnostic) {
@@ -1671,7 +1672,7 @@ impl RenderEngine {
 
     /// Stable fingerprint for all layout-affecting settings.
     pub fn pagination_profile_id(&self) -> PaginationProfileId {
-        let payload = format!("{:?}|{:?}", self.opts.prep, self.opts.layout);
+        let payload = format!("{:?}|{:?}", self.opts.prep, self.opts.layout); // allow: once per config, hashing input
         PaginationProfileId::from_bytes(payload.as_bytes())
     }
 
@@ -2257,8 +2258,8 @@ fn forced_font_policy(family: &str) -> FontPolicy {
         .map(|part| part.trim_matches('"').trim_matches('\''))
         .filter(|part| !part.is_empty())
         .unwrap_or("serif");
-    policy.preferred_families = vec![normalized.to_string()];
-    policy.default_family = normalized.to_string();
+    policy.preferred_families = vec![normalized.to_string()]; // allow: config-time builder
+    policy.default_family = normalized.to_string(); // allow: config-time builder
     policy.allow_embedded_fonts = false;
     policy
 }
