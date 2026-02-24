@@ -1,56 +1,37 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use epub::doc::EpubDoc;
-use epub_parser::Epub as EpubParser;
-use epub_stream::metadata::{parse_container_xml, parse_opf};
-use epub_stream::spine::parse_spine;
-use epub_stream::tokenizer::tokenize_html;
-use epub_stream::zip::StreamingZip;
 use epub_stream::EpubBook;
+use epub_stream_embedded_graphics::with_embedded_text_measurer;
+use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
-#[derive(Clone, Copy)]
-struct Fixture {
-    key: &'static str,
-    filename: &'static str,
-    bytes: &'static [u8],
-}
+const DISPLAY_WIDTH: i32 = 480;
+const DISPLAY_HEIGHT: i32 = 800;
 
-const FIXTURES: &[Fixture] = &[
-    Fixture {
-        key: "fundamental-a11y",
-        filename: "Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
-        bytes: include_bytes!(
-            "../tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub"
-        ),
-    },
-    Fixture {
-        key: "pg84-frankenstein",
-        filename: "pg84-frankenstein.epub",
-        bytes: include_bytes!("../tests/fixtures/bench/pg84-frankenstein.epub"),
-    },
-    Fixture {
-        key: "pg1661-sherlock-holmes",
-        filename: "pg1661-sherlock-holmes.epub",
-        bytes: include_bytes!("../tests/fixtures/bench/pg1661-sherlock-holmes.epub"),
-    },
-    Fixture {
-        key: "pg2701-moby-dick",
-        filename: "pg2701-moby-dick.epub",
-        bytes: include_bytes!("../tests/fixtures/bench/pg2701-moby-dick.epub"),
-    },
-    Fixture {
-        key: "pg1342-pride-and-prejudice",
-        filename: "pg1342-pride-and-prejudice.epub",
-        bytes: include_bytes!("../tests/fixtures/bench/pg1342-pride-and-prejudice.epub"),
-    },
+const FIXTURES: &[(&str, &str)] = &[
+    (
+        "fundamental-a11y",
+        "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+    ),
+    (
+        "pg84-frankenstein",
+        "tests/fixtures/bench/pg84-frankenstein.epub",
+    ),
+    (
+        "pg1342-pride-and-prejudice",
+        "tests/fixtures/bench/pg1342-pride-and-prejudice.epub",
+    ),
+    (
+        "pg1661-sherlock-holmes",
+        "tests/fixtures/bench/pg1661-sherlock-holmes.epub",
+    ),
+    (
+        "pg2701-moby-dick",
+        "tests/fixtures/bench/pg2701-moby-dick.epub",
+    ),
 ];
-
-const WARMUP_ITERS: usize = 2;
-const MEASURE_ITERS: usize = 10;
 
 struct TrackingAllocator;
 
@@ -149,324 +130,205 @@ struct CaseResult {
     fixture: String,
     case: String,
     iterations: usize,
-    min: u128,
-    median: u128,
-    p90: u128,
-    mean: u128,
-    max: u128,
+    min_ns: u128,
+    median_ns: u128,
+    mean_ns: u128,
+    max_ns: u128,
     min_peak_heap_bytes: usize,
     median_peak_heap_bytes: usize,
-    p90_peak_heap_bytes: usize,
     mean_peak_heap_bytes: usize,
     max_peak_heap_bytes: usize,
 }
 
-fn read_entry(zip: &mut StreamingZip<Cursor<&[u8]>>, path: &str) -> Vec<u8> {
-    let entry = zip
-        .get_entry(path)
-        .unwrap_or_else(|| panic!("missing archive entry: {}", path))
-        .clone();
-    let mut buf = vec![0u8; entry.uncompressed_size as usize];
-    let n = zip
-        .read_file(&entry, &mut buf)
-        .unwrap_or_else(|e| panic!("failed to read '{}': {:?}", path, e));
-    buf.truncate(n);
-    buf
-}
-
-fn open_zip(bytes: &'static [u8]) -> StreamingZip<Cursor<&'static [u8]>> {
-    StreamingZip::new(Cursor::new(bytes)).expect("failed to open fixture zip")
-}
-
-fn resolve_spine_hrefs(bytes: &'static [u8]) -> (String, Vec<String>) {
-    let mut zip = open_zip(bytes);
-    let container_xml = read_entry(&mut zip, "META-INF/container.xml");
-    let opf_path = parse_container_xml(&container_xml).expect("failed to parse container.xml");
-    let opf = read_entry(&mut zip, &opf_path);
-    let metadata = parse_opf(&opf).expect("failed to parse OPF");
-    let spine = parse_spine(&opf).expect("failed to parse spine");
-
-    let hrefs = spine
-        .items()
-        .iter()
-        .filter_map(|item| metadata.get_item(&item.idref))
-        .map(|item| item.href.clone())
-        .collect();
-
-    (opf_path, hrefs)
-}
-
-fn percentile(sorted: &[u128], percentile: f64) -> u128 {
+fn percentile_u128(sorted: &[u128], percentile: f64) -> u128 {
     let idx = ((sorted.len().saturating_sub(1) as f64) * percentile).round() as usize;
     sorted[idx]
 }
 
-fn run_case<F>(fixture: &str, case: &str, mut op: F) -> CaseResult
+fn percentile_usize(sorted: &[usize], percentile: f64) -> usize {
+    let idx = ((sorted.len().saturating_sub(1) as f64) * percentile).round() as usize;
+    sorted[idx]
+}
+
+fn pick_text_chapter(path: &str) -> usize {
+    let mut book = EpubBook::open(path).unwrap_or_else(|e| panic!("open {}: {}", path, e));
+    let chapter_count = book.chapter_count();
+    if chapter_count == 0 {
+        return 0;
+    }
+    for idx in 0..chapter_count.min(12) {
+        if let Ok(tokens) = book.tokenize_spine_item(idx) {
+            if !tokens.is_empty() {
+                return idx;
+            }
+        }
+    }
+    0
+}
+
+fn run_case<F>(
+    fixture: &str,
+    case: &str,
+    warmup_iters: usize,
+    measure_iters: usize,
+    mut op: F,
+) -> CaseResult
 where
     F: FnMut() -> usize,
 {
-    for _ in 0..WARMUP_ITERS {
+    for _ in 0..warmup_iters {
         black_box(op());
     }
 
-    let mut samples = Vec::with_capacity(MEASURE_ITERS);
-    let mut mem_samples = Vec::with_capacity(MEASURE_ITERS);
-    for _ in 0..MEASURE_ITERS {
+    let mut time_samples = Vec::with_capacity(measure_iters);
+    let mut mem_samples = Vec::with_capacity(measure_iters);
+    for _ in 0..measure_iters {
         let baseline_alloc = current_alloc_bytes();
         reset_peak_alloc_bytes();
         let start = Instant::now();
         black_box(op());
-        samples.push(start.elapsed().as_nanos());
+        time_samples.push(start.elapsed().as_nanos());
         let peak_extra = peak_alloc_bytes().saturating_sub(baseline_alloc);
         mem_samples.push(peak_extra);
     }
 
-    samples.sort_unstable();
+    time_samples.sort_unstable();
     mem_samples.sort_unstable();
-    let sum: u128 = samples.iter().copied().sum();
+
+    let time_sum: u128 = time_samples.iter().copied().sum();
     let mem_sum: usize = mem_samples.iter().copied().sum();
-    let mean = sum / samples.len() as u128;
-    let min = samples[0];
-    let median = percentile(&samples, 0.5);
-    let p90 = percentile(&samples, 0.9);
-    let max = samples[samples.len() - 1];
-    let mem_mean = mem_sum / mem_samples.len();
-    let mem_min = mem_samples[0];
-    let mem_median =
-        mem_samples[((mem_samples.len().saturating_sub(1) as f64) * 0.5).round() as usize];
-    let mem_p90 =
-        mem_samples[((mem_samples.len().saturating_sub(1) as f64) * 0.9).round() as usize];
-    let mem_max = mem_samples[mem_samples.len() - 1];
 
     CaseResult {
         fixture: fixture.to_string(),
         case: case.to_string(),
-        iterations: MEASURE_ITERS,
-        min,
-        median,
-        p90,
-        mean,
-        max,
-        min_peak_heap_bytes: mem_min,
-        median_peak_heap_bytes: mem_median,
-        p90_peak_heap_bytes: mem_p90,
-        mean_peak_heap_bytes: mem_mean,
-        max_peak_heap_bytes: mem_max,
+        iterations: measure_iters,
+        min_ns: time_samples[0],
+        median_ns: percentile_u128(&time_samples, 0.5),
+        mean_ns: time_sum / time_samples.len() as u128,
+        max_ns: time_samples[time_samples.len() - 1],
+        min_peak_heap_bytes: mem_samples[0],
+        median_peak_heap_bytes: percentile_usize(&mem_samples, 0.5),
+        mean_peak_heap_bytes: mem_sum / mem_samples.len(),
+        max_peak_heap_bytes: mem_samples[mem_samples.len() - 1],
     }
 }
 
 fn main() {
-    println!("# epub-stream benchmark corpus");
+    let quick = std::env::args().any(|arg| arg == "--quick");
+    let warmup_iters = if quick { 1 } else { 2 };
+    let measure_iters = if quick { 3 } else { 10 };
+
+    println!("# epub-stream benchmark");
     println!(
-        "# warmup_iters={}, measure_iters={}",
-        WARMUP_ITERS, MEASURE_ITERS
+        "# mode={} warmup_iters={} measure_iters={}",
+        if quick { "quick" } else { "full" },
+        warmup_iters,
+        measure_iters
     );
-    println!("# fixture_count={}", FIXTURES.len());
     println!(
-        "fixture,case,iterations,min_ns,median_ns,p90_ns,mean_ns,max_ns,min_peak_heap_bytes,median_peak_heap_bytes,p90_peak_heap_bytes,mean_peak_heap_bytes,max_peak_heap_bytes"
+        "fixture,case,iterations,min_ns,median_ns,mean_ns,max_ns,min_peak_heap_bytes,median_peak_heap_bytes,mean_peak_heap_bytes,max_peak_heap_bytes"
     );
 
-    let mut results: Vec<CaseResult> = Vec::new();
-
-    for fixture in FIXTURES {
-        let (opf_path, spine_hrefs) = resolve_spine_hrefs(fixture.bytes);
-        let base = opf_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-
-        let first_path = {
-            let href = spine_hrefs
-                .first()
-                .unwrap_or_else(|| panic!("no spine href in fixture {}", fixture.key));
-            if base.is_empty() {
-                href.clone()
-            } else {
-                format!("{}/{}", base, href)
-            }
-        };
-
-        results.push(run_case(fixture.key, "high_level/open_book", || {
-            let book = EpubBook::from_reader(Cursor::new(fixture.bytes)).expect("open failed");
-            black_box(book.chapter_count())
-        }));
+    let mut results = Vec::new();
+    for (fixture_key, fixture_path) in FIXTURES {
+        let text_chapter = pick_text_chapter(fixture_path);
 
         results.push(run_case(
-            fixture.key,
-            "high_level/open_and_tokenize_first",
+            fixture_key,
+            "open_epub",
+            warmup_iters,
+            measure_iters,
+            || {
+                let book =
+                    EpubBook::open(fixture_path).unwrap_or_else(|e| panic!("open failed: {}", e));
+                book.chapter_count()
+            },
+        ));
+
+        results.push(run_case(
+            fixture_key,
+            "parse_metadata",
+            warmup_iters,
+            measure_iters,
+            || {
+                let book =
+                    EpubBook::open(fixture_path).unwrap_or_else(|e| panic!("open failed: {}", e));
+                black_box(book.title());
+                black_box(book.author());
+                book.chapter_count()
+            },
+        ));
+
+        results.push(run_case(
+            fixture_key,
+            "tokenize_text_chapter",
+            warmup_iters,
+            measure_iters,
             || {
                 let mut book =
-                    EpubBook::from_reader(Cursor::new(fixture.bytes)).expect("open failed");
+                    EpubBook::open(fixture_path).unwrap_or_else(|e| panic!("open failed: {}", e));
                 let tokens = book
-                    .tokenize_spine_item(0)
-                    .expect("tokenize first chapter failed");
-                black_box(tokens.len())
+                    .tokenize_spine_item(text_chapter)
+                    .unwrap_or_else(|e| panic!("tokenize failed: {}", e));
+                tokens.len()
             },
         ));
-
-        results.push(run_case(fixture.key, "compare/epub-rs/open_book", || {
-            let doc = EpubDoc::from_reader(Cursor::new(fixture.bytes.to_vec()))
-                .expect("epub-rs open failed");
-            black_box(doc.get_num_chapters())
-        }));
 
         results.push(run_case(
-            fixture.key,
-            "compare/epub-rs/open_and_get_current",
+            fixture_key,
+            "render_text_chapter",
+            warmup_iters,
+            measure_iters,
             || {
-                let mut doc = EpubDoc::from_reader(Cursor::new(fixture.bytes.to_vec()))
-                    .expect("epub-rs open failed");
-                let (bytes, _mime) = doc
-                    .get_current()
-                    .expect("epub-rs failed to read current chapter");
-                black_box(bytes.len())
+                let mut book =
+                    EpubBook::open(fixture_path).unwrap_or_else(|e| panic!("open failed: {}", e));
+                let engine = RenderEngine::new(RenderEngineOptions::for_display(
+                    DISPLAY_WIDTH,
+                    DISPLAY_HEIGHT,
+                ));
+                let config = with_embedded_text_measurer(RenderConfig::default());
+                let pages = engine
+                    .prepare_chapter_with_config_collect(&mut book, text_chapter, config)
+                    .unwrap_or_else(|e| panic!("render failed: {}", e));
+                pages.len()
             },
         ));
-
-        results.push(run_case(fixture.key, "compare/epub-parser/parse", || {
-            let parsed = EpubParser::parse_from_buffer(fixture.bytes).expect("epub-parser failed");
-            black_box(parsed.pages.len())
-        }));
 
         results.push(run_case(
-            fixture.key,
-            "compare/epub-parser/parse_and_first_page_len",
+            fixture_key,
+            "full_open_to_first_page",
+            warmup_iters,
+            measure_iters,
             || {
-                let parsed =
-                    EpubParser::parse_from_buffer(fixture.bytes).expect("epub-parser failed");
-                let first_page_len = parsed.pages.first().map(|p| p.content.len()).unwrap_or(0);
-                black_box(first_page_len)
+                let mut book =
+                    EpubBook::open(fixture_path).unwrap_or_else(|e| panic!("open failed: {}", e));
+                let engine = RenderEngine::new(RenderEngineOptions::for_display(
+                    DISPLAY_WIDTH,
+                    DISPLAY_HEIGHT,
+                ));
+                let config = with_embedded_text_measurer(RenderConfig::default());
+                let pages = engine
+                    .prepare_chapter_with_config_collect(&mut book, text_chapter, config)
+                    .unwrap_or_else(|e| panic!("render failed: {}", e));
+                pages.first().map(|page| page.commands.len()).unwrap_or(0)
             },
         ));
-
-        results.push(run_case(fixture.key, "zip/open_archive", || {
-            let zip = open_zip(fixture.bytes);
-            black_box(zip.num_entries())
-        }));
-
-        results.push(run_case(fixture.key, "parse/package", || {
-            let mut zip = open_zip(fixture.bytes);
-            let container_xml = read_entry(&mut zip, "META-INF/container.xml");
-            let opf_path = parse_container_xml(&container_xml).expect("container parse failed");
-            let opf = read_entry(&mut zip, &opf_path);
-            let metadata = parse_opf(&opf).expect("opf parse failed");
-            let spine = parse_spine(&opf).expect("spine parse failed");
-            black_box(metadata.manifest.len() + spine.len())
-        }));
-
-        results.push(run_case(fixture.key, "tokenize/first_spine_item", || {
-            let mut zip = open_zip(fixture.bytes);
-            let chapter = read_entry(&mut zip, &first_path);
-            let html = std::str::from_utf8(&chapter).expect("chapter utf-8");
-            let tokens = tokenize_html(html).expect("tokenize failed");
-            black_box(tokens.len())
-        }));
     }
 
     for result in &results {
         println!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             result.fixture,
             result.case,
             result.iterations,
-            result.min,
-            result.median,
-            result.p90,
-            result.mean,
-            result.max,
+            result.min_ns,
+            result.median_ns,
+            result.mean_ns,
+            result.max_ns,
             result.min_peak_heap_bytes,
             result.median_peak_heap_bytes,
-            result.p90_peak_heap_bytes,
             result.mean_peak_heap_bytes,
             result.max_peak_heap_bytes
-        );
-    }
-
-    println!("# summary");
-    println!("fixture,metric,epub-stream_median_ns,other_median_ns,ratio_x,delta_percent");
-
-    let find_median = |fixture: &str, case: &str| -> u128 {
-        results
-            .iter()
-            .find(|r| r.fixture == fixture && r.case == case)
-            .unwrap_or_else(|| panic!("missing case in results: fixture={} case={}", fixture, case))
-            .median
-    };
-    let find_median_peak_heap = |fixture: &str, case: &str| -> usize {
-        results
-            .iter()
-            .find(|r| r.fixture == fixture && r.case == case)
-            .unwrap_or_else(|| panic!("missing case in results: fixture={} case={}", fixture, case))
-            .median_peak_heap_bytes
-    };
-
-    for fixture in FIXTURES {
-        let print_compare = |label: &str, base: &str, other: &str| {
-            let base_median = find_median(fixture.key, base) as f64;
-            let other_median = find_median(fixture.key, other) as f64;
-            let ratio = other_median / base_median;
-            let delta_percent = ((other_median - base_median) / base_median) * 100.0;
-            println!(
-                "{},{},{:.0},{:.0},{:.2},{:.1}",
-                fixture.key, label, base_median, other_median, ratio, delta_percent
-            );
-        };
-
-        print_compare(
-            "open_book: epub-stream vs epub-rs",
-            "high_level/open_book",
-            "compare/epub-rs/open_book",
-        );
-        print_compare(
-            "open+read_first: epub-stream vs epub-rs",
-            "high_level/open_and_tokenize_first",
-            "compare/epub-rs/open_and_get_current",
-        );
-        print_compare(
-            "open_book: epub-stream vs epub-parser(parse)",
-            "high_level/open_book",
-            "compare/epub-parser/parse",
-        );
-    }
-
-    println!("# memory_summary");
-    println!(
-        "fixture,metric,epub-stream_median_peak_heap_bytes,other_median_peak_heap_bytes,ratio_x,delta_percent"
-    );
-    for fixture in FIXTURES {
-        let print_mem_compare = |label: &str, base: &str, other: &str| {
-            let base_median = find_median_peak_heap(fixture.key, base) as f64;
-            let other_median = find_median_peak_heap(fixture.key, other) as f64;
-            let ratio = other_median / base_median;
-            let delta_percent = ((other_median - base_median) / base_median) * 100.0;
-            println!(
-                "{},{},{:.0},{:.0},{:.2},{:.1}",
-                fixture.key, label, base_median, other_median, ratio, delta_percent
-            );
-        };
-
-        print_mem_compare(
-            "open_book: epub-stream vs epub-rs",
-            "high_level/open_book",
-            "compare/epub-rs/open_book",
-        );
-        print_mem_compare(
-            "open+read_first: epub-stream vs epub-rs",
-            "high_level/open_and_tokenize_first",
-            "compare/epub-rs/open_and_get_current",
-        );
-        print_mem_compare(
-            "open_book: epub-stream vs epub-parser(parse)",
-            "high_level/open_book",
-            "compare/epub-parser/parse",
-        );
-    }
-
-    println!("# fixtures");
-    println!("key,filename,size_bytes");
-    for fixture in FIXTURES {
-        println!(
-            "{},{},{}",
-            fixture.key,
-            fixture.filename,
-            fixture.bytes.len()
         );
     }
 }

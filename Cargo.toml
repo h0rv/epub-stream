@@ -45,8 +45,9 @@ log = { version = "0.4", default-features = false, optional = true }
 tokio = { version = "1", features = ["fs"], optional = true }
 
 [dev-dependencies]
-epub = "2.1.5"
-epub-parser = "0.3.4"
+embedded-graphics = "0.8"
+epub_stream_embedded_graphics = { package = "epub-stream-embedded-graphics", version = "0.1.0", path = "crates/epub-stream-embedded-graphics" }
+epub_stream_render = { package = "epub-stream-render", version = "0.1.0", path = "crates/epub-stream-render" }
 
 [[bench]]
 name = "epub_bench"

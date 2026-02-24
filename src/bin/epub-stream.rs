@@ -266,7 +266,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let report = validate_epub_file(&path).map_err(display_err)?;
 
             let output = Json::Obj(vec![
-                ("epub".to_string(), Json::Str(path.clone())),
+                ("epub".to_string(), Json::Str(path)),
                 ("valid".to_string(), Json::Bool(report.is_valid())),
                 ("error_count".to_string(), Json::Num(report.error_count())),
                 (

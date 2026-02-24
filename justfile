@@ -7,6 +7,8 @@ else \
     rustc -vV | awk '/^host: / { print $2 }'; \
 fi`
 
+mod analysis "tools/analysis.justfile"
+
 # Format code
 fmt:
     cargo fmt --all
@@ -49,6 +51,42 @@ harden:
 # Integration tests (slower / broader; useful in CI).
 test-integration:
     cargo test --workspace --all-features --tests
+
+# Memory budget tests (isolated allocators per integration test binary).
+test-memory:
+    cargo test --all-features --test budget_metadata --test budget_tokenize --test budget_render --test budget_full_flow -- --nocapture
+
+# Fragmentation stress tests under allocator churn.
+test-fragmentation:
+    cargo test --all-features --test frag_epub_open --test frag_render -- --nocapture --test-threads=1
+
+# Firmware-like open -> prepare -> render loop on host with deterministic fixtures.
+test-firmware-path:
+    cargo test --all-features --test firmware_path -- --nocapture
+
+# Corpus stress test against in-repo fixtures and optional local Gutenberg datasets.
+corpus-test:
+    cargo test --all-features --test corpus_stress -- --nocapture
+
+# Bootstrap local Gutenberg corpus under tests/datasets.
+fetch-corpus:
+    ./scripts/datasets/bootstrap.sh
+
+# Fast local confidence loop after each change.
+test-all:
+    just fmt-check
+    just lint
+    just test
+    just test-memory
+    just test-firmware-path
+    just bench-quick
+
+# Full local validation before merge.
+validate:
+    just test-all
+    just test-fragmentation
+    just corpus-test
+    just render-regression
 
 # Strict memory-focused linting for constrained targets.
 #
@@ -98,7 +136,7 @@ test-verbose:
 
 # Run allocation count tests
 test-alloc:
-    cargo test --all-features --test allocation_tests -- --ignored --nocapture --test-threads=1
+    just test-memory
 
 # Run embedded-focused suites (tiny budgets + reflow regression matrix).
 test-embedded:
@@ -335,10 +373,20 @@ dataset-validate-mini:
     @cargo build --features cli --bin epub-stream
     ./scripts/datasets/validate.sh --manifest tests/datasets/manifest-mini.tsv
 
-# Run benchmarks and save latest CSV report
+# Run benchmarks and save latest text report
 bench:
     @mkdir -p target/bench
-    @cargo bench --bench epub_bench --all-features | tee target/bench/latest.csv
+    @cargo bench --bench epub_bench --all-features | tee target/bench/latest.txt
+
+# Fast benchmark smoke pass for local edit loops.
+bench-quick:
+    @mkdir -p target/bench
+    @cargo bench --bench epub_bench --all-features -- --quick | tee target/bench/quick.txt
+
+# Timestamped benchmark artifact for change tracking.
+bench-report:
+    @mkdir -p target/bench
+    @cargo bench --bench epub_bench --all-features | tee target/bench/bench-$(date +%Y%m%d-%H%M%S).txt
 
 # Check no_std + layout
 check-no-std-layout:
