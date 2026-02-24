@@ -7,7 +7,7 @@ This workspace publishes multiple crates and should be released in dependency or
 Use a hybrid model:
 
 1. Local preflight for fast feedback:
-   - `just release-preflight`
+   - `just publish release-preflight`
 2. Actual publish via CI (manual `workflow_dispatch`) for auditability and repeatability.
 
 This keeps daily development fast while avoiding ad-hoc local release mistakes.
@@ -24,11 +24,11 @@ The `just` recipes enforce this order.
 ## Local commands
 
 - Full preflight:
-  - `just release-preflight`
+  - `just publish release-preflight`
 - Publish dry-run only:
-  - `just publish-dry-run-all`
+  - `just publish publish-dry-run-all`
 - Publish for real (requires `CARGO_REGISTRY_TOKEN`):
-  - `just publish-all`
+  - `just publish publish-all`
 
 ## CI publish
 

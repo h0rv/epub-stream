@@ -21,7 +21,7 @@ This tracker covers remaining work to make embedded rendering production-grade a
 - Streaming parse + bounded prep APIs exist.
 - Render pipeline split is in place (`epub-stream-render` + `epub-stream-embedded-graphics`).
 - Web reflow regression harness exists for config mapping and text-boundary checks.
-- Embedded tiny-budget and allocation tests exist and are passing locally (`just test-embedded`, `just test-alloc`).
+- Embedded tiny-budget and allocation tests exist and are passing locally (`just testing test-embedded`, `just testing test-alloc`).
 - Embedded renderer now exposes deterministic fallback/budget diagnostics with low-overhead counters.
 - Embedded low-RAM reflow/page-turn stress loops now run in the regression matrix.
 - Render corpus regression harness now covers bench fixtures across multiple pagination profiles with deterministic invariant checks.
@@ -35,7 +35,7 @@ Known blockers in current code:
 
 ## Memory-First Contract (Required For Every New Feature)
 
-Every item below must follow `docs/memory-management.md`.
+Every item below must follow `docs/specs/memory-management.md`.
 
 - [ ] Public APIs use caller-owned buffers or reusable scratch types on repeated paths.
 - [ ] Every heavy path has explicit limits in options structs (bytes/items/pages/faces).
@@ -75,7 +75,7 @@ Every item below must follow `docs/memory-management.md`.
   Required tests: right-edge clipping invariants over font-size/family/spacing matrix.
 
 - [x] `EMB-005` Embedded dynamic reflow regression matrix (`done`)
-  Current: dedicated embedded matrix regression test now runs in `epub-stream-embedded-graphics` and is wired into `just render-regression`.
+  Current: dedicated embedded matrix regression test now runs in `epub-stream-embedded-graphics` and is wired into `just testing render-regression`.
   Done when: embedded-oriented regression matrix covers font size, line spacing, justification, family override, viewport changes.
   Memory constraints: fixture-driven tests with strict page/item limits.
   Required tests: chapter page count monotonicity, page index monotonicity, progress monotonicity, no-overflow checks.
@@ -146,15 +146,15 @@ Every item below must follow `docs/memory-management.md`.
 
 Required gate set for production progression:
 
-- `just test-embedded`
+- `just testing test-embedded`
 - `just embedded-low-ram-matrix`
 - `just embedded-budget-telemetry`
-- `just test-alloc`
+- `just testing test-alloc`
 - `cargo test -p epub-stream-embedded-graphics`
 - `cargo test -p epub-stream-render --test corpus_regression_harness`
 - `cargo test -p epub-stream-render --test typography_regression`
 - `cargo test -p epub-stream-render-web --bin web-preview`
-- `just lint-memory`
+- `just testing lint-memory`
 - `just check-no-std-layout`
 
 Planned additions to make this tracker enforceable:

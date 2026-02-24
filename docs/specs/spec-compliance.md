@@ -100,32 +100,35 @@ Status key: **done** | **partial** | **--** (not started) | **n/a** (out of scop
 | Feature                          | Status  | Notes                                                    |
 |----------------------------------|---------|----------------------------------------------------------|
 | Unified `EpubError` type         | done    | Wraps ZIP, parse, navigation, CSS, I/O errors            |
-| `From` conversions               | done    | `ZipError`, `TokenizeError`, `String`, `&str` → `EpubError` |
+| `From` conversions               | done    | `ZipError`, `TokenizeError` → `EpubError`                |
 
 ## Fonts
 
 | Feature                          | Status  | Notes                                          |
 |----------------------------------|---------|-------------------------------------------------|
-| Built-in fonts                   | --      | Only a monospace 10x20 stub in `FontMetrics`   |
-| User fonts from storage           | --      | Size cap ~200KB                                |
-| Embedded fonts from EPUB         | --      | Size cap enforced                              |
-| Font fallback chain              | --      |                                                |
+| Built-in fonts                   | partial | Mono backend default; TTF registration + metrics available |
+| User fonts from storage           | partial | Size cap ~200KB; registration API exists       |
+| Embedded fonts from EPUB         | partial | `@font-face` discovery + bounded loading       |
+| Font fallback chain              | partial | Reason codes exist; draw falls back to mono    |
 | Complex script shaping           | --      | Behind `epub_full` flag                        |
 
 ## Test Coverage
 
-| Module       | Unit tests | Notes                                         |
-|--------------|------------|-----------------------------------------------|
-| zip          | 12         | ZIP reading, mimetype validation, error types |
-| metadata     | 17         | DC fields, cover, guide, EPUB3 meta           |
-| spine        | 19         | Parsing, navigation, progress, edge cases     |
-| tokenizer    | 33         | All HTML elements, edge cases, nesting        |
-| navigation   | 20         | XHTML nav, NCX, page list, landmarks          |
-| css          | 29         | Parsing, selectors, cascading, resolution     |
-| layout       | 30         | Pagination, lists, images, styles, boundaries |
-| error        | 5          | Display, conversions                          |
-| integration  | 23         | End-to-end pipeline (15 require EPUB fixture) |
-| **Total**    | **188+**   |                                               |
+Comprehensive test suite across unit tests, integration tests, memory budget
+tests, fragmentation simulation, corpus stress tests, firmware path replica,
+embedded reflow regression, and typography regression harnesses.
+
+Run `just test` for unit tests, `just test-integration` for the full suite,
+or `just validate` for the complete pre-merge gate.
+
+## Next Steps (80/20 Roadmap)
+
+1. Expand validator diagnostics for package semantics (required manifest/media rules).
+2. Add golden tests for `epub-stream validate` JSON output and diagnostic code stability.
+3. Add corpus fixtures for tricky EPUB2/EPUB3 edge cases and regressions.
+4. Add differential tests against `epub-rs`/`epub-parser` on shared corpora.
+5. Add targeted fuzzing for ZIP/XML/tokenizer parsing paths.
+6. Add ZIP64 fixtures to expectation corpus and implement read-only ZIP64 container parsing.
 
 ## References
 

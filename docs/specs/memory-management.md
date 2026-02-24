@@ -138,14 +138,12 @@ let mut chapter_tokens: HVec<Token, ???> = HVec::new(); // don't do this
 : canonical single command (`fmt` + `check` + `lint` + `test`).
 - `just ci`
 : CI gate (`just all` + `test-integration`).
-- `just lint-memory`
+- `just testing lint-memory`
 : optional deep memory linting (`no_std` core/alloc discipline + renderer allocation-intent checks).
-- `just test-alloc`
+- `just testing test-alloc`
 : optional allocation-counter stress tests (`--ignored`, serialized threads).
-- `just test-embedded`
+- `just testing test-embedded`
 : optional tiny-budget embedded-path tests (`--ignored`).
-- `just harden-gutenberg`
-: runs `just all`, then validates/profiles local Gutenberg corpus (after `just dataset-bootstrap-gutenberg`).
-- `just dataset-profile-gutenberg`
+- `just analysis dataset-profile-gutenberg`
 : generates `target/datasets/gutenberg-smoke-*.csv` with per-book timings for `validate`, `chapters`, and `chapter-text --index 0`.
   Known corpus-specific failures can be tracked in `scripts/datasets/gutenberg-smoke-expectations.tsv` and are reported as `expected_fail`.

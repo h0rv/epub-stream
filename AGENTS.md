@@ -9,7 +9,8 @@
 - `tests/`: integration, regression, allocation, and embedded-mode suites.
 - `tests/fixtures/`: sample EPUBs and benchmark corpus checksums.
 - `benches/epub_bench.rs`: benchmark target.
-- `docs/` and `scripts/datasets/`: architecture/compliance docs and dataset tooling.
+- `docs/`: architecture, specs (render, memory, compliance, tracker), and guides (embedded, datasets, publishing, analysis). See `docs/README.md` for the full index.
+- `scripts/datasets/`: dataset bootstrap and validation tooling.
 
 ## Build, Test, and Development Commands
 Use `just` recipes (CI uses these exact commands):
@@ -17,7 +18,7 @@ Use `just` recipes (CI uses these exact commands):
 - `just fmt` / `just fmt-check`: format code or verify formatting.
 - `just lint`: clippy with `--all-features` and warnings denied.
 - `just check`, `just check-no-std`, `just check-no-std-layout`, `just check-msrv`: compile matrix validation.
-- `just test`, `just test-ignored`, `just test-alloc`, `just test-embedded`: test suites.
+- `just test`, `just testing test-ignored`, `just testing test-alloc`, `just testing test-embedded`: test suites.
 - `just doc-check`: build docs with warnings as errors.
 - `just cli-check` or `just cli -- validate book.epub --pretty`: CLI validation/run.
 
@@ -39,8 +40,8 @@ Target Rust 2021 (`rust-version = 1.85`).
 - Match existing commit style: short, imperative subject lines (`Add ...`, `Fix ...`, `Reduce ...`).
 - Keep each commit focused on one logical change.
 - PRs should include: what changed, why, affected features (`std`/`layout`/`async`/`cli`), and exact commands run.
-- For CLI or performance/memory changes, include sample output or benchmark/allocation evidence (`just bench`, `just test-alloc`).
+- For CLI or performance/memory changes, include sample output or benchmark/allocation evidence (`just analysis bench`, `just testing test-alloc`).
 
 ## Memory Management
 
-See `docs/memory-management.md`
+See `docs/specs/memory-management.md`

@@ -1,9 +1,7 @@
-//! Regression tests for known bugs
+//! Regression tests for known bugs.
 //!
-//! Each test documents a specific bug and should FAIL until the bug is fixed.
-//! Once fixed, these become permanent regression tests.
-//!
-//! See docs/bugs.md for the full bug tracker.
+//! Each test documents a specific bug. Once fixed, these become permanent
+//! regression tests to prevent regressions.
 
 // =============================================================================
 // XML Entity Handling

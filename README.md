@@ -8,11 +8,11 @@ Streaming architecture targeting constrained devices.
 ## Status
 
 Core EPUB parsing, tokenization, navigation, CSS subset, and layout engine are
-implemented. See [docs/spec-compliance.md](docs/spec-compliance.md) and
-[docs/compliance.md](docs/compliance.md) for current coverage details.
+implemented. See [docs/specs/spec-compliance.md](docs/specs/spec-compliance.md) for current
+coverage details.
 Dataset bootstrap and corpus validation flow is documented in
-[docs/datasets.md](docs/datasets.md).
-Embedded-focused usage patterns are documented in [docs/embedded.md](docs/embedded.md).
+[docs/guides/datasets.md](docs/guides/datasets.md).
+Embedded-focused usage patterns are documented in [docs/guides/embedded.md](docs/guides/embedded.md).
 
 Note: ZIP64 archives are currently not supported and are rejected explicitly.
 
@@ -138,19 +138,19 @@ Generate a web preview with TOC navigation, image embedding, embedded-font loadi
 and runtime font/layout controls:
 
 ```bash
-just web-preview tests/fixtures/bench/pg84-frankenstein.epub
+just visualize web-preview tests/fixtures/bench/pg84-frankenstein.epub
 ```
 
 Or export a standalone HTML snapshot:
 
 ```bash
-just web-preview-export tests/fixtures/bench/pg84-frankenstein.epub target/web-preview/index.html
+just visualize web-preview-export tests/fixtures/bench/pg84-frankenstein.epub target/web-preview/index.html
 ```
 
 Run the full reader-control regression harness (dynamic reflow + pagination + config mapping):
 
 ```bash
-just render-regression
+just testing render-regression
 ```
 
 ### CLI (Unix-Friendly)

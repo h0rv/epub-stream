@@ -7,16 +7,16 @@ git (`tests/datasets/` is ignored).
 ## Quick Start
 
 ```bash
-just dataset-bootstrap
-just dataset-list
-just dataset-validate
-just dataset-validate-mini
+just analysis dataset-bootstrap
+just analysis dataset-list
+just analysis dataset-validate
+just analysis dataset-validate-mini
 ```
 
 Strict mode (warnings fail):
 
 ```bash
-just dataset-validate-strict
+just analysis dataset-validate-strict
 ```
 
 ## Sources Pulled by Script
@@ -34,7 +34,7 @@ EPUBTest books:
 
 ## Output Reports
 
-`just dataset-validate` writes reports to `target/datasets/`:
+`just analysis dataset-validate` writes reports to `target/datasets/`:
 
 - `validate-<timestamp>.jsonl`: one line per EPUB with CLI validation output
 - `validate-<timestamp>.summary.txt`: aggregate counts
@@ -43,7 +43,7 @@ EPUBTest books:
 
 ## Expectation-Aware Validation (Default)
 
-`just dataset-validate` and `just dataset-validate-strict` evaluate parser behavior against
+`just analysis dataset-validate` and `just analysis dataset-validate-strict` evaluate parser behavior against
 `scripts/datasets/expectations.tsv` instead of requiring every EPUB file to be valid.
 
 This is important for corpora like EPUBCheck that intentionally include invalid
@@ -52,8 +52,8 @@ fixtures. The run fails only when observed results differ from expected outcomes
 Raw mode (all files must validate) is still available:
 
 ```bash
-just dataset-validate-raw
-just dataset-validate-raw-strict
+just analysis dataset-validate-raw
+just analysis dataset-validate-raw-strict
 ```
 
 ## CI-Ready Mini Corpus
@@ -62,7 +62,7 @@ Large external corpora are not suitable for CI. Use the curated manifest for a
 small, deterministic smoke run that still exercises typical EPUB structure.
 
 ```bash
-just dataset-validate-mini
+just analysis dataset-validate-mini
 ```
 
 Notes:

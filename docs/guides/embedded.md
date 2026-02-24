@@ -5,7 +5,7 @@ This guide documents the embedded-focused API surface in the `epub_stream` stack
 ## Production Tracker
 
 For production-readiness gaps and priorities, see
-`docs/embedded-render-tracker.md`.
+`docs/specs/embedded-render-tracker.md`.
 
 ## Open Lazily and Bound Navigation
 
