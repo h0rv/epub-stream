@@ -2020,7 +2020,7 @@ mod tests {
     fn body_style() -> ResolvedTextStyle {
         ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2130,7 +2130,7 @@ mod tests {
         let renderer = EgRenderer::default();
         let style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2163,7 +2163,7 @@ mod tests {
         let renderer = EgRenderer::with_backend(EgRenderConfig::default(), backend);
         let style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2557,7 +2557,7 @@ mod tests {
         let renderer = EgRenderer::with_backend(EgRenderConfig::default(), backend);
         let base_style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2602,7 +2602,7 @@ mod tests {
         let backend = MonoFontBackend;
         let style = ResolvedTextStyle {
             font_id: None,
-            family: "fantasy".to_string(),
+            family: "fantasy".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2624,7 +2624,7 @@ mod tests {
         let backend = MonoFontBackend;
         let style = ResolvedTextStyle {
             font_id: None,
-            family: "monospace".to_string(),
+            family: "monospace".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2687,7 +2687,7 @@ mod tests {
         let renderer_split = EgRenderer::with_backend(EgRenderConfig::default(), backend_split);
         let base_style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: "serif".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,
@@ -2883,7 +2883,7 @@ mod tests {
         assert_eq!(backend.status(), "metrics_only");
 
         let style = ResolvedTextStyle {
-            family: "Body".to_string(),
+            family: "Body".into(),
             ..body_style()
         };
         let selection = backend.resolve_font(&style, None);

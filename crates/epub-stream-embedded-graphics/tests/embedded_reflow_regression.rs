@@ -258,7 +258,7 @@ fn embedded_renderer_budget_diagnostics_cover_limit_and_fallback_paths() {
         font_id: None,
         style: ResolvedTextStyle {
             font_id: None,
-            family: "fantasy".to_string(),
+            family: "fantasy".into(),
             weight: 400,
             italic: false,
             size_px: 16.0,

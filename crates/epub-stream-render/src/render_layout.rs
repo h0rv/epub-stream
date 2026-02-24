@@ -279,7 +279,7 @@ impl LayoutEngine {
         let mut style = to_resolved_style(&run.style);
         style.font_id = Some(run.font_id);
         if !run.resolved_family.is_empty() {
-            style.family = run.resolved_family.clone();
+            style.family = Arc::from(run.resolved_family.as_str());
         }
         if let Some(level) = ctx.heading_level {
             style.role = BlockRole::Heading(level);
@@ -632,7 +632,7 @@ impl LayoutState {
         }
         let caption_style = ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(), // allow: IR String field, once per image
+            family: Arc::from("serif"),
             weight: 400,
             italic: true,
             size_px: 14.0,
@@ -1581,8 +1581,8 @@ fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
     let family = style
         .family_stack
         .first()
-        .cloned()
-        .unwrap_or_else(|| "serif".into()); // allow: fallback family default
+        .map(|family| Arc::from(family.as_str()))
+        .unwrap_or_else(|| Arc::from("serif")); // allow: fallback family default
     ResolvedTextStyle {
         font_id: None,
         family,
@@ -2077,7 +2077,7 @@ mod tests {
     fn resolved_body_style() -> ResolvedTextStyle {
         ResolvedTextStyle {
             font_id: None,
-            family: "serif".to_string(),
+            family: Arc::from("serif"),
             weight: 400,
             italic: false,
             size_px: 16.0,

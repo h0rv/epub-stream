@@ -1299,7 +1299,7 @@ impl From<&ResolvedTextStyle> for PersistedResolvedTextStyle {
     fn from(value: &ResolvedTextStyle) -> Self {
         Self {
             font_id: value.font_id,
-            family: value.family.clone(),
+            family: value.family.to_string(),
             weight: value.weight,
             italic: value.italic,
             size_px: value.size_px,
@@ -1315,7 +1315,7 @@ impl From<PersistedResolvedTextStyle> for ResolvedTextStyle {
     fn from(value: PersistedResolvedTextStyle) -> Self {
         Self {
             font_id: value.font_id,
-            family: value.family,
+            family: value.family.into(),
             weight: value.weight,
             italic: value.italic,
             size_px: value.size_px,
@@ -2403,7 +2403,7 @@ mod tests {
             font_id: Some(3),
             style: ResolvedTextStyle {
                 font_id: Some(3),
-                family: "serif".to_string(),
+                family: "serif".into(),
                 weight: 400,
                 italic: false,
                 size_px: 16.0,
@@ -2587,6 +2587,13 @@ mod tests {
         store.store_chapter_pages(profile, chapter_index, &pages);
         let cache_path = store.chapter_cache_path(profile, chapter_index);
         assert!(cache_path.exists());
+        let cache_json = fs::read_to_string(&cache_path).expect("cache file should be readable");
+        let cache_payload: serde_json::Value =
+            serde_json::from_str(&cache_json).expect("cache JSON should parse");
+        assert_eq!(
+            cache_payload["pages"][0]["content_commands"][0]["Text"]["style"]["family"].as_str(),
+            Some("serif")
+        );
 
         let loaded = store.load_chapter_pages(profile, chapter_index);
         assert_eq!(loaded, Some(pages.clone()));

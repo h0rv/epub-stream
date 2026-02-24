@@ -1,5 +1,6 @@
 use core::fmt;
 use epub_stream::BlockRole;
+use std::sync::Arc;
 
 /// Page represented as backend-agnostic draw commands.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -424,7 +425,7 @@ pub struct ResolvedTextStyle {
     /// Stable font identifier for this style.
     pub font_id: Option<u32>,
     /// Chosen family.
-    pub family: String,
+    pub family: Arc<str>,
     /// Numeric weight.
     pub weight: u16,
     /// Italic flag.

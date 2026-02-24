@@ -999,7 +999,7 @@ fn convert_page(
             .annotations
             .iter()
             .map(|annotation| AnnotationPayload {
-                kind: annotation.kind.clone(),
+                kind: annotation.kind.as_str().to_string(),
                 value: annotation.value.clone(),
             })
             .collect(),
@@ -1026,13 +1026,13 @@ fn convert_command(
 ) -> CommandPayload {
     match cmd {
         DrawCommand::Text(text) => {
-            font_families.insert(text.style.family.clone());
+            font_families.insert(text.style.family.to_string());
             CommandPayload::Text {
                 x: text.x,
                 baseline_y: text.baseline_y,
                 text: text.text.clone(),
                 style: TextStylePayload {
-                    family: text.style.family.clone(),
+                    family: text.style.family.to_string(),
                     weight: text.style.weight,
                     italic: text.style.italic,
                     size_px: text.style.size_px,
@@ -1185,7 +1185,7 @@ fn load_font_face<R: std::io::Read + std::io::Seek>(
         .to_string();
 
     Some(FontFacePayload {
-        family: face.family.clone(),
+        family: face.family.to_string(),
         weight: face.weight,
         style: embedded_style_to_css(face.style).to_string(),
         href: face.href.clone(),
