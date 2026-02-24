@@ -13,7 +13,10 @@ use quick_xml::reader::Reader;
 
 use crate::error::EpubError;
 
-/// Maximum number of manifest items (fixed-size constraint)
+/// Maximum number of manifest items kept in memory.
+#[cfg(target_os = "espidf")]
+const MAX_MANIFEST_ITEMS: usize = 256;
+#[cfg(not(target_os = "espidf"))]
 const MAX_MANIFEST_ITEMS: usize = 1024;
 
 /// Maximum number of subject tags
@@ -133,6 +136,30 @@ impl EpubMetadata {
             .iter()
             .find(|item| item.href == href)
             .map(|item| item.id.as_str())
+    }
+}
+
+fn should_keep_manifest_item(item: &ManifestItem) -> bool {
+    #[cfg(target_os = "espidf")]
+    {
+        if item.properties.as_deref().is_some_and(|props| {
+            props
+                .split_whitespace()
+                .any(|p| p == "nav" || p == "cover-image")
+        }) {
+            return true;
+        }
+        let media = item.media_type.as_str();
+        media == "application/xhtml+xml"
+            || media == "text/html"
+            || media == "text/css"
+            || media == "application/x-dtbncx+xml"
+            || media.starts_with("image/")
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let _ = item;
+        true
     }
 }
 
@@ -347,6 +374,10 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                 // Parse manifest item
                 if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
                     if let Some(item) = parse_manifest_item(&e, &reader)? {
+                        if !should_keep_manifest_item(&item) {
+                            buf.clear();
+                            continue;
+                        }
                         // Check if this is a cover image (EPUB3)
                         if item
                             .properties
@@ -535,6 +566,10 @@ fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, Epub
 
                 if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
                     if let Some(item) = parse_manifest_item_reader(&e, &reader)? {
+                        if !should_keep_manifest_item(&item) {
+                            buf.clear();
+                            continue;
+                        }
                         if item
                             .properties
                             .as_ref()
