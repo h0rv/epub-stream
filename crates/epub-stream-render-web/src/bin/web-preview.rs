@@ -1,3 +1,6 @@
+// Dev-only binary — allocation discipline rules target library hot paths, not tooling.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::io::{Read, Write};

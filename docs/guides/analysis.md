@@ -3,8 +3,23 @@
 What each tool catches, when to run it, and how results feed back into the
 [memory-management spec](../specs/memory-management.md).
 
-All recipes live under `just analysis <recipe>`. Run `just analysis
-check-tools` to verify prerequisites.
+Analysis recipes live under `just analysis <recipe>`. Memory linting lives
+under `just testing lint-memory`. Run `just analysis check-tools` to verify
+prerequisites.
+
+## Memory linting
+
+`just testing lint-memory` runs three passes:
+
+| Pass | What it catches | Gate |
+|------|----------------|------|
+| `lint-memory-no-std` | `std::` imports where `core::`/`alloc::` suffice (import discipline) | hard — fails on any violation |
+| `lint-memory-render` | `Vec::new()`, `String::new()`, `HashMap::new()`, `BTreeMap::new()` in library code (via `clippy.toml` disallowed-methods) | hard — fails on any violation |
+| `lint-memory-patterns` | `format!()`, `.to_string()`, `.collect::<Vec>`, `Box::new()` in hot-path production code (via `scripts/lint-memory-patterns.sh`) | soft — fails if count exceeds baseline |
+
+The grep-based lint (`lint-memory-patterns`) uses a baseline threshold. As you
+fix existing hits, lower the `BASELINE` constant in the script. New violations
+above baseline fail CI.
 
 ## Tools
 
@@ -36,6 +51,7 @@ check-tools` to verify prerequisites.
 
 ## When to run
 
+- **After any code change**: `just testing lint-memory` — catches allocation anti-patterns at introduction time.
 - **After perf-sensitive changes** (hot-path refactors, new allocations, dependency bumps): `just analysis analyze-static` + `just analysis bench-quick`.
 - **Before a release**: `just analysis analyze-static` + `just analysis bench-report` to capture a baseline snapshot.
 - **Investigating OOM or allocation growth**: `just analysis mem-profile` to capture a heap trace, then compare against the budgets in the memory-management spec.
@@ -45,7 +61,8 @@ check-tools` to verify prerequisites.
 
 Results from analysis inform the [memory-management spec](../specs/memory-management.md):
 
-1. `bloat-cli-crates` reveals dependency weight — if a crate grows past expectations, evaluate alternatives or feature-gate it.
-2. `mem-profile` traces map directly to the audit checklist (no per-chapter allocations, scratch reuse, streaming chunks).
-3. `bench-report` snapshots track whether performance targets in [architecture.md](../architecture.md) still hold.
-4. `miri` validates that unsafe blocks (ZIP CRC, buffer tricks) remain sound.
+1. `lint-memory` catches anti-patterns at introduction time — the first line of defense.
+2. `bloat-cli-crates` reveals dependency weight — if a crate grows past expectations, evaluate alternatives or feature-gate it.
+3. `mem-profile` traces map directly to the audit checklist (no per-chapter allocations, scratch reuse, streaming chunks).
+4. `bench-report` snapshots track whether performance targets in [architecture.md](../architecture.md) still hold.
+5. `miri` validates that unsafe blocks (ZIP CRC, buffer tricks) remain sound.

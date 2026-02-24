@@ -6,9 +6,11 @@
 #
 # - no_std pass: enforce core/alloc import discipline.
 # - render pass: ban convenience constructors that hide allocation intent.
+# - grep pass: catch patterns clippy can't (format!(), .to_string() in hot paths).
 lint-memory:
     just testing lint-memory-no-std
     just testing lint-memory-render
+    just testing lint-memory-patterns
 
 # no_std/alloc discipline checks (core path only).
 lint-memory-no-std:
@@ -17,6 +19,10 @@ lint-memory-no-std:
 # Render crate allocation-intent checks.
 lint-memory-render:
     cargo clippy -p epub-stream-render --lib --no-deps -- -D warnings -W clippy::disallowed_methods
+
+# Grep-based hot-path pattern lint (format!(), .to_string(), .collect::<Vec>, etc.).
+lint-memory-patterns:
+    bash scripts/lint-memory-patterns.sh
 
 # --- Specialized test suites ---
 

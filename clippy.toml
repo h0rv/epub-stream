@@ -1,6 +1,11 @@
 disallowed-methods = [
-    { path = "alloc::vec::Vec::new", reason = "Use Vec::with_capacity(...) or caller-owned buffers to make allocation intent explicit." },
-    { path = "std::vec::Vec::new", reason = "Use Vec::with_capacity(...) or caller-owned buffers to make allocation intent explicit." },
-    { path = "alloc::string::String::new", reason = "Use String::with_capacity(...) so line/chapter buffers have explicit budgets." },
-    { path = "std::string::String::new", reason = "Use String::with_capacity(...) so line/chapter buffers have explicit budgets." },
+    # Hidden allocations — use with_capacity() or caller-owned buffers.
+    { path = "alloc::vec::Vec::new", reason = "Use Vec::with_capacity() or caller-owned buffers." },
+    { path = "std::vec::Vec::new", reason = "Use Vec::with_capacity() or caller-owned buffers." },
+    { path = "alloc::string::String::new", reason = "Use String::with_capacity() for explicit budgets." },
+    { path = "std::string::String::new", reason = "Use String::with_capacity() for explicit budgets." },
+    # Map creation — use with_capacity() or avoid maps on hot paths.
+    { path = "std::collections::HashMap::new", reason = "Use HashMap::with_capacity() or avoid maps on hot paths." },
+    { path = "std::collections::BTreeMap::new", reason = "Avoid BTreeMap in hot paths; prefer sorted Vec or fixed-size lookup." },
+    { path = "std::collections::hash_map::HashMap::new", reason = "Use HashMap::with_capacity() or avoid maps on hot paths." },
 ]

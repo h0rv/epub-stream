@@ -1275,6 +1275,8 @@ impl RenderPrep {
             opts,
             styler,
             font_resolver,
+            // TODO: move to caller-owned or bounded cache to avoid per-RenderPrep map alloc
+            #[allow(clippy::disallowed_methods)]
             image_dimension_cache: BTreeMap::new(),
         }
     }
@@ -1425,6 +1427,8 @@ impl RenderPrep {
         chapter_href: &str,
         html: &[u8],
     ) -> BTreeMap<String, (u16, u16)> {
+        // TODO: replace with caller-owned Vec<(String, (u16, u16))> to avoid per-chapter map alloc
+        #[allow(clippy::disallowed_methods)]
         let mut out = BTreeMap::new();
         let sources = collect_image_sources_from_html(chapter_href, html);
         for src in sources {
