@@ -95,11 +95,12 @@ impl Line {
 
     /// Get concatenated text content of all spans
     pub fn text(&self) -> String {
-        self.spans
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<Vec<_>>()
-            .join("")
+        let total_len: usize = self.spans.iter().map(|span| span.text.len()).sum();
+        let mut text = String::with_capacity(total_len);
+        for span in &self.spans {
+            text.push_str(&span.text);
+        }
+        text
     }
 
     /// Get the primary style (first span's style, or Normal)
@@ -801,6 +802,22 @@ mod tests {
         assert_eq!(line.style(), TextStyle::Bold);
         assert!(!line.is_empty());
         assert_eq!(line.len(), 5);
+    }
+
+    #[test]
+    fn test_line_text_concatenates_all_spans() {
+        let line = Line {
+            spans: vec![
+                TextSpan::new("Hello".to_string(), TextStyle::Normal),
+                TextSpan::new(", ".to_string(), TextStyle::Normal),
+                TextSpan::new("world".to_string(), TextStyle::Bold),
+                TextSpan::new("!".to_string(), TextStyle::Italic),
+            ],
+            y: 42,
+        };
+
+        assert_eq!(line.text(), "Hello, world!");
+        assert_eq!(line.len(), "Hello, world!".len());
     }
 
     #[test]

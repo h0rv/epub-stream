@@ -672,7 +672,7 @@ impl LayoutState {
             self.page
                 .annotations
                 .push(crate::render_ir::PageAnnotation {
-                    kind: "inline_image_src".to_string(), // allow: annotation, once per image
+                    kind: crate::render_ir::PageAnnotationKind::InlineImageSrc,
                     value: Some(image.src),
                 });
         }
@@ -1421,16 +1421,16 @@ impl LayoutState {
         if conservative <= available_width as f32 {
             return None;
         }
-        let source = line.text.clone();
-        let (head, tail) = source.rsplit_once(' ')?;
-        let head = head.trim_end();
-        let tail = tail.trim_start();
+        let split_at = line.text.rfind(' ')?;
+        let head = line.text[..split_at].trim_end();
+        let tail = line.text[split_at + 1..].trim_start();
         if head.is_empty() || tail.is_empty() {
             return None;
         }
-        line.text = head.into(); // allow: owned CurrentLine.text from &str slice
+        let tail = tail.to_string(); // allow: returning owned remainder
+        line.text.truncate(head.len());
         line.width_px = self.measure_text(&line.text, &line.style);
-        Some(tail.into()) // allow: returning owned remainder
+        Some(tail)
     }
 
     fn rebalance_line_for_quality(
@@ -1441,15 +1441,19 @@ impl LayoutState {
         if available_width <= 0 {
             return None;
         }
-        let words: Vec<&str> = line.text.split_whitespace().collect();
-        let tail = *words.last()?;
-        if tail.chars().count() > 2 || words.len() < 3 {
+        let mut words = line.text.split_whitespace();
+        let mut tail = words.next()?;
+        let mut word_count = 1usize;
+        for word in words {
+            tail = word;
+            word_count += 1;
+        }
+        if tail.chars().count() > 2 || word_count < 3 {
             return None;
         }
-        let source = line.text.clone();
-        let (head, tail) = source.rsplit_once(' ')?;
-        let head = head.trim_end();
-        let tail = tail.trim_start();
+        let split_at = line.text.rfind(' ')?;
+        let head = line.text[..split_at].trim_end();
+        let tail = line.text[split_at + 1..].trim_start();
         if head.is_empty() || tail.is_empty() {
             return None;
         }
@@ -1458,9 +1462,10 @@ impl LayoutState {
         if fill < 0.55 {
             return None;
         }
-        line.text = head.into(); // allow: owned CurrentLine.text from &str slice
+        let tail = tail.to_string(); // allow: returning owned remainder
+        line.text.truncate(head.len());
         line.width_px = head_w;
-        Some(tail.into()) // allow: returning owned remainder
+        Some(tail)
     }
 
     fn add_vertical_gap(&mut self, gap_px: i32) {
@@ -1517,13 +1522,14 @@ fn truncate_text_to_width(
     }
     let mut out = String::with_capacity(text.len().min(64));
     for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
-        candidate.push('…');
-        if st.measure_text(&candidate, style) > max_width {
+        out.push(ch);
+        out.push('…');
+        if st.measure_text(&out, style) > max_width {
+            let _ = out.pop();
+            let _ = out.pop();
             break;
         }
-        out.push(ch);
+        let _ = out.pop();
     }
     out.push('…');
     out
@@ -2209,6 +2215,35 @@ mod tests {
             .expect("caption text expected");
         assert_eq!(first_text.style.justify_mode, JustifyMode::None);
         assert!(first_text.style.italic);
+    }
+
+    #[test]
+    fn truncate_text_to_width_preserves_prefix_and_ellipsis_behavior() {
+        let st = LayoutState::default();
+        let style = ResolvedTextStyle {
+            font_id: None,
+            family: "serif".to_string(),
+            weight: 400,
+            italic: false,
+            size_px: 16.0,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            role: BlockRole::Paragraph,
+            justify_mode: JustifyMode::None,
+        };
+        let text = "abcdef";
+
+        let abc_ellipsis_width = st.measure_text("abc…", &style);
+        let almost_a_ellipsis_width = st.measure_text("a…", &style) - 0.5;
+
+        assert_eq!(
+            truncate_text_to_width(&st, text, &style, abc_ellipsis_width),
+            "abc…"
+        );
+        assert_eq!(
+            truncate_text_to_width(&st, text, &style, almost_a_ellipsis_width),
+            "…"
+        );
     }
 
     #[test]

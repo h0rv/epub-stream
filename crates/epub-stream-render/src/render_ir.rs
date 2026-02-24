@@ -1,3 +1,4 @@
+use core::fmt;
 use epub_stream::BlockRole;
 
 /// Page represented as backend-agnostic draw commands.
@@ -152,9 +153,85 @@ impl RenderPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageAnnotation {
     /// Stable annotation kind/tag.
-    pub kind: String,
+    pub kind: PageAnnotationKind,
     /// Optional annotation payload.
     pub value: Option<String>,
+}
+
+/// Structured page annotation kind.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PageAnnotationKind {
+    /// Generic note/marker annotation.
+    Note,
+    /// Inline image source annotation emitted by layout.
+    InlineImageSrc,
+    /// Forward-compatible fallback for unknown/legacy string tags.
+    Unknown(String),
+}
+
+impl PageAnnotationKind {
+    /// Canonical string form used by persisted payloads and compatibility paths.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Note => "note",
+            Self::InlineImageSrc => "inline_image_src",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+impl AsRef<str> for PageAnnotationKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<&str> for PageAnnotationKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "note" => Self::Note,
+            "inline_image_src" => Self::InlineImageSrc,
+            _ => Self::Unknown(value.to_string()),
+        }
+    }
+}
+
+impl From<String> for PageAnnotationKind {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "note" => Self::Note,
+            "inline_image_src" => Self::InlineImageSrc,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl From<PageAnnotationKind> for String {
+    fn from(value: PageAnnotationKind) -> Self {
+        match value {
+            PageAnnotationKind::Note => "note".to_string(),
+            PageAnnotationKind::InlineImageSrc => "inline_image_src".to_string(),
+            PageAnnotationKind::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<&PageAnnotationKind> for String {
+    fn from(value: &PageAnnotationKind) -> Self {
+        value.as_str().to_string()
+    }
+}
+
+impl PartialEq<&str> for PageAnnotationKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl fmt::Display for PageAnnotationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Structured page metrics for progress and navigation.
@@ -258,6 +335,38 @@ pub struct OverlayItem {
 /// Overlay composer API for app-driven overlay placement/content.
 pub trait OverlayComposer {
     fn compose(&self, metrics: &PageMetrics, viewport: OverlaySize) -> Vec<OverlayItem>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageAnnotationKind;
+
+    #[test]
+    fn page_annotation_kind_maps_known_tags() {
+        assert_eq!(PageAnnotationKind::from("note"), PageAnnotationKind::Note);
+        assert_eq!(
+            PageAnnotationKind::from("inline_image_src"),
+            PageAnnotationKind::InlineImageSrc
+        );
+        assert_eq!(String::from(PageAnnotationKind::Note), "note");
+        assert_eq!(
+            String::from(PageAnnotationKind::InlineImageSrc),
+            "inline_image_src"
+        );
+    }
+
+    #[test]
+    fn page_annotation_kind_preserves_unknown_tags() {
+        let kind = PageAnnotationKind::from("custom_annotation");
+        assert_eq!(
+            kind,
+            PageAnnotationKind::Unknown("custom_annotation".to_string())
+        );
+        assert_eq!(kind.as_str(), "custom_annotation");
+        assert_eq!(kind, "custom_annotation");
+        assert_eq!(kind.to_string(), "custom_annotation");
+        assert_eq!(String::from(&kind), "custom_annotation".to_string());
+    }
 }
 
 /// Layout output commands.

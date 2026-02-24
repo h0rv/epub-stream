@@ -1162,7 +1162,7 @@ struct PersistedPageAnnotation {
 impl From<&PageAnnotation> for PersistedPageAnnotation {
     fn from(value: &PageAnnotation) -> Self {
         Self {
-            kind: value.kind.clone(),
+            kind: String::from(&value.kind),
             value: value.value.clone(),
         }
     }
@@ -1171,7 +1171,7 @@ impl From<&PageAnnotation> for PersistedPageAnnotation {
 impl From<PersistedPageAnnotation> for PageAnnotation {
     fn from(value: PersistedPageAnnotation) -> Self {
         Self {
-            kind: value.kind,
+            kind: value.kind.into(),
             value: value.value,
         }
     }
@@ -2370,8 +2370,8 @@ mod tests {
     use super::*;
     use crate::render_ir::{
         DrawCommand, ImageObjectCommand, JustifyMode, OverlayItem, OverlayRect, OverlaySlot,
-        PageAnnotation, PageChromeCommand, PageChromeKind, RectCommand, ResolvedTextStyle,
-        RuleCommand, TextCommand,
+        PageAnnotation, PageAnnotationKind, PageChromeCommand, PageChromeKind, RectCommand,
+        ResolvedTextStyle, RuleCommand, TextCommand,
     };
     use epub_stream::{BlockRole, ChapterRef, ComputedTextStyle, StyledEvent, StyledRun};
     use std::fs;
@@ -2463,7 +2463,7 @@ mod tests {
             })),
         });
         page.annotations.push(PageAnnotation {
-            kind: "note".to_string(),
+            kind: PageAnnotationKind::Note,
             value: Some(format!("a{page_number}")),
         });
         page.metrics.chapter_index = 4;
@@ -2598,6 +2598,41 @@ mod tests {
             .is_none());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_page_annotation_kind_preserves_string_compatibility() {
+        let persisted_note = PersistedPageAnnotation {
+            kind: "note".to_string(),
+            value: Some("n1".to_string()),
+        };
+        let note: PageAnnotation = persisted_note.clone().into();
+        assert_eq!(note.kind, PageAnnotationKind::Note);
+        assert_eq!(PersistedPageAnnotation::from(&note).kind, "note");
+
+        let persisted_inline = PersistedPageAnnotation {
+            kind: "inline_image_src".to_string(),
+            value: Some("images/pic.jpg".to_string()),
+        };
+        let inline: PageAnnotation = persisted_inline.clone().into();
+        assert_eq!(inline.kind, PageAnnotationKind::InlineImageSrc);
+        assert_eq!(
+            PersistedPageAnnotation::from(&inline).kind,
+            "inline_image_src"
+        );
+
+        let legacy_unknown_json = r#"{"kind":"legacy_annotation","value":"payload"}"#;
+        let persisted_unknown: PersistedPageAnnotation =
+            serde_json::from_str(legacy_unknown_json).expect("legacy JSON should deserialize");
+        let unknown: PageAnnotation = persisted_unknown.into();
+        assert_eq!(
+            unknown.kind,
+            PageAnnotationKind::Unknown("legacy_annotation".to_string())
+        );
+        assert_eq!(
+            PersistedPageAnnotation::from(&unknown).kind,
+            "legacy_annotation"
+        );
     }
 
     #[test]
