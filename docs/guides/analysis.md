@@ -15,11 +15,20 @@ prerequisites.
 |------|----------------|------|
 | `lint-memory-no-std` | `std::` imports where `core::`/`alloc::` suffice (import discipline) | hard — fails on any violation |
 | `lint-memory-render` | `Vec::new()`, `String::new()`, `HashMap::new()`, `BTreeMap::new()` in library code (via `clippy.toml` disallowed-methods) | hard — fails on any violation |
-| `lint-memory-patterns` | `format!()`, `.to_string()`, `.collect::<Vec>`, `Box::new()` in hot-path production code (via `scripts/lint-memory-patterns.sh`) | soft — fails if count exceeds baseline |
+| `lint-memory-patterns` | 12 pattern categories across all library code (via `scripts/lint-memory-patterns.sh`) | soft — fails if count exceeds baseline |
 
-The grep-based lint (`lint-memory-patterns`) uses a baseline threshold. As you
-fix existing hits, lower the `BASELINE` constant in the script. New violations
-above baseline fail CI.
+The grep-based lint (`lint-memory-patterns`) scans all production library code
+(core, render, embedded-graphics, render-web lib) for allocation anti-patterns:
+
+- **Constructors**: `Box::new()`, `Map::new()`
+- **String materialisation**: `format!()`, `.to_string()`, `.to_owned()`, `.join()`, `.concat()`
+- **Collection materialisation**: `.collect::<Vec>`, `.collect()` (inferred type)
+- **Cloning**: `.clone()` on owned types
+- **Capacity**: `Vec::with_capacity(0)`, `String::with_capacity(0)`
+
+Error paths, comments, and test modules (after `#[cfg(test)]`) are excluded.
+Uses a baseline threshold — lower `BASELINE` in the script as you fix hits.
+New violations above baseline fail CI.
 
 ## Tools
 

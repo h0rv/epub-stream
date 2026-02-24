@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Grep-based memory anti-pattern lint for patterns clippy can't catch.
 #
-# Targets the hot-path crates: render engine, layout, embedded-graphics,
-# and the core library's render_prep/tokenizer/streaming modules.
+# Scans ALL production code in the workspace (core library, render, embedded-
+# graphics). Excludes test modules, CLI/dev binaries, and comments.
 #
 # Exit 0 = clean (at or below baseline), exit 1 = new violations found.
 #
@@ -14,26 +14,43 @@ total_hits=0
 
 # Known baseline: number of existing hits that are reviewed and acceptable.
 # Bump this down as you fix them; the lint fails if hits > BASELINE.
-BASELINE=0
+BASELINE=494
 
-# Files to scan: hot-path production code only (not tests, not CLI).
-HOT_PATHS=(
+# ---------------------------------------------------------------------------
+# File sets
+# ---------------------------------------------------------------------------
+
+# All production library code (not binaries, not tests-only files).
+ALL_LIB=(
+    # Core library
+    "$ROOT/src/book.rs"
+    "$ROOT/src/css.rs"
+    "$ROOT/src/error.rs"
+    "$ROOT/src/layout.rs"
+    "$ROOT/src/lib.rs"
+    "$ROOT/src/metadata.rs"
+    "$ROOT/src/navigation.rs"
     "$ROOT/src/render_prep.rs"
-    "$ROOT/src/tokenizer.rs"
+    "$ROOT/src/spine.rs"
     "$ROOT/src/streaming.rs"
+    "$ROOT/src/tokenizer.rs"
+    "$ROOT/src/validate.rs"
     "$ROOT/src/zip.rs"
-    "$ROOT/crates/epub-stream-render/src/render_layout.rs"
+    "$ROOT/src/async_api.rs"
+    # Render crate
+    "$ROOT/crates/epub-stream-render/src/lib.rs"
     "$ROOT/crates/epub-stream-render/src/render_engine.rs"
     "$ROOT/crates/epub-stream-render/src/render_ir.rs"
+    "$ROOT/crates/epub-stream-render/src/render_layout.rs"
+    # Embedded-graphics crate
     "$ROOT/crates/epub-stream-embedded-graphics/src/lib.rs"
+    # Render-web crate (library portion)
+    "$ROOT/crates/epub-stream-render-web/src/lib.rs"
 )
 
-# Layout/render files only (tighter checks).
-RENDER_PATHS=(
-    "$ROOT/crates/epub-stream-render/src/render_layout.rs"
-    "$ROOT/crates/epub-stream-render/src/render_engine.rs"
-    "$ROOT/crates/epub-stream-embedded-graphics/src/lib.rs"
-)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 # Find the line number where #[cfg(test)] starts in a file, or 999999 if absent.
 test_boundary() {
@@ -43,10 +60,8 @@ test_boundary() {
     echo "${line:-999999}"
 }
 
-# Helper: scan files for a pattern, filtering out allowed lines and test code.
-# Skips: #[allow, // allow:, comments, everything at/after #[cfg(test)]
-# Usage: scan_pattern [-e] "description" "grep_pattern" file...
-#   -e  = exclude error paths (lines containing Err(, Error, error, panic, assert, warn)
+# scan_pattern [-e] "description" "grep_pattern" file...
+#   -e = exclude error paths (Err(, Error, panic, assert, warn, debug, map_err)
 scan_pattern() {
     local exclude_errors=false
     if [ "${1:-}" = "-e" ]; then
@@ -84,10 +99,12 @@ scan_pattern() {
                 | grep -v 'error' \
                 | grep -v 'panic' \
                 | grep -v 'assert' \
-                | grep -v 'warn' \
-                | grep -v 'debug' \
+                | grep -v 'warn(' \
+                | grep -v 'debug(' \
                 | grep -v 'return Err' \
                 | grep -v 'map_err' \
+                | grep -v 'anyhow' \
+                | grep -v 'bail!' \
                 || true)
         fi
 
@@ -107,39 +124,99 @@ scan_pattern() {
     total_hits=$((total_hits + category_hits))
 }
 
-echo "Memory anti-pattern lint (hot paths only)"
-echo "=========================================="
+echo "Memory anti-pattern lint"
+echo "========================"
 
-# 1. .collect::<Vec in hot-path code (materializes iterator into heap alloc)
+# ---------------------------------------------------------------------------
+# Allocation constructors
+# ---------------------------------------------------------------------------
+
+# 1. HashMap::new() or BTreeMap::new()
 scan_pattern \
-    ".collect::<Vec<_>>() — materializes iterator into heap allocation" \
-    '\.collect::<Vec' \
-    "${HOT_PATHS[@]}"
-
-# 2. format!() in render/layout hot paths (not error paths)
-#    Error-path format! is fine; layout/render format! is a per-page String alloc.
-scan_pattern -e \
-    "format!() in render/layout — hidden String allocation per call" \
-    'format!\(' \
-    "${RENDER_PATHS[@]}"
-
-# 3. .to_string() in render/layout production code (not error paths, not tests)
-scan_pattern -e \
-    ".to_string() in render/layout — prefer write! or caller buffer" \
-    '\.to_string\(\)' \
-    "${RENDER_PATHS[@]}"
-
-# 4. HashMap::new() or BTreeMap::new() in hot paths
-scan_pattern \
-    "Map::new() — prefer with_capacity() or avoid maps in hot paths" \
+    "Map::new() — prefer with_capacity() or avoid maps" \
     '(HashMap|BTreeMap)::new\(\)' \
-    "${HOT_PATHS[@]}"
+    "${ALL_LIB[@]}"
 
-# 5. Box::new() in layout/render code
+# 2. Box::new() — heap allocation
 scan_pattern \
-    "Box::new() — heap allocation; prefer stack or caller-owned storage" \
+    "Box::new() — heap allocation; prefer stack or caller-owned" \
     'Box::new\(' \
-    "${RENDER_PATHS[@]}"
+    "${ALL_LIB[@]}"
+
+# ---------------------------------------------------------------------------
+# String/collection materialisation
+# ---------------------------------------------------------------------------
+
+# 3. format!() in production code (not error paths)
+scan_pattern -e \
+    "format!() — hidden String allocation" \
+    'format!\(' \
+    "${ALL_LIB[@]}"
+
+# 4. .to_string() (not error paths)
+scan_pattern -e \
+    ".to_string() — prefer .into(), Cow, or caller buffer" \
+    '\.to_string\(\)' \
+    "${ALL_LIB[@]}"
+
+# 5. .to_owned() (not error paths)
+scan_pattern -e \
+    ".to_owned() — prefer .into(), Cow, or borrowing" \
+    '\.to_owned\(\)' \
+    "${ALL_LIB[@]}"
+
+# 6. .collect::<Vec — turbofish form
+scan_pattern \
+    ".collect::<Vec<_>>() — materializes iterator into heap Vec" \
+    '\.collect::<Vec' \
+    "${ALL_LIB[@]}"
+
+# 7. .collect() — inferred type (catches chars().collect(), etc.)
+#    Exclude itertools, error paths, and test builders.
+scan_pattern -e \
+    ".collect() — inferred-type collection; verify not materializing needlessly" \
+    '\.collect\(\)' \
+    "${ALL_LIB[@]}"
+
+# 8. .join() — allocates a new String from slices
+scan_pattern -e \
+    ".join() — allocates new String; prefer write! or reusable buffer" \
+    '\.join\(' \
+    "${ALL_LIB[@]}"
+
+# 9. .concat() — allocates new String/Vec from slices
+scan_pattern \
+    ".concat() — allocates new String/Vec; prefer push_str into buffer" \
+    '\.concat\(\)' \
+    "${ALL_LIB[@]}"
+
+# ---------------------------------------------------------------------------
+# Cloning owned types
+# ---------------------------------------------------------------------------
+
+# 10. .clone() — the broadest check; catches per-word style clones, String
+#     clones, Vec clones, etc. Error paths excluded.
+scan_pattern -e \
+    ".clone() — owned-type clone; verify not in a loop or avoidable" \
+    '\.clone\(\)' \
+    "${ALL_LIB[@]}"
+
+# ---------------------------------------------------------------------------
+# Vec/String capacity anti-patterns
+# ---------------------------------------------------------------------------
+
+# 11. Vec::with_capacity(0) — allocates nothing, but if items follow, use
+#     a real estimate. (Vec::new() is already banned by clippy.toml.)
+scan_pattern \
+    "Vec::with_capacity(0) — if items follow, use a real capacity estimate" \
+    'Vec::with_capacity\(0\)' \
+    "${ALL_LIB[@]}"
+
+# 12. String::with_capacity(0) — same issue
+scan_pattern \
+    "String::with_capacity(0) — if content follows, use a real capacity estimate" \
+    'String::with_capacity\(0\)' \
+    "${ALL_LIB[@]}"
 
 echo ""
 echo "Total hits: $total_hits (baseline: $BASELINE)"
