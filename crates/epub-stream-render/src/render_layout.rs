@@ -304,7 +304,7 @@ impl LayoutEngine {
                 extra_indent_px = self.cfg.first_line_indent_px.max(0);
                 ctx.pending_indent = false;
             }
-            st.push_word(word, style.clone(), extra_indent_px);
+            st.push_word(word, &style, extra_indent_px);
         }
     }
 
@@ -457,7 +457,7 @@ struct CurrentLine {
 #[derive(Clone, Debug)]
 struct ParagraphWord {
     text: String,
-    style: ResolvedTextStyle,
+    style_idx: usize,
     left_inset_px: i32,
     width_px: f32,
 }
@@ -476,6 +476,7 @@ struct LayoutState {
     pending_keep_with_next_lines: u8,
     hyphenation_lang: HyphenationLang,
     paragraph_words: Vec<ParagraphWord>,
+    paragraph_styles: Vec<ResolvedTextStyle>,
     paragraph_chars: usize,
     replay_direct_mode: bool,
     buffered_flush_mode: bool,
@@ -502,6 +503,7 @@ impl LayoutState {
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
             paragraph_words: Vec::with_capacity(cfg.max_buffered_paragraph_words),
+            paragraph_styles: Vec::with_capacity(4),
             paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
@@ -512,11 +514,13 @@ impl LayoutState {
         self.in_paragraph = true;
         self.lines_on_current_paragraph_page = 0;
         self.paragraph_words.clear();
+        self.paragraph_styles.clear();
         self.paragraph_chars = 0;
     }
 
     fn end_paragraph(&mut self) {
         self.paragraph_words.clear();
+        self.paragraph_styles.clear();
         self.paragraph_chars = 0;
         self.in_paragraph = false;
         self.lines_on_current_paragraph_page = 0;
@@ -712,7 +716,29 @@ impl LayoutState {
             .unwrap_or_else(|| conservative_heuristic_measure_text(text, style))
     }
 
-    fn push_word(&mut self, word: &str, style: ResolvedTextStyle, extra_first_line_indent_px: i32) {
+    fn paragraph_style_index(&mut self, style: &ResolvedTextStyle) -> usize {
+        if let Some(last_idx) = self.paragraph_styles.len().checked_sub(1) {
+            if self.paragraph_styles[last_idx] == *style {
+                return last_idx;
+            }
+        }
+        if let Some(idx) = self
+            .paragraph_styles
+            .iter()
+            .position(|existing| existing == style)
+        {
+            return idx;
+        }
+        self.paragraph_styles.push(style.clone());
+        self.paragraph_styles.len() - 1
+    }
+
+    fn push_word(
+        &mut self,
+        word: &str,
+        style: &ResolvedTextStyle,
+        extra_first_line_indent_px: i32,
+    ) {
         if word.is_empty() {
             return;
         }
@@ -725,7 +751,7 @@ impl LayoutState {
         left_inset_px += extra_first_line_indent_px.max(0);
 
         let sanitized_word = strip_soft_hyphens(word);
-        if self.should_buffer_paragraph_word(&style, word) {
+        if self.should_buffer_paragraph_word(style, word) {
             let projected_chars = self
                 .paragraph_chars
                 .saturating_add(sanitized_word.chars().count())
@@ -735,14 +761,15 @@ impl LayoutState {
             {
                 self.flush_buffered_paragraph(false, false);
             }
-            let word_w = self.measure_text(&sanitized_word, &style);
+            let word_w = self.measure_text(&sanitized_word, style);
+            let style_idx = self.paragraph_style_index(style);
             self.paragraph_chars = self
                 .paragraph_chars
                 .saturating_add(sanitized_word.chars().count())
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
             self.paragraph_words.push(ParagraphWord {
                 text: sanitized_word,
-                style,
+                style_idx,
                 left_inset_px,
                 width_px: word_w,
             });
@@ -773,7 +800,7 @@ impl LayoutState {
         matches!(style.role, BlockRole::Body | BlockRole::Paragraph)
     }
 
-    fn push_word_direct(&mut self, word: &str, style: ResolvedTextStyle, left_inset_px: i32) {
+    fn push_word_direct(&mut self, word: &str, style: &ResolvedTextStyle, left_inset_px: i32) {
         if word.is_empty() {
             return;
         }
@@ -783,12 +810,12 @@ impl LayoutState {
         }
 
         if self.line.is_none() {
-            self.prepare_for_new_line(&style);
+            self.prepare_for_new_line(style);
             self.line = Some(CurrentLine {
                 text: String::with_capacity(64),
                 style: style.clone(),
                 width_px: 0.0,
-                line_height_px: line_height_px(&style, &self.cfg),
+                line_height_px: line_height_px(style, &self.cfg),
                 left_inset_px,
             });
         }
@@ -798,9 +825,11 @@ impl LayoutState {
         };
 
         if line.text.is_empty() {
-            line.style = style.clone();
+            if line.style != *style {
+                line.style = style.clone();
+            }
             line.left_inset_px = left_inset_px;
-            line.line_height_px = line_height_px(&style, &self.cfg);
+            line.line_height_px = line_height_px(style, &self.cfg);
         }
 
         let space_w = if line.text.is_empty() {
@@ -808,15 +837,15 @@ impl LayoutState {
         } else {
             self.measure_text(" ", &line.style)
         };
-        let word_w = self.measure_text(&display_word, &style);
+        let word_w = self.measure_text(&display_word, style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
-            - line_fit_guard_px(self.cfg.line_fit_guard_px, &style))
+            - line_fit_guard_px(self.cfg.line_fit_guard_px, style))
         .max(1.0);
 
         let projected = line.width_px + space_w + word_w;
         let overflow = projected - max_width;
         let hang_credit = if self.cfg.typography.hanging_punctuation.enabled {
-            trailing_hang_credit_px(word, &style)
+            trailing_hang_credit_px(word, style)
         } else {
             0.0
         };
@@ -828,7 +857,7 @@ impl LayoutState {
                     crate::render_ir::HyphenationMode::Discretionary
                 ))
                 && word.contains(SOFT_HYPHEN)
-                && self.try_break_word_at_soft_hyphen(&mut line, word, &style, max_width, space_w)
+                && self.try_break_word_at_soft_hyphen(&mut line, word, style, max_width, space_w)
             {
                 return;
             }
@@ -838,13 +867,13 @@ impl LayoutState {
                     crate::render_ir::HyphenationMode::Discretionary
                 ))
                 && !word.contains(SOFT_HYPHEN)
-                && self.try_auto_hyphenate(&mut line, word, &style, max_width, space_w)
+                && self.try_auto_hyphenate(&mut line, word, style, max_width, space_w)
             {
                 return;
             }
             #[cfg(not(target_os = "espidf"))]
             if let Some((left_text, right_text, left_w, right_w)) =
-                self.optimize_overflow_break(&line, word, &style, max_width)
+                self.optimize_overflow_break(&line, word, style, max_width)
             {
                 let continuation_inset = if matches!(style.role, BlockRole::ListItem) {
                     self.cfg.list_indent_px
@@ -853,14 +882,16 @@ impl LayoutState {
                 };
                 line.text = left_text;
                 line.width_px = left_w;
-                line.style = style.clone();
+                if line.style != *style {
+                    line.style = style.clone();
+                }
                 self.line = Some(line);
                 self.flush_line(false, false);
                 self.line = Some(CurrentLine {
                     text: right_text,
                     style: style.clone(),
                     width_px: right_w,
-                    line_height_px: line_height_px(&style, &self.cfg),
+                    line_height_px: line_height_px(style, &self.cfg),
                     left_inset_px: continuation_inset,
                 });
                 return;
@@ -868,7 +899,9 @@ impl LayoutState {
             if line.text.is_empty() {
                 line.text = display_word.clone();
                 line.width_px = word_w;
-                line.style = style;
+                if line.style != *style {
+                    line.style = style.clone();
+                }
                 self.line = Some(line);
                 return;
             }
@@ -878,7 +911,7 @@ impl LayoutState {
                 text: display_word,
                 style: style.clone(),
                 width_px: word_w,
-                line_height_px: line_height_px(&style, &self.cfg),
+                line_height_px: line_height_px(style, &self.cfg),
                 left_inset_px,
             });
             return;
@@ -890,7 +923,9 @@ impl LayoutState {
         }
         line.text.push_str(&display_word);
         line.width_px += word_w;
-        line.style = style;
+        if line.style != *style {
+            line.style = style.clone();
+        }
         self.line = Some(line);
     }
 
@@ -925,10 +960,11 @@ impl LayoutState {
         }
         if self.paragraph_words.len() < 2 {
             let replay = core::mem::take(&mut self.paragraph_words);
+            let styles = core::mem::take(&mut self.paragraph_styles);
             self.paragraph_chars = 0;
             self.replay_direct_mode = true;
             for word in replay {
-                self.push_word_direct(&word.text, word.style, word.left_inset_px);
+                self.push_word_direct(&word.text, &styles[word.style_idx], word.left_inset_px);
             }
             self.replay_direct_mode = false;
             return;
@@ -937,10 +973,11 @@ impl LayoutState {
             Some(breaks) if !breaks.is_empty() => breaks,
             _ => {
                 let replay = core::mem::take(&mut self.paragraph_words);
+                let styles = core::mem::take(&mut self.paragraph_styles);
                 self.paragraph_chars = 0;
                 self.replay_direct_mode = true;
                 for word in replay {
-                    self.push_word_direct(&word.text, word.style, word.left_inset_px);
+                    self.push_word_direct(&word.text, &styles[word.style_idx], word.left_inset_px);
                 }
                 self.replay_direct_mode = false;
                 return;
@@ -948,6 +985,7 @@ impl LayoutState {
         };
 
         let words = core::mem::take(&mut self.paragraph_words);
+        let styles = core::mem::take(&mut self.paragraph_styles);
         self.paragraph_chars = 0;
         self.buffered_flush_mode = true;
         let mut start = 0usize;
@@ -962,7 +1000,7 @@ impl LayoutState {
                 }
                 text.push_str(&word.text);
             }
-            let style = words[end - 1].style.clone();
+            let style = styles[words[end - 1].style_idx].clone();
             let left_inset_px = words[start].left_inset_px;
             self.prepare_for_new_line(&style);
             let width_px = self.measure_text(&text, &style);
@@ -970,7 +1008,7 @@ impl LayoutState {
                 text,
                 style,
                 width_px,
-                line_height_px: line_height_px(&words[end - 1].style, &self.cfg),
+                line_height_px: line_height_px(&styles[words[end - 1].style_idx], &self.cfg),
                 left_inset_px,
             });
             let is_last_line = idx + 1 == breaks.len();
@@ -985,6 +1023,7 @@ impl LayoutState {
 
     fn optimize_paragraph_breaks(&self) -> Option<Vec<usize>> {
         let words = &self.paragraph_words;
+        let styles = &self.paragraph_styles;
         let n = words.len();
         if n == 0 {
             return Some(Vec::with_capacity(8));
@@ -994,8 +1033,9 @@ impl LayoutState {
         }
 
         for (idx, word) in words.iter().enumerate() {
+            let style = styles.get(word.style_idx)?;
             let available = ((self.cfg.content_width() - word.left_inset_px).max(1) as f32
-                - line_fit_guard_px(self.cfg.line_fit_guard_px, &word.style))
+                - line_fit_guard_px(self.cfg.line_fit_guard_px, style))
             .max(1.0);
             if word.width_px > available && idx == 0 {
                 return None;
@@ -1010,15 +1050,17 @@ impl LayoutState {
         dp[n] = 0;
 
         for i in (0..n).rev() {
+            let line_start_style = styles.get(words[i].style_idx)?;
             let available = ((self.cfg.content_width() - words[i].left_inset_px).max(1) as f32
-                - line_fit_guard_px(self.cfg.line_fit_guard_px, &words[i].style))
+                - line_fit_guard_px(self.cfg.line_fit_guard_px, line_start_style))
             .max(1.0);
             let mut line_width = 0.0f32;
             for j in i..n {
                 if j == i {
                     line_width += words[j].width_px;
                 } else {
-                    line_width += self.measure_text(" ", &words[j - 1].style) + words[j].width_px;
+                    let prev_style = styles.get(words[j - 1].style_idx)?;
+                    line_width += self.measure_text(" ", prev_style) + words[j].width_px;
                 }
                 let slack = available - line_width;
                 if slack < 0.0 {
@@ -1229,7 +1271,7 @@ impl LayoutState {
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
-        self.push_word(&remainder, style.clone(), 0);
+        self.push_word(&remainder, style, 0);
         true
     }
 
@@ -1295,7 +1337,7 @@ impl LayoutState {
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
-        self.push_word(&remainder, style.clone(), 0);
+        self.push_word(&remainder, style, 0);
         true
     }
 
@@ -2032,6 +2074,20 @@ mod tests {
         })
     }
 
+    fn resolved_body_style() -> ResolvedTextStyle {
+        ResolvedTextStyle {
+            font_id: None,
+            family: "serif".to_string(),
+            weight: 400,
+            italic: false,
+            size_px: 16.0,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            role: BlockRole::Paragraph,
+            justify_mode: JustifyMode::None,
+        }
+    }
+
     #[test]
     fn layout_splits_into_multiple_pages() {
         let cfg = LayoutConfig {
@@ -2220,17 +2276,7 @@ mod tests {
     #[test]
     fn truncate_text_to_width_preserves_prefix_and_ellipsis_behavior() {
         let st = LayoutState::default();
-        let style = ResolvedTextStyle {
-            font_id: None,
-            family: "serif".to_string(),
-            weight: 400,
-            italic: false,
-            size_px: 16.0,
-            line_height: 1.2,
-            letter_spacing: 0.0,
-            role: BlockRole::Paragraph,
-            justify_mode: JustifyMode::None,
-        };
+        let style = resolved_body_style();
         let text = "abcdef";
 
         let abc_ellipsis_width = st.measure_text("abc…", &style);
@@ -2244,6 +2290,58 @@ mod tests {
             truncate_text_to_width(&st, text, &style, almost_a_ellipsis_width),
             "…"
         );
+    }
+
+    #[test]
+    fn paragraph_buffer_deduplicates_reused_styles() {
+        let mut st = LayoutState::default();
+        let style = resolved_body_style();
+        let mut emphasis = style.clone();
+        emphasis.italic = true;
+
+        st.begin_paragraph();
+        st.push_word("alpha", &style, 0);
+        st.push_word("beta", &style, 0);
+        st.push_word("gamma", &emphasis, 0);
+
+        assert_eq!(st.paragraph_words.len(), 3);
+        assert_eq!(st.paragraph_styles.len(), 2);
+        assert_eq!(
+            st.paragraph_words[0].style_idx,
+            st.paragraph_words[1].style_idx
+        );
+        assert_ne!(
+            st.paragraph_words[0].style_idx,
+            st.paragraph_words[2].style_idx
+        );
+    }
+
+    #[test]
+    fn buffered_paragraph_resolves_style_from_last_word() {
+        let mut st = LayoutState::default();
+        let style = resolved_body_style();
+        let mut emphasis = style.clone();
+        emphasis.italic = true;
+
+        st.begin_paragraph();
+        st.push_word("alpha", &style, 0);
+        st.push_word("beta", &style, 0);
+        st.push_word("gamma", &emphasis, 0);
+        st.flush_buffered_paragraph(false, true);
+
+        assert!(st.paragraph_words.is_empty());
+        assert!(st.paragraph_styles.is_empty());
+        let text_cmd = st
+            .page
+            .content_commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DrawCommand::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("expected flushed text line");
+        assert_eq!(text_cmd.text, "alpha beta gamma");
+        assert!(text_cmd.style.italic);
     }
 
     #[test]

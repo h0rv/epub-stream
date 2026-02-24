@@ -687,7 +687,7 @@ impl Styler {
                                     text: " | ".to_string(),
                                     style,
                                     font_id: 0,
-                                    resolved_family: String::with_capacity(32),
+                                    resolved_family: String::default(),
                                 }));
                             }
                             *cell_count = cell_count.saturating_add(1);
@@ -730,7 +730,7 @@ impl Styler {
                                     text: " | ".to_string(),
                                     style,
                                     font_id: 0,
-                                    resolved_family: String::with_capacity(32),
+                                    resolved_family: String::default(),
                                 }));
                             }
                             *cell_count = cell_count.saturating_add(1);
@@ -791,7 +791,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::with_capacity(32),
+                        resolved_family: String::default(),
                     }));
                 }
                 Ok(Event::CData(e)) => {
@@ -820,7 +820,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::with_capacity(32),
+                        resolved_family: String::default(),
                     }));
                 }
                 Ok(Event::GeneralRef(e)) => {
@@ -864,7 +864,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::with_capacity(32),
+                        resolved_family: String::default(),
                     }));
                 }
                 Ok(Event::Eof) => break,
@@ -2665,6 +2665,20 @@ mod tests {
             .style_chapter("<h1>Title</h1><p>Hello world</p>")
             .expect("style should succeed");
         assert!(chapter.runs().count() >= 2);
+    }
+
+    #[test]
+    fn styler_run_resolved_family_defaults_to_allocation_free_empty() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<p>Hello world</p>")
+            .expect("style should succeed");
+        let run = chapter.runs().next().expect("expected run");
+        assert!(run.resolved_family.is_empty());
+        assert_eq!(run.resolved_family.capacity(), 0);
     }
 
     #[test]
