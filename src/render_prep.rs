@@ -710,7 +710,7 @@ impl Styler {
                                 let (resolved, role, bold_tag, italic_tag) =
                                     self.resolve_context_style(&stack);
                                 let style =
-                                    self.compute_style(resolved, role, bold_tag, italic_tag);
+                                    self.compute_style(&resolved, role, bold_tag, italic_tag);
                                 emit_styled_item(
                                     &mut pending_run,
                                     StyledEventOrRun::Run(StyledRun {
@@ -764,7 +764,7 @@ impl Styler {
                                 let (resolved, role, bold_tag, italic_tag) =
                                     self.resolve_context_style(&stack);
                                 let style =
-                                    self.compute_style(resolved, role, bold_tag, italic_tag);
+                                    self.compute_style(&resolved, role, bold_tag, italic_tag);
                                 emit_styled_item(
                                     &mut pending_run,
                                     StyledEventOrRun::Run(StyledRun {
@@ -838,7 +838,7 @@ impl Styler {
                         continue;
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(resolved, role, bold_tag, italic_tag);
+                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
                     emit_styled_item(
                         &mut pending_run,
                         StyledEventOrRun::Run(StyledRun {
@@ -870,7 +870,7 @@ impl Styler {
                         continue;
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(resolved, role, bold_tag, italic_tag);
+                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
                     emit_styled_item(
                         &mut pending_run,
                         StyledEventOrRun::Run(StyledRun {
@@ -917,7 +917,7 @@ impl Styler {
                         continue;
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(resolved, role, bold_tag, italic_tag);
+                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
                     emit_styled_item(
                         &mut pending_run,
                         StyledEventOrRun::Run(StyledRun {
@@ -965,7 +965,7 @@ impl Styler {
 
     fn compute_style(
         &self,
-        resolved: CssStyle,
+        resolved: &CssStyle,
         role: BlockRole,
         bold_tag: bool,
         italic_tag: bool,
@@ -1020,8 +1020,8 @@ impl Styler {
 
         let family_stack = resolved
             .font_family
-            .as_ref()
-            .map(|fam| split_family_stack(fam))
+            .as_deref()
+            .map(split_family_stack)
             .unwrap_or_else(|| {
                 let mut stack = SmallVec::new();
                 stack.push("serif".to_string());
@@ -2373,12 +2373,16 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> Cow<'_, str> {
     if text.chars().all(char::is_whitespace) {
         return Cow::Borrowed("");
     }
-    // Fast path: already normalized single-space text with no trimming needed.
-    let mut prev_space = true;
+    let trimmed = text.trim_matches(char::is_whitespace);
+    if trimmed.is_empty() {
+        return Cow::Borrowed("");
+    }
+    // Fast path: already normalized ASCII single-space text.
+    let mut prev_space = false;
     let mut needs_rewrite = false;
-    for ch in text.chars() {
+    for ch in trimmed.chars() {
         if ch.is_whitespace() {
-            if prev_space {
+            if prev_space || ch != ' ' {
                 needs_rewrite = true;
                 break;
             }
@@ -2387,15 +2391,12 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> Cow<'_, str> {
             prev_space = false;
         }
     }
-    if text.chars().last().is_some_and(char::is_whitespace) {
-        needs_rewrite = true;
-    }
     if !needs_rewrite {
-        return Cow::Borrowed(text);
+        return Cow::Borrowed(trimmed);
     }
-    let mut result = String::with_capacity(text.len());
-    let mut prev_space = true;
-    for ch in text.chars() {
+    let mut result = String::with_capacity(trimmed.len());
+    let mut prev_space = false;
+    for ch in trimmed.chars() {
         if ch.is_whitespace() {
             if !prev_space {
                 result.push(' ');
@@ -2405,9 +2406,6 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> Cow<'_, str> {
             result.push(ch);
             prev_space = false;
         }
-    }
-    if result.ends_with(' ') {
-        result.pop();
     }
     Cow::Owned(result)
 }
@@ -3117,6 +3115,20 @@ mod tests {
         let s = "a\n  b\t c";
         assert_eq!(normalize_plain_text_whitespace(s, true), s);
         assert_eq!(normalize_plain_text_whitespace(s, false), "a b c");
+    }
+
+    #[test]
+    fn normalize_whitespace_borrows_trimmed_ascii_text() {
+        let normalized = normalize_plain_text_whitespace("  alpha beta  ", false);
+        assert!(matches!(normalized, Cow::Borrowed(_)));
+        assert_eq!(normalized.as_ref(), "alpha beta");
+    }
+
+    #[test]
+    fn normalize_whitespace_rewrites_non_space_whitespace() {
+        let normalized = normalize_plain_text_whitespace("alpha\tbeta", false);
+        assert!(matches!(normalized, Cow::Owned(_)));
+        assert_eq!(normalized.as_ref(), "alpha beta");
     }
 
     #[test]

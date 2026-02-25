@@ -1,7 +1,7 @@
 use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::render_ir::{
     CoverPageMode, DrawCommand, ImageObjectCommand, JustificationStrategy, JustifyMode,
@@ -1922,6 +1922,8 @@ fn truncate_text_to_width(
 
 fn intern_family(name: &str) -> Arc<str> {
     static COMMON: OnceLock<[Arc<str>; 5]> = OnceLock::new();
+    static INTERNED_EXTRA: OnceLock<Mutex<Vec<Arc<str>>>> = OnceLock::new();
+    const MAX_INTERNED_EXTRA: usize = 64;
     let common = COMMON.get_or_init(|| {
         [
             Arc::from("serif"),
@@ -1932,10 +1934,28 @@ fn intern_family(name: &str) -> Arc<str> {
         ]
     });
     let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Arc::clone(&common[0]);
+    }
     for entry in common {
-        if trimmed.eq_ignore_ascii_case(entry) {
+        if trimmed.eq_ignore_ascii_case(entry.as_ref()) {
             return Arc::clone(entry);
         }
+    }
+    let interned = INTERNED_EXTRA.get_or_init(|| Mutex::new(Vec::with_capacity(8)));
+    let mut extra = interned
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = extra
+        .iter()
+        .find(|existing| trimmed.eq_ignore_ascii_case(existing.as_ref()))
+    {
+        return Arc::clone(existing);
+    }
+    if extra.len() < MAX_INTERNED_EXTRA {
+        let family = Arc::<str>::from(trimmed);
+        extra.push(Arc::clone(&family));
+        return family;
     }
     Arc::from(trimmed)
 }
@@ -2687,6 +2707,13 @@ mod tests {
         assert!(lines
             .iter()
             .all(|line| line.style.justify_mode == JustifyMode::None));
+    }
+
+    #[test]
+    fn intern_family_reuses_case_insensitive_entries() {
+        let upper = intern_family("Literata");
+        let lower = intern_family("literata");
+        assert!(Arc::ptr_eq(&upper, &lower));
     }
 
     #[test]
