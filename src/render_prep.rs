@@ -679,7 +679,7 @@ impl Styler {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
                     let tag = decode_tag_name(&reader, e.name().as_ref())?;
-                    if should_skip_tag(&tag) {
+                    if should_skip_tag(tag.as_ref()) {
                         skip_depth += 1;
                         buf.clear();
                         continue;
@@ -694,7 +694,7 @@ impl Styler {
                         tag,
                         self.memory.max_inline_style_bytes,
                     )?;
-                    if matches!(ctx.tag.as_str(), "img" | "image") {
+                    if matches!(ctx.tag.as_ref(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut |item| {
                             emit_styled_item(&mut pending_run, item, &mut on_item);
@@ -704,7 +704,7 @@ impl Styler {
                     }
                     if ctx.tag == "tr" {
                         table_row_cells.push(0);
-                    } else if matches!(ctx.tag.as_str(), "td" | "th") {
+                    } else if matches!(ctx.tag.as_ref(), "td" | "th") {
                         if let Some(cell_count) = table_row_cells.last_mut() {
                             if *cell_count > 0 {
                                 let (resolved, role, bold_tag, italic_tag) =
@@ -722,7 +722,7 @@ impl Styler {
                             *cell_count = cell_count.saturating_add(1);
                         }
                     }
-                    emit_start_event(&ctx.tag, &mut |item| {
+                    emit_start_event(ctx.tag.as_ref(), &mut |item| {
                         emit_styled_item(&mut pending_run, item, &mut on_item);
                     });
                     if stack.len() >= max_nesting {
@@ -738,7 +738,7 @@ impl Styler {
                 }
                 Ok(Event::Empty(e)) => {
                     let tag = decode_tag_name(&reader, e.name().as_ref())?;
-                    if skip_depth > 0 || should_skip_tag(&tag) {
+                    if skip_depth > 0 || should_skip_tag(tag.as_ref()) {
                         buf.clear();
                         continue;
                     }
@@ -748,7 +748,7 @@ impl Styler {
                         tag,
                         self.memory.max_inline_style_bytes,
                     )?;
-                    if matches!(ctx.tag.as_str(), "img" | "image") {
+                    if matches!(ctx.tag.as_ref(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut |item| {
                             emit_styled_item(&mut pending_run, item, &mut on_item);
@@ -756,7 +756,7 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    if matches!(ctx.tag.as_str(), "td" | "th") {
+                    if matches!(ctx.tag.as_ref(), "td" | "th") {
                         if let Some(cell_count) = table_row_cells.last_mut() {
                             if *cell_count > 0 {
                                 let (resolved, role, bold_tag, italic_tag) =
@@ -774,7 +774,7 @@ impl Styler {
                             *cell_count = cell_count.saturating_add(1);
                         }
                     }
-                    emit_start_event(&ctx.tag, &mut |item| {
+                    emit_start_event(ctx.tag.as_ref(), &mut |item| {
                         emit_styled_item(&mut pending_run, item, &mut on_item);
                     });
                     if ctx.tag == "br" {
@@ -784,13 +784,13 @@ impl Styler {
                             &mut on_item,
                         );
                     }
-                    emit_end_event(&ctx.tag, &mut |item| {
+                    emit_end_event(ctx.tag.as_ref(), &mut |item| {
                         emit_styled_item(&mut pending_run, item, &mut on_item);
                     });
                 }
                 Ok(Event::End(e)) => {
                     let tag = decode_tag_name(&reader, e.name().as_ref())?;
-                    if should_skip_tag(&tag) {
+                    if should_skip_tag(tag.as_ref()) {
                         skip_depth = skip_depth.saturating_sub(1);
                         buf.clear();
                         continue;
@@ -799,7 +799,7 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    emit_end_event(&tag, &mut |item| {
+                    emit_end_event(tag.as_ref(), &mut |item| {
                         emit_styled_item(&mut pending_run, item, &mut on_item);
                     });
                     if tag == "tr" {
@@ -1023,10 +1023,10 @@ impl Styler {
             if let Some(inline) = &ctx.inline_style {
                 merged.merge(inline);
             }
-            if matches!(ctx.tag.as_str(), "strong" | "b") {
+            if matches!(ctx.tag.as_ref(), "strong" | "b") {
                 bold_tag = true;
             }
-            if matches!(ctx.tag.as_str(), "em" | "i") {
+            if matches!(ctx.tag.as_ref(), "em" | "i") {
                 italic_tag = true;
             }
             role = role_from_tag(&ctx.tag).unwrap_or(role);
@@ -2077,7 +2077,7 @@ impl PreparedChapter {
 
 #[derive(Clone, Debug, Default)]
 struct ElementCtx {
-    tag: String,
+    tag: Cow<'static, str>,
     classes: SmallVec<[String; 4]>,
     inline_style: Option<CssStyle>,
     img_src: Option<String>,
@@ -2109,7 +2109,11 @@ fn attr_key_matches(raw: &[u8], expected: &[u8]) -> bool {
 fn decode_tag_name<Rd: BufRead>(
     reader: &Reader<Rd>,
     raw: &[u8],
-) -> Result<String, RenderPrepError> {
+) -> Result<Cow<'static, str>, RenderPrepError> {
+    let local_raw = local_name_bytes(raw);
+    if let Some(common) = canonical_tag_name_bytes(local_raw) {
+        return Ok(Cow::Borrowed(common));
+    }
     let decoded = reader.decoder().decode(raw).map_err(|err| {
         RenderPrepError::new_with_phase(
             ErrorPhase::Style,
@@ -2120,13 +2124,116 @@ fn decode_tag_name<Rd: BufRead>(
         .with_token_offset(reader_token_offset(reader))
     })?;
     let local_name = decoded.rsplit(':').next().unwrap_or(decoded.as_ref());
-    Ok(local_name.to_ascii_lowercase())
+    Ok(Cow::Owned(local_name.to_ascii_lowercase()))
+}
+
+fn canonical_tag_name_bytes(raw: &[u8]) -> Option<&'static str> {
+    if raw.eq_ignore_ascii_case(b"p") {
+        return Some("p");
+    }
+    if raw.eq_ignore_ascii_case(b"div") {
+        return Some("div");
+    }
+    if raw.eq_ignore_ascii_case(b"figure") {
+        return Some("figure");
+    }
+    if raw.eq_ignore_ascii_case(b"figcaption") {
+        return Some("figcaption");
+    }
+    if raw.eq_ignore_ascii_case(b"table") {
+        return Some("table");
+    }
+    if raw.eq_ignore_ascii_case(b"tr") {
+        return Some("tr");
+    }
+    if raw.eq_ignore_ascii_case(b"td") {
+        return Some("td");
+    }
+    if raw.eq_ignore_ascii_case(b"th") {
+        return Some("th");
+    }
+    if raw.eq_ignore_ascii_case(b"br") {
+        return Some("br");
+    }
+    if raw.eq_ignore_ascii_case(b"pre") {
+        return Some("pre");
+    }
+    if raw.eq_ignore_ascii_case(b"textarea") {
+        return Some("textarea");
+    }
+    if raw.eq_ignore_ascii_case(b"li") {
+        return Some("li");
+    }
+    if raw.eq_ignore_ascii_case(b"h1") {
+        return Some("h1");
+    }
+    if raw.eq_ignore_ascii_case(b"h2") {
+        return Some("h2");
+    }
+    if raw.eq_ignore_ascii_case(b"h3") {
+        return Some("h3");
+    }
+    if raw.eq_ignore_ascii_case(b"h4") {
+        return Some("h4");
+    }
+    if raw.eq_ignore_ascii_case(b"h5") {
+        return Some("h5");
+    }
+    if raw.eq_ignore_ascii_case(b"h6") {
+        return Some("h6");
+    }
+    if raw.eq_ignore_ascii_case(b"img") {
+        return Some("img");
+    }
+    if raw.eq_ignore_ascii_case(b"image") {
+        return Some("image");
+    }
+    if raw.eq_ignore_ascii_case(b"script") {
+        return Some("script");
+    }
+    if raw.eq_ignore_ascii_case(b"style") {
+        return Some("style");
+    }
+    if raw.eq_ignore_ascii_case(b"head") {
+        return Some("head");
+    }
+    if raw.eq_ignore_ascii_case(b"noscript") {
+        return Some("noscript");
+    }
+    if raw.eq_ignore_ascii_case(b"strong") {
+        return Some("strong");
+    }
+    if raw.eq_ignore_ascii_case(b"b") {
+        return Some("b");
+    }
+    if raw.eq_ignore_ascii_case(b"em") {
+        return Some("em");
+    }
+    if raw.eq_ignore_ascii_case(b"i") {
+        return Some("i");
+    }
+    if raw.eq_ignore_ascii_case(b"code") {
+        return Some("code");
+    }
+    if raw.eq_ignore_ascii_case(b"kbd") {
+        return Some("kbd");
+    }
+    if raw.eq_ignore_ascii_case(b"samp") {
+        return Some("samp");
+    }
+    if raw.eq_ignore_ascii_case(b"svg") {
+        return Some("svg");
+    }
+    if raw.eq_ignore_ascii_case(b"link") {
+        return Some("link");
+    }
+    None
 }
 
 fn element_ctx_from_start(
     reader: &Reader<impl BufRead>,
     e: &quick_xml::events::BytesStart<'_>,
-    tag: String,
+    tag: Cow<'static, str>,
     max_inline_style_bytes: usize,
 ) -> Result<ElementCtx, RenderPrepError> {
     let mut classes = SmallVec::<[String; 4]>::with_capacity(4);
@@ -2197,7 +2304,7 @@ fn element_ctx_from_start(
             continue;
         }
         if attr_key_matches(key, b"src")
-            || (matches!(tag.as_str(), "img" | "image") && attr_key_matches(key, b"href"))
+            || (matches!(tag.as_ref(), "img" | "image") && attr_key_matches(key, b"href"))
         {
             let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
                 continue;
@@ -2262,7 +2369,7 @@ fn emit_image_event<F: FnMut(StyledEventOrRun)>(
     in_figure: bool,
     on_item: &mut F,
 ) {
-    if !matches!(ctx.tag.as_str(), "img" | "image") {
+    if !matches!(ctx.tag.as_ref(), "img" | "image") {
         return;
     }
     let Some(src) = ctx.img_src.clone() else {
@@ -2332,7 +2439,7 @@ fn should_skip_tag(tag: &str) -> bool {
 fn is_preformatted_context(stack: &[ElementCtx]) -> bool {
     stack.iter().any(|ctx| {
         matches!(
-            ctx.tag.as_str(),
+            ctx.tag.as_ref(),
             "pre" | "code" | "kbd" | "samp" | "textarea"
         )
     })
