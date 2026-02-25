@@ -1639,6 +1639,7 @@ impl<'a> RenderConfig<'a> {
 pub struct RenderEngine {
     opts: RenderEngineOptions,
     layout: LayoutEngine,
+    pagination_profile: PaginationProfileId,
     diagnostic_sink: DiagnosticSink,
 }
 
@@ -1652,11 +1653,18 @@ impl fmt::Debug for RenderEngine {
 }
 
 impl RenderEngine {
+    fn compute_pagination_profile_id(opts: RenderEngineOptions) -> PaginationProfileId {
+        let payload = format!("{:?}|{:?}", opts.prep, opts.layout); // allow: once per config, hashing input
+        PaginationProfileId::from_bytes(payload.as_bytes())
+    }
+
     /// Create a render engine.
     pub fn new(opts: RenderEngineOptions) -> Self {
+        let pagination_profile = Self::compute_pagination_profile_id(opts);
         Self {
             layout: LayoutEngine::new(opts.layout),
             opts,
+            pagination_profile,
             diagnostic_sink: None,
         }
     }
@@ -1680,8 +1688,7 @@ impl RenderEngine {
 
     /// Stable fingerprint for all layout-affecting settings.
     pub fn pagination_profile_id(&self) -> PaginationProfileId {
-        let payload = format!("{:?}|{:?}", self.opts.prep, self.opts.layout); // allow: once per config, hashing input
-        PaginationProfileId::from_bytes(payload.as_bytes())
+        self.pagination_profile
     }
 
     /// Begin a chapter layout session for embedded/incremental integrations.
@@ -2588,6 +2595,19 @@ mod tests {
         }
         assert_eq!(streamed, expected);
         assert!(streamed.iter().all(|page| page.metrics.chapter_index == 3));
+    }
+
+    #[test]
+    fn pagination_profile_id_matches_options_payload_and_clone() {
+        let mut opts = RenderEngineOptions::for_display(300, 120);
+        opts.layout.margin_top = 8;
+        opts.layout.margin_bottom = 8;
+        let expected_payload = format!("{:?}|{:?}", opts.prep, opts.layout);
+        let expected = PaginationProfileId::from_bytes(expected_payload.as_bytes());
+
+        let engine = RenderEngine::new(opts);
+        assert_eq!(engine.pagination_profile_id(), expected);
+        assert_eq!(engine.clone().pagination_profile_id(), expected);
     }
 
     #[test]
