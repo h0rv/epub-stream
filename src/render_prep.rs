@@ -1157,9 +1157,79 @@ impl FontResolver {
         Ok(())
     }
 
+    fn best_candidate_for_family(
+        &self,
+        requested_family: &str,
+        style: &ComputedTextStyle,
+    ) -> Option<(usize, u32)> {
+        let mut best_candidate: Option<(usize, u32)> = None;
+        for (idx, face) in self.faces.iter().enumerate() {
+            if !family_names_match(requested_family, &face.family) {
+                continue;
+            }
+            let score = {
+                let weight_delta = (face.weight as i32 - style.weight as i32).unsigned_abs();
+                let style_penalty = if style.italic {
+                    if matches!(
+                        face.style,
+                        EmbeddedFontStyle::Italic | EmbeddedFontStyle::Oblique
+                    ) {
+                        0
+                    } else {
+                        1000
+                    }
+                } else if matches!(face.style, EmbeddedFontStyle::Normal) {
+                    0
+                } else {
+                    1000
+                };
+                weight_delta + style_penalty
+            };
+            let should_replace = match best_candidate {
+                Some((_, best_score)) => score < best_score,
+                None => true,
+            };
+            if should_replace {
+                best_candidate = Some((idx, score));
+            }
+        }
+        best_candidate
+    }
+
+    fn resolve_matching_face_index(&self, style: &ComputedTextStyle) -> Option<usize> {
+        if !self.policy.allow_embedded_fonts {
+            return None;
+        }
+        for family in &style.family_stack {
+            if let Some((chosen_idx, _)) = self.best_candidate_for_family(family, style) {
+                return Some(chosen_idx);
+            }
+        }
+        None
+    }
+
+    /// Resolve a style request to a stable face id (0 means policy fallback).
+    pub fn resolve_font_id(&self, style: &ComputedTextStyle) -> u32 {
+        self.resolve_matching_face_index(style)
+            .map_or(0, |idx| idx as u32 + 1)
+    }
+
     /// Resolve a style request to a concrete face.
     pub fn resolve(&self, style: &ComputedTextStyle) -> ResolvedFontFace {
-        self.resolve_with_trace(style).face
+        if let Some(chosen_idx) = self.resolve_matching_face_index(style) {
+            let chosen = &self.faces[chosen_idx];
+            ResolvedFontFace {
+                font_id: chosen_idx as u32 + 1,
+                family: chosen.family.clone(),
+                embedded: Some(chosen.clone()),
+            }
+        } else {
+            ResolvedFontFace {
+                font_id: 0,
+                family: self.policy.default_family.clone(),
+                embedded: None,
+            }
+        }
     }
 
     /// Resolve with full fallback reasoning.
@@ -1179,39 +1249,7 @@ impl FontResolver {
                 reasons.push("embedded fonts disabled by policy".to_string());
                 break;
             }
-            let requested = normalize_family(family);
-            let mut best_candidate: Option<(usize, u32)> = None;
-            for (idx, face) in self.faces.iter().enumerate() {
-                if normalize_family(&face.family) != requested {
-                    continue;
-                }
-                let score = {
-                    let weight_delta = (face.weight as i32 - style.weight as i32).unsigned_abs();
-                    let style_penalty = if style.italic {
-                        if matches!(
-                            face.style,
-                            EmbeddedFontStyle::Italic | EmbeddedFontStyle::Oblique
-                        ) {
-                            0
-                        } else {
-                            1000
-                        }
-                    } else if matches!(face.style, EmbeddedFontStyle::Normal) {
-                        0
-                    } else {
-                        1000
-                    };
-                    weight_delta + style_penalty
-                };
-                let should_replace = match best_candidate {
-                    Some((_, best_score)) => score < best_score,
-                    None => true,
-                };
-                if should_replace {
-                    best_candidate = Some((idx, score));
-                }
-            }
-            if let Some((chosen_idx, _)) = best_candidate {
+            if let Some((chosen_idx, _)) = self.best_candidate_for_family(family, style) {
                 let chosen = &self.faces[chosen_idx];
                 reasons.push(format!(
                     "matched embedded family '{}' via nearest weight/style",
@@ -1957,11 +1995,15 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> String {
 }
 
 fn normalize_family(family: &str) -> String {
-    family
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_ascii_lowercase()
+    normalized_family_slice(family).to_ascii_lowercase()
+}
+
+fn normalized_family_slice(family: &str) -> &str {
+    family.trim().trim_matches('"').trim_matches('\'')
+}
+
+fn family_names_match(requested: &str, candidate: &str) -> bool {
+    normalized_family_slice(requested).eq_ignore_ascii_case(normalized_family_slice(candidate))
 }
 
 fn has_non_ascii(text: &str) -> bool {
@@ -1974,7 +2016,7 @@ fn resolve_item_with_font(
 ) -> StyledEventOrRun {
     match item {
         StyledEventOrRun::Run(mut run) => {
-            run.font_id = font_resolver.resolve(&run.style).font_id;
+            run.font_id = font_resolver.resolve_font_id(&run.style);
             StyledEventOrRun::Run(run)
         }
         StyledEventOrRun::Event(event) => StyledEventOrRun::Event(event),
@@ -3161,6 +3203,7 @@ mod tests {
             block_role: BlockRole::Body,
         };
         let trace = resolver.resolve_with_trace(&style);
+        assert_eq!(resolver.resolve_font_id(&style), trace.face.font_id);
         let chosen = trace.face.embedded.expect("should match embedded");
         assert_eq!(chosen.href, "b.ttf");
     }
