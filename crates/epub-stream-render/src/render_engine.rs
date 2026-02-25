@@ -1715,16 +1715,21 @@ impl RenderEngine {
         if config.cache.is_some() && !cached_hit {
             self.emit_diagnostic(RenderDiagnostic::CacheMiss { chapter_index });
         }
+        let inner = if cached_hit {
+            None
+        } else {
+            let mut session = self.layout.start_session_with_text_measurer(text_measurer);
+            if let Some(family) = config.forced_font_family.as_deref() {
+                session.set_override_family(Arc::from(family));
+            }
+            Some(session)
+        };
         LayoutSession {
             engine: self,
             chapter_index,
             profile,
             cfg: config,
-            inner: if cached_hit {
-                None
-            } else {
-                Some(self.layout.start_session_with_text_measurer(text_measurer))
-            },
+            inner,
             pending_pages: pending,
             rendered_pages: Vec::with_capacity(8),
             page_index: 0,

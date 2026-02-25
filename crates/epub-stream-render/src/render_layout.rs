@@ -279,6 +279,9 @@ impl LayoutEngine {
     fn handle_run(&self, st: &mut LayoutState, ctx: &mut BlockCtx, run: StyledRun) {
         let mut style = to_resolved_style(&run.style);
         style.font_id = Some(run.font_id);
+        if let Some(family) = st.override_family.as_ref() {
+            style.family = Arc::clone(family);
+        }
         if let Some(level) = ctx.heading_level {
             style.role = BlockRole::Heading(level);
         }
@@ -399,6 +402,16 @@ impl LayoutSession {
         self.st.hyphenation_lang = HyphenationLang::from_tag(language_tag);
     }
 
+    /// Override the CSS font family for all text in this session.
+    ///
+    /// When set, `handle_run` substitutes this family instead of taking
+    /// `family_stack[0]` from the stylesheet.  This is the mechanism by
+    /// which `forced_font_family` propagates through the layout pipeline
+    /// without carrying per-run data.
+    pub fn set_override_family(&mut self, family: Arc<str>) {
+        self.st.override_family = Some(family);
+    }
+
     /// Push one styled item and emit any fully closed pages.
     pub fn push_item_with_pages<F>(&mut self, item: StyledEventOrRun, on_page: &mut F)
     where
@@ -487,6 +500,8 @@ struct LayoutState {
     paragraph_chars: usize,
     replay_direct_mode: bool,
     buffered_flush_mode: bool,
+    /// When set, overrides the CSS family on every resolved text style.
+    override_family: Option<Arc<str>>,
 }
 
 impl Default for LayoutState {
@@ -514,6 +529,7 @@ impl LayoutState {
             paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
+            override_family: None,
         }
     }
 
