@@ -460,6 +460,15 @@ struct ParagraphWord {
     width_px: f32,
 }
 
+#[cfg(not(target_os = "espidf"))]
+#[derive(Clone, Copy, Debug)]
+struct OverflowBreak {
+    left_end: usize,
+    right_start: usize,
+    left_w: f32,
+    right_w: f32,
+}
+
 #[derive(Clone)]
 struct LayoutState {
     cfg: LayoutConfig,
@@ -870,16 +879,26 @@ impl LayoutState {
                 return;
             }
             #[cfg(not(target_os = "espidf"))]
-            if let Some((left_text, right_text, left_w, right_w)) =
-                self.optimize_overflow_break(&line, word, style, max_width)
-            {
+            if let Some(split) = self.optimize_overflow_break(&line, word, style, max_width) {
+                let right_text = if split.right_start <= line.text.len() {
+                    let suffix = &line.text[split.right_start..];
+                    let mut text = String::with_capacity(suffix.len() + 1 + word.len());
+                    text.push_str(suffix);
+                    text.push(' ');
+                    text.push_str(word);
+                    text
+                } else {
+                    word.to_owned()
+                };
                 let continuation_inset = if matches!(style.role, BlockRole::ListItem) {
                     self.cfg.list_indent_px
                 } else {
                     0
                 };
-                line.text = left_text;
-                line.width_px = left_w;
+                if split.left_end < line.text.len() {
+                    line.text.truncate(split.left_end);
+                }
+                line.width_px = split.left_w;
                 if line.style != *style {
                     line.style = style.clone();
                 }
@@ -888,7 +907,7 @@ impl LayoutState {
                 self.line = Some(CurrentLine {
                     text: right_text,
                     style: style.clone(),
-                    width_px: right_w,
+                    width_px: split.right_w,
                     line_height_px: line_height_px(style, &self.cfg),
                     left_inset_px: continuation_inset,
                 });
@@ -991,8 +1010,14 @@ impl LayoutState {
             if end <= start || end > words.len() {
                 break;
             }
-            let mut text = String::with_capacity(64);
-            for (offset, word) in words[start..end].iter().enumerate() {
+            let line_words = &words[start..end];
+            let text_cap = line_words
+                .iter()
+                .map(|word| word.text.len())
+                .sum::<usize>()
+                .saturating_add(line_words.len().saturating_sub(1));
+            let mut text = String::with_capacity(text_cap);
+            for (offset, word) in line_words.iter().enumerate() {
                 if offset > 0 {
                     text.push(' ');
                 }
@@ -1132,7 +1157,7 @@ impl LayoutState {
         incoming_word: &str,
         style: &ResolvedTextStyle,
         max_width: f32,
-    ) -> Option<(String, String, f32, f32)> {
+    ) -> Option<OverflowBreak> {
         if line.text.is_empty() || incoming_word.is_empty() {
             return None;
         }
@@ -1191,14 +1216,14 @@ impl LayoutState {
                 _ => best = Some((left_end, right_start, left_w, right_w, score)),
             }
         }
-        best.map(|(left_end, right_start, left_w, right_w, _)| {
-            (
-                combined[..left_end].to_owned(),
-                combined[right_start..].to_owned(),
+        best.map(
+            |(left_end, right_start, left_w, right_w, _)| OverflowBreak {
+                left_end,
+                right_start,
                 left_w,
                 right_w,
-            )
-        })
+            },
+        )
     }
 
     fn try_break_word_at_soft_hyphen(
@@ -1257,7 +1282,6 @@ impl LayoutState {
             return false;
         };
         let prefix = &cleaned[..split];
-        let remainder = cleaned[split..].to_owned();
 
         if !line.text.is_empty() {
             line.text.push(' ');
@@ -1269,7 +1293,7 @@ impl LayoutState {
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
-        self.push_word(&remainder, style, 0);
+        self.push_word(&cleaned[split..], style, 0);
         true
     }
 
@@ -1289,15 +1313,25 @@ impl LayoutState {
             return false;
         }
 
-        let mut best_split: Option<(String, String, f32, i32)> = None;
+        let mut char_boundaries = Vec::with_capacity(word.chars().count().saturating_add(1));
+        char_boundaries.push(0);
+        for (byte, _) in word.char_indices().skip(1) {
+            char_boundaries.push(byte);
+        }
+        char_boundaries.push(word.len());
+        let char_count = char_boundaries.len().saturating_sub(1);
+
+        let mut best_split: Option<(usize, f32, i32)> = None;
         let mut left_buf = String::with_capacity(word.len() + 1);
         for split in candidates {
-            let Some((left, right)) = split_word_at_char_boundary(word, split) else {
-                continue;
-            };
-            if left.chars().count() < 3 || right.chars().count() < 3 {
+            if split < 3 || split + 3 > char_count {
                 continue;
             }
+            let Some(&split_byte) = char_boundaries.get(split) else {
+                continue;
+            };
+            let left = &word[..split_byte];
+            let right_len = (char_count - split) as i32;
             left_buf.clear();
             left_buf.push_str(left);
             left_buf.push('-');
@@ -1308,34 +1342,36 @@ impl LayoutState {
                 space_w + candidate_w
             };
             if line.width_px + added <= max_width {
-                let left_len = left.chars().count() as i32;
-                let right_len = right.chars().count() as i32;
+                let left_len = split as i32;
                 let balance_penalty = (left_len - right_len).abs();
                 // Prefer fitting split near the right edge while avoiding overly
                 // unbalanced chunks that produce bad rhythm.
                 let fit_slack = (max_width - (line.width_px + added)).round() as i32;
                 let score = fit_slack.saturating_mul(2).saturating_add(balance_penalty);
                 match best_split {
-                    Some((_, _, _, best_score)) if score >= best_score => {}
-                    _ => best_split = Some((left_buf.clone(), right.into(), candidate_w, score)), // allow: only on score improvement
+                    Some((_, _, best_score)) if score >= best_score => {}
+                    _ => best_split = Some((split_byte, candidate_w, score)),
                 }
             }
         }
 
-        let Some((prefix_with_hyphen, remainder, _, _)) = best_split else {
+        let Some((split_byte, best_candidate_w, _)) = best_split else {
             return false;
         };
+        left_buf.clear();
+        left_buf.push_str(&word[..split_byte]);
+        left_buf.push('-');
 
         if !line.text.is_empty() {
             line.text.push(' ');
             line.width_px += space_w;
         }
-        line.text.push_str(&prefix_with_hyphen);
-        line.width_px += self.measure_text(&prefix_with_hyphen, style);
+        line.text.push_str(&left_buf);
+        line.width_px += best_candidate_w;
 
         self.line = Some(line.clone());
         self.flush_line(false, false);
-        self.push_word(&remainder, style, 0);
+        self.push_word(&word[split_byte..], style, 0);
         true
     }
 
@@ -1886,21 +1922,6 @@ fn ends_with_terminal_punctuation(line: &str) -> bool {
         last,
         '.' | ';' | ':' | '!' | '?' | '"' | '\'' | ')' | ']' | '}'
     )
-}
-
-fn split_word_at_char_boundary(word: &str, split_chars: usize) -> Option<(&str, &str)> {
-    if split_chars == 0 {
-        return None;
-    }
-    let mut split_byte = None;
-    for (idx, (byte, _)) in word.char_indices().enumerate() {
-        if idx == split_chars {
-            split_byte = Some(byte);
-            break;
-        }
-    }
-    let split_byte = split_byte?;
-    Some((&word[..split_byte], &word[split_byte..]))
 }
 
 fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
