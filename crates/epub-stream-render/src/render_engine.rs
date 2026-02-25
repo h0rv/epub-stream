@@ -950,6 +950,7 @@ impl PersistedCacheEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedRenderPage {
     page_number: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     commands: Vec<PersistedDrawCommand>,
     content_commands: Vec<PersistedDrawCommand>,
     chrome_commands: Vec<PersistedDrawCommand>,
@@ -2122,7 +2123,6 @@ impl RenderEngine {
                     page.push_overlay_command(cmd);
                 }
             }
-            page.sync_commands();
             on_page(page);
         })
     }
@@ -2605,6 +2605,81 @@ mod tests {
             .is_none());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_omits_legacy_commands_when_unsynced() {
+        let root = temp_cache_root("cache-unsynced");
+        let store = FileRenderCacheStore::new(&root).with_max_file_bytes(256 * 1024);
+        let profile = PaginationProfileId::from_bytes(b"profile-unsynced");
+        let chapter_index = 0;
+
+        let mut page = RenderPage::new(1);
+        page.push_content_command(DrawCommand::Rule(RuleCommand {
+            x: 0,
+            y: 0,
+            length: 8,
+            thickness: 1,
+            horizontal: true,
+        }));
+        assert!(page.commands.is_empty());
+
+        store.store_chapter_pages(profile, chapter_index, &[page.clone()]);
+        let cache_path = store.chapter_cache_path(profile, chapter_index);
+        let cache_json = fs::read_to_string(&cache_path).expect("cache file should be readable");
+        let cache_payload: serde_json::Value =
+            serde_json::from_str(&cache_json).expect("cache JSON should parse");
+        assert!(cache_payload["pages"][0].get("commands").is_none());
+
+        let loaded = store
+            .load_chapter_pages(profile, chapter_index)
+            .expect("cache load should succeed");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].commands.len(), 0);
+        assert_eq!(loaded[0].merged_commands_len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_deserialization_accepts_legacy_commands_field() {
+        let payload = serde_json::json!({
+            "version": CACHE_SCHEMA_VERSION,
+            "pages": [{
+                "page_number": 1,
+                "commands": [{
+                    "Rule": {
+                        "x": 0,
+                        "y": 0,
+                        "length": 9,
+                        "thickness": 1,
+                        "horizontal": true
+                    }
+                }],
+                "content_commands": [],
+                "chrome_commands": [],
+                "overlay_commands": [],
+                "overlay_items": [],
+                "annotations": [],
+                "metrics": {
+                    "chapter_index": 0,
+                    "chapter_page_index": 0,
+                    "chapter_page_count": 1,
+                    "global_page_index": 0,
+                    "global_page_count_estimate": 1,
+                    "progress_chapter": 0.0,
+                    "progress_book": 0.0
+                }
+            }]
+        });
+        let envelope: PersistedCacheEnvelope =
+            serde_json::from_value(payload).expect("legacy payload should parse");
+        let pages = envelope
+            .into_render_pages()
+            .expect("schema version should match");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].commands.len(), 1);
+        assert_eq!(pages[0].merged_commands_len(), 1);
     }
 
     #[test]

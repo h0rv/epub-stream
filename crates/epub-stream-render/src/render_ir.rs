@@ -2,6 +2,37 @@ use core::fmt;
 use epub_stream::BlockRole;
 use std::sync::Arc;
 
+type SplitLayerCommandIter<'a> = core::iter::Chain<
+    core::iter::Chain<core::slice::Iter<'a, DrawCommand>, core::slice::Iter<'a, DrawCommand>>,
+    core::slice::Iter<'a, DrawCommand>,
+>;
+
+/// Iterator over merged page commands.
+pub enum MergedCommandIter<'a> {
+    /// Iterates split layers in content/chrome/overlay order.
+    Split(SplitLayerCommandIter<'a>),
+    /// Iterates legacy merged command vector.
+    Legacy(core::slice::Iter<'a, DrawCommand>),
+}
+
+impl<'a> Iterator for MergedCommandIter<'a> {
+    type Item = &'a DrawCommand;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Split(iter) => iter.next(),
+            Self::Legacy(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Split(iter) => iter.size_hint(),
+            Self::Legacy(iter) => iter.size_hint(),
+        }
+    }
+}
+
 /// Page represented as backend-agnostic draw commands.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderPage {
@@ -9,8 +40,8 @@ pub struct RenderPage {
     pub page_number: usize,
     /// Legacy merged command stream.
     ///
-    /// This remains for compatibility and is kept in sync with
-    /// `content_commands`, `chrome_commands`, and `overlay_commands`.
+    /// This remains for compatibility. It is populated only when
+    /// [`sync_commands`](Self::sync_commands) is called.
     pub commands: Vec<DrawCommand>,
     /// Content-layer draw commands (deterministic pagination output).
     pub content_commands: Vec<DrawCommand>,
@@ -46,23 +77,51 @@ impl RenderPage {
 
     /// Push a content-layer command.
     pub fn push_content_command(&mut self, cmd: DrawCommand) {
-        #[cfg(not(target_os = "espidf"))]
-        self.commands.push(cmd.clone());
         self.content_commands.push(cmd);
     }
 
     /// Push a chrome-layer command.
     pub fn push_chrome_command(&mut self, cmd: DrawCommand) {
-        #[cfg(not(target_os = "espidf"))]
-        self.commands.push(cmd.clone());
         self.chrome_commands.push(cmd);
     }
 
     /// Push an overlay-layer command.
     pub fn push_overlay_command(&mut self, cmd: DrawCommand) {
-        #[cfg(not(target_os = "espidf"))]
-        self.commands.push(cmd.clone());
         self.overlay_commands.push(cmd);
+    }
+
+    /// Number of merged commands visible to consumers.
+    ///
+    /// When split layers are populated this returns their combined count.
+    /// Otherwise it falls back to the legacy merged command stream.
+    pub fn merged_commands_len(&self) -> usize {
+        let split =
+            self.content_commands.len() + self.chrome_commands.len() + self.overlay_commands.len();
+        if split > 0 {
+            split
+        } else {
+            self.commands.len()
+        }
+    }
+
+    /// Iterate merged commands without allocating.
+    ///
+    /// Split layers are preferred when present. If all split layers are empty,
+    /// this yields legacy `commands` entries.
+    pub fn merged_commands_iter(&self) -> MergedCommandIter<'_> {
+        if self.content_commands.is_empty()
+            && self.chrome_commands.is_empty()
+            && self.overlay_commands.is_empty()
+        {
+            MergedCommandIter::Legacy(self.commands.iter())
+        } else {
+            MergedCommandIter::Split(
+                self.content_commands
+                    .iter()
+                    .chain(self.chrome_commands.iter())
+                    .chain(self.overlay_commands.iter()),
+            )
+        }
     }
 
     #[cfg(not(target_os = "espidf"))]
@@ -340,7 +399,10 @@ pub trait OverlayComposer {
 
 #[cfg(test)]
 mod tests {
-    use super::PageAnnotationKind;
+    use super::{
+        DrawCommand, PageAnnotationKind, PageChromeCommand, PageChromeKind, RectCommand,
+        RenderPage, RuleCommand,
+    };
 
     #[test]
     fn page_annotation_kind_maps_known_tags() {
@@ -367,6 +429,50 @@ mod tests {
         assert_eq!(kind, "custom_annotation");
         assert_eq!(kind.to_string(), "custom_annotation");
         assert_eq!(String::from(&kind), "custom_annotation".to_string());
+    }
+
+    #[test]
+    fn render_page_merged_commands_iter_reads_split_layers_without_sync() {
+        let mut page = RenderPage::new(1);
+        page.push_content_command(DrawCommand::Rule(RuleCommand {
+            x: 0,
+            y: 0,
+            length: 10,
+            thickness: 1,
+            horizontal: true,
+        }));
+        page.push_chrome_command(DrawCommand::Rect(RectCommand {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 6,
+            fill: false,
+        }));
+        page.push_overlay_command(DrawCommand::PageChrome(PageChromeCommand {
+            kind: PageChromeKind::Footer,
+            text: Some("f".to_string()),
+            current: None,
+            total: None,
+        }));
+
+        assert_eq!(page.commands.len(), 0);
+        assert_eq!(page.merged_commands_len(), 3);
+        assert_eq!(page.merged_commands_iter().count(), 3);
+    }
+
+    #[test]
+    fn render_page_sync_commands_remains_explicit_compatibility_path() {
+        let mut page = RenderPage::new(2);
+        page.push_content_command(DrawCommand::Rule(RuleCommand {
+            x: 0,
+            y: 0,
+            length: 10,
+            thickness: 1,
+            horizontal: true,
+        }));
+        assert!(page.commands.is_empty());
+        page.sync_commands();
+        assert_eq!(page.commands.len(), 1);
     }
 }
 

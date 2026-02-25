@@ -1300,6 +1300,21 @@ where
         Ok(diagnostics)
     }
 
+    fn split_command_layers(page: &RenderPage) -> Option<[&[DrawCommand]; 3]> {
+        if page.content_commands.is_empty()
+            && page.chrome_commands.is_empty()
+            && page.overlay_commands.is_empty()
+        {
+            None
+        } else {
+            Some([
+                page.content_commands.as_slice(),
+                page.chrome_commands.as_slice(),
+                page.overlay_commands.as_slice(),
+            ])
+        }
+    }
+
     /// Render content commands from the current single-stream page output.
     pub fn render_content<D>(&self, page: &RenderPage, display: &mut D) -> Result<(), D::Error>
     where
@@ -1308,8 +1323,8 @@ where
         if self.cfg.clear_first {
             display.clear(BinaryColor::Off)?;
         }
-        if !page.content_commands.is_empty() {
-            for cmd in &page.content_commands {
+        if let Some([content, _, _]) = Self::split_command_layers(page) {
+            for cmd in content {
                 self.draw_command(display, cmd)?;
             }
         } else {
@@ -1338,8 +1353,8 @@ where
         if self.cfg.clear_first {
             display.clear(BinaryColor::Off)?;
         }
-        if !page.content_commands.is_empty() {
-            for cmd in &page.content_commands {
+        if let Some([content, _, _]) = Self::split_command_layers(page) {
+            for cmd in content {
                 self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
             }
         } else {
@@ -1359,12 +1374,8 @@ where
     where
         D: DrawTarget<Color = BinaryColor>,
     {
-        if !page.chrome_commands.is_empty() || !page.overlay_commands.is_empty() {
-            for cmd in page
-                .chrome_commands
-                .iter()
-                .chain(page.overlay_commands.iter())
-            {
+        if let Some([_, chrome, overlay]) = Self::split_command_layers(page) {
+            for cmd in chrome.iter().chain(overlay.iter()) {
                 self.draw_command(display, cmd)?;
             }
             return Ok(());
@@ -1390,12 +1401,8 @@ where
         D: DrawTarget<Color = BinaryColor>,
     {
         diagnostics.image_registry = self.image_registry_diagnostics();
-        if !page.chrome_commands.is_empty() || !page.overlay_commands.is_empty() {
-            for cmd in page
-                .chrome_commands
-                .iter()
-                .chain(page.overlay_commands.iter())
-            {
+        if let Some([_, chrome, overlay]) = Self::split_command_layers(page) {
+            for cmd in chrome.iter().chain(overlay.iter()) {
                 self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
             }
             return Ok(());

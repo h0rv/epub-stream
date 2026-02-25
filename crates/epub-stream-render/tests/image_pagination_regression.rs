@@ -1,7 +1,27 @@
 use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
-use epub_stream_render::{DrawCommand, LayoutConfig, LayoutEngine};
+use epub_stream_render::{DrawCommand, LayoutConfig, LayoutEngine, RenderPage};
+
+fn merged_command_layers(page: &RenderPage) -> [&[DrawCommand]; 3] {
+    if page.content_commands.is_empty()
+        && page.chrome_commands.is_empty()
+        && page.overlay_commands.is_empty()
+    {
+        [page.commands.as_slice(), &[], &[]]
+    } else {
+        [
+            page.content_commands.as_slice(),
+            page.chrome_commands.as_slice(),
+            page.overlay_commands.as_slice(),
+        ]
+    }
+}
+
+fn merged_page_commands(page: &RenderPage) -> impl Iterator<Item = &DrawCommand> {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.iter().chain(chrome.iter()).chain(overlay.iter())
+}
 
 fn body_run(text: &str) -> StyledEventOrRun {
     StyledEventOrRun::Run(StyledRun {
@@ -65,7 +85,7 @@ fn mixed_text_and_images_paginate_without_overlap() {
 
     let mut saw_image = false;
     for page in &pages {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             if let DrawCommand::ImageObject(obj) = cmd {
                 saw_image = true;
                 assert!(obj.width > 0);

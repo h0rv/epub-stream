@@ -129,8 +129,28 @@ fn build_engine(profile: HarnessProfile) -> RenderEngine {
     RenderEngine::new(opts)
 }
 
+fn merged_command_layers(page: &RenderPage) -> [&[DrawCommand]; 3] {
+    if page.content_commands.is_empty()
+        && page.chrome_commands.is_empty()
+        && page.overlay_commands.is_empty()
+    {
+        [page.commands.as_slice(), &[], &[]]
+    } else {
+        [
+            page.content_commands.as_slice(),
+            page.chrome_commands.as_slice(),
+            page.overlay_commands.as_slice(),
+        ]
+    }
+}
+
+fn merged_page_commands(page: &RenderPage) -> impl Iterator<Item = &DrawCommand> {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.iter().chain(chrome.iter()).chain(overlay.iter())
+}
+
 fn page_has_meaningful_text(page: &RenderPage) -> bool {
-    page.commands.iter().any(|cmd| match cmd {
+    merged_page_commands(page).any(|cmd| match cmd {
         DrawCommand::Text(text) => {
             !text.text.trim().is_empty()
                 && matches!(
@@ -432,7 +452,7 @@ fn assert_no_right_edge_overrun(
         .enumerate()
         .take(MAX_PAGES_FOR_RIGHT_EDGE_CHECK)
     {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             let DrawCommand::Text(text) = cmd else {
                 continue;
             };

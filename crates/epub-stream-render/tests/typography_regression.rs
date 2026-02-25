@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use epub_stream::EpubBook;
 use epub_stream_render::BlockRole;
-use epub_stream_render::{DrawCommand, RenderEngine, RenderEngineOptions};
+use epub_stream_render::{DrawCommand, RenderEngine, RenderEngineOptions, RenderPage};
 
 fn fixture_path(name: &str) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -70,6 +70,26 @@ fn build_engine(width: i32, height: i32, font_size_px: f32, justify: bool) -> Re
     RenderEngine::new(opts)
 }
 
+fn merged_command_layers(page: &RenderPage) -> [&[DrawCommand]; 3] {
+    if page.content_commands.is_empty()
+        && page.chrome_commands.is_empty()
+        && page.overlay_commands.is_empty()
+    {
+        [page.commands.as_slice(), &[], &[]]
+    } else {
+        [
+            page.content_commands.as_slice(),
+            page.chrome_commands.as_slice(),
+            page.overlay_commands.as_slice(),
+        ]
+    }
+}
+
+fn merged_page_commands(page: &RenderPage) -> impl Iterator<Item = &DrawCommand> {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.iter().chain(chrome.iter()).chain(overlay.iter())
+}
+
 fn chapter_with_text_pages_min(
     engine: &RenderEngine,
     book: &mut EpubBook<std::fs::File>,
@@ -89,8 +109,7 @@ fn chapter_with_text_pages_min(
 }
 
 fn page_has_meaningful_text(page: &epub_stream_render::RenderPage) -> bool {
-    page.commands
-        .iter()
+    merged_page_commands(page)
         .any(|cmd| matches!(cmd, DrawCommand::Text(text) if !text.text.trim().is_empty()))
 }
 
@@ -135,7 +154,7 @@ fn corpus_large_font_increases_page_count_and_keeps_top_padding() {
         let margin_top = 10;
         let first_text = large_pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|page| merged_page_commands(page))
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) if !t.text.trim().is_empty() => Some(t),
                 _ => None,
@@ -283,7 +302,7 @@ fn frankenstein_small_margin_no_right_edge_overrun() {
     // Small margins may intentionally allow text close to the edge.
     let right_limit = 478i32;
     for (page_idx, page) in pages.iter().enumerate().take(4) {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             let DrawCommand::Text(text) = cmd else {
                 continue;
             };
@@ -308,7 +327,7 @@ fn assert_no_screen_edge_overrun(
     let right_limit = (display_width - 2) as f32;
     let mut sampled = 0usize;
     for (page_idx, page) in pages.iter().enumerate().take(max_pages) {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             let DrawCommand::Text(text) = cmd else {
                 continue;
             };
@@ -346,9 +365,7 @@ fn assert_nonterminal_body_lines_are_well_filled(
     let available = (display_width - margin_right).max(1) as f32;
     let mut sampled = 0usize;
     for page in pages.iter().take(max_pages) {
-        let body_lines: Vec<_> = page
-            .commands
-            .iter()
+        let body_lines: Vec<_> = merged_page_commands(page)
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(text)
                     if matches!(

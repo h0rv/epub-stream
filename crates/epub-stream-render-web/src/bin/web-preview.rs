@@ -972,11 +972,10 @@ fn convert_page(
     image_sources: &mut BTreeSet<String>,
     font_families: &mut BTreeSet<String>,
 ) -> PagePayload {
-    let commands = merged_commands(page);
-    let mut converted = Vec::with_capacity(commands.len());
+    let mut converted = Vec::with_capacity(merged_command_count(page));
 
-    for cmd in commands {
-        converted.push(convert_command(&cmd, image_sources, font_families));
+    for cmd in merged_page_commands(page) {
+        converted.push(convert_command(cmd, image_sources, font_families));
     }
 
     PagePayload {
@@ -1006,17 +1005,29 @@ fn convert_page(
     }
 }
 
-fn merged_commands(page: &RenderPage) -> Vec<DrawCommand> {
-    let mut merged = Vec::with_capacity(
-        page.content_commands.len() + page.chrome_commands.len() + page.overlay_commands.len(),
-    );
-    merged.extend(page.content_commands.iter().cloned());
-    merged.extend(page.chrome_commands.iter().cloned());
-    merged.extend(page.overlay_commands.iter().cloned());
-    if merged.is_empty() {
-        merged.extend(page.commands.iter().cloned());
+fn merged_command_layers(page: &RenderPage) -> [&[DrawCommand]; 3] {
+    if page.content_commands.is_empty()
+        && page.chrome_commands.is_empty()
+        && page.overlay_commands.is_empty()
+    {
+        [page.commands.as_slice(), &[], &[]]
+    } else {
+        [
+            page.content_commands.as_slice(),
+            page.chrome_commands.as_slice(),
+            page.overlay_commands.as_slice(),
+        ]
     }
-    merged
+}
+
+fn merged_page_commands(page: &RenderPage) -> impl Iterator<Item = &DrawCommand> {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.iter().chain(chrome.iter()).chain(overlay.iter())
+}
+
+fn merged_command_count(page: &RenderPage) -> usize {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.len() + chrome.len() + overlay.len()
 }
 
 fn convert_command(

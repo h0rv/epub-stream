@@ -20,6 +20,31 @@ use epub_stream_render::{
 const DISPLAY_WIDTH: i32 = 480;
 const DISPLAY_HEIGHT: i32 = 800;
 
+fn merged_command_layers(page: &RenderPage) -> [&[DrawCommand]; 3] {
+    if page.content_commands.is_empty()
+        && page.chrome_commands.is_empty()
+        && page.overlay_commands.is_empty()
+    {
+        [page.commands.as_slice(), &[], &[]]
+    } else {
+        [
+            page.content_commands.as_slice(),
+            page.chrome_commands.as_slice(),
+            page.overlay_commands.as_slice(),
+        ]
+    }
+}
+
+fn merged_page_commands(page: &RenderPage) -> impl Iterator<Item = &DrawCommand> {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.iter().chain(chrome.iter()).chain(overlay.iter())
+}
+
+fn merged_page_command_count(page: &RenderPage) -> usize {
+    let [content, chrome, overlay] = merged_command_layers(page);
+    content.len() + chrome.len() + overlay.len()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FamilyOverride {
     Auto,
@@ -551,7 +576,7 @@ fn assert_no_right_edge_body_overrun(
     let right_limit = (DISPLAY_WIDTH - 2) as f32;
     let mut sampled = 0usize;
     'pages: for (page_idx, page) in pages.iter().enumerate().take(3) {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             let DrawCommand::Text(text) = cmd else {
                 continue;
             };
@@ -639,7 +664,7 @@ fn sampled_embedded_signature(pages: &[RenderPage]) -> u64 {
     hash = hash_mix(hash, pages.len() as u64);
     for page in pages.iter().take(6) {
         hash = hash_mix(hash, page.page_number as u64);
-        hash = hash_mix(hash, page.commands.len() as u64);
+        hash = hash_mix(hash, merged_page_command_count(page) as u64);
         hash = hash_mix(hash, page.metrics.chapter_page_index as u64);
         hash = hash_mix(hash, page.metrics.progress_chapter.to_bits() as u64);
         let mut display = PixelCaptureDisplay::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32);
@@ -701,7 +726,7 @@ fn pick_multi_page_text_chapter_with_budget(
 fn sampled_body_line_count(pages: &[RenderPage]) -> usize {
     let mut sampled = 0usize;
     for page in pages.iter().take(3) {
-        for cmd in &page.commands {
+        for cmd in merged_page_commands(page) {
             let DrawCommand::Text(text) = cmd else {
                 continue;
             };

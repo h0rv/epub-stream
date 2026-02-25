@@ -1539,7 +1539,6 @@ impl LayoutState {
         }
         let mut page = core::mem::replace(&mut self.page, RenderPage::new(self.page_no + 1));
         page.metrics.chapter_page_index = page.page_number.saturating_sub(1);
-        page.sync_commands();
         self.emitted.push(page);
     }
 
@@ -2009,7 +2008,6 @@ fn annotate_page_chrome(pages: &mut [RenderPage], cfg: LayoutConfig) {
                 total: Some(total),
             }));
         }
-        page.sync_commands();
     }
 }
 
@@ -2134,10 +2132,9 @@ mod tests {
             .iter()
             .any(|a| a.kind == "inline_image_src" && a.value.as_deref() == Some("images/pic.jpg")));
         assert!(first
-            .commands
-            .iter()
+            .merged_commands_iter()
             .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_))));
-        assert!(first.commands.iter().any(|cmd| match cmd {
+        assert!(first.merged_commands_iter().any(|cmd| match cmd {
             DrawCommand::Text(t) => t.text.contains("Picture caption"),
             _ => false,
         }));
@@ -2165,12 +2162,10 @@ mod tests {
         let pages = engine.layout_items(items);
         assert!(pages.len() >= 2);
         let page0_has_image_object = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_)));
         let page1_has_image_object = pages[1]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .any(|cmd| matches!(cmd, DrawCommand::ImageObject(_)));
         assert!(!page0_has_image_object);
         assert!(page1_has_image_object);
@@ -2199,8 +2194,7 @@ mod tests {
             Some(900),
         )]);
         let cmd = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .find_map(|c| match c {
                 DrawCommand::ImageObject(img) => Some(img),
                 _ => None,
@@ -2235,8 +2229,7 @@ mod tests {
             Some(1200),
         )]);
         let cmd = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .find_map(|c| match c {
                 DrawCommand::ImageObject(img) => Some(img),
                 _ => None,
@@ -2262,8 +2255,7 @@ mod tests {
         ];
         let pages = engine.layout_items(items);
         let first_text = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(text) => Some(text),
                 _ => None,
@@ -2357,7 +2349,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let mut saw_justified = false;
         for page in pages {
-            for cmd in page.commands {
+            for cmd in page.merged_commands_iter() {
                 if let DrawCommand::Text(t) = cmd {
                     if matches!(t.style.justify_mode, JustifyMode::InterWord { .. }) {
                         saw_justified = true;
@@ -2402,7 +2394,7 @@ mod tests {
         let center_pages = LayoutEngine::new(center_cfg).layout_items(items);
         let right_mode = right_pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.style.justify_mode),
                 _ => None,
@@ -2410,7 +2402,7 @@ mod tests {
             .expect("expected text line");
         let center_mode = center_pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.style.justify_mode),
                 _ => None,
@@ -2446,7 +2438,7 @@ mod tests {
 
         let adaptive_max = adaptive_pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => match t.style.justify_mode {
                     JustifyMode::InterWord { extra_px_total } => Some(extra_px_total),
@@ -2458,7 +2450,7 @@ mod tests {
             .unwrap_or(0);
         let full_max = full_pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => match t.style.justify_mode {
                     JustifyMode::InterWord { extra_px_total } => Some(extra_px_total),
@@ -2495,13 +2487,13 @@ mod tests {
         let default_lines = default_engine
             .layout_items(items.clone())
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter(|cmd| matches!(cmd, DrawCommand::Text(_)))
             .count();
         let measured_lines = measured_engine
             .layout_items(items)
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter(|cmd| matches!(cmd, DrawCommand::Text(_)))
             .count();
         assert!(measured_lines > default_lines);
@@ -2521,7 +2513,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let texts: Vec<String> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2545,7 +2537,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let texts: Vec<String> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2576,8 +2568,7 @@ mod tests {
         assert_eq!(pages.len(), 1);
         let page = &pages[0];
         let first_text = page
-            .commands
-            .iter()
+            .merged_commands_iter()
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t),
                 _ => None,
@@ -2588,8 +2579,7 @@ mod tests {
         assert_eq!(first_text.style.font_id, Some(0));
 
         let chrome_kinds: Vec<PageChromeKind> = page
-            .commands
-            .iter()
+            .merged_commands_iter()
             .filter_map(|cmd| match cmd {
                 DrawCommand::PageChrome(c) => Some(c.kind),
                 _ => None,
@@ -2625,8 +2615,7 @@ mod tests {
         let pages = engine.layout_items(items);
         assert_eq!(pages.len(), 1);
         let chrome_kinds: Vec<PageChromeKind> = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .filter_map(|cmd| match cmd {
                 DrawCommand::PageChrome(c) => Some(c.kind),
                 _ => None,
@@ -2653,8 +2642,7 @@ mod tests {
         for page in pages {
             assert!(!page.content_commands.is_empty());
             let has_chrome = page
-                .commands
-                .iter()
+                .merged_commands_iter()
                 .any(|cmd| matches!(cmd, DrawCommand::PageChrome(_)));
             assert!(!has_chrome);
         }
@@ -2677,7 +2665,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let first_line = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) if t.text.starts_with("one two") => Some(t),
                 _ => None,
@@ -2716,16 +2704,14 @@ mod tests {
         let pages = engine.layout_items(items);
         assert!(pages.len() >= 2);
         let page1_text: Vec<String> = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();
         let page2_text: Vec<String> = pages[1]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2750,8 +2736,7 @@ mod tests {
         ];
         let pages = engine.layout_items(items);
         let first_line = pages[0]
-            .commands
-            .iter()
+            .merged_commands_iter()
             .find_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t),
                 _ => None,
@@ -2806,7 +2791,7 @@ mod tests {
         session.finish(&mut |p| pages.push(p));
         let texts: Vec<String> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2836,7 +2821,7 @@ mod tests {
         session.finish(&mut |p| pages.push(p));
         let texts: Vec<String> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2869,7 +2854,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let lines: Vec<String> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t) => Some(t.text.clone()),
                 _ => None,
@@ -2910,7 +2895,7 @@ mod tests {
         let pages = engine.layout_items(items);
         let lines: Vec<&TextCommand> = pages
             .iter()
-            .flat_map(|p| p.commands.iter())
+            .flat_map(|p| p.merged_commands_iter())
             .filter_map(|cmd| match cmd {
                 DrawCommand::Text(t)
                     if matches!(t.style.role, BlockRole::Body | BlockRole::Paragraph) =>
@@ -2972,7 +2957,7 @@ mod tests {
             prev_page_no = page.page_number;
 
             let mut prev_baseline = i32::MIN;
-            for cmd in &page.commands {
+            for cmd in page.merged_commands_iter() {
                 if let DrawCommand::Text(text) = cmd {
                     assert!(text.baseline_y > prev_baseline);
                     prev_baseline = text.baseline_y;
