@@ -278,9 +278,6 @@ impl LayoutEngine {
     fn handle_run(&self, st: &mut LayoutState, ctx: &mut BlockCtx, run: StyledRun) {
         let mut style = to_resolved_style(&run.style);
         style.font_id = Some(run.font_id);
-        if let Some(family) = run.resolved_family.as_ref() {
-            style.family = Arc::clone(family);
-        }
         if let Some(level) = ctx.heading_level {
             style.role = BlockRole::Heading(level);
         }
@@ -2036,7 +2033,6 @@ mod tests {
                 block_role: BlockRole::Body,
             },
             font_id: 0,
-            resolved_family: Some("serif".into()),
         })
     }
 
@@ -2068,7 +2064,6 @@ mod tests {
                 block_role: BlockRole::FigureCaption,
             },
             font_id: 0,
-            resolved_family: Some("serif".into()),
         })
     }
 

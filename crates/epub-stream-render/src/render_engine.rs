@@ -2390,7 +2390,6 @@ mod tests {
                 block_role: BlockRole::Body,
             },
             font_id: 0,
-            resolved_family: Some("serif".into()),
         })
     }
 

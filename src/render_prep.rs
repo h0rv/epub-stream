@@ -5,7 +5,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::min;
 use core::fmt;
@@ -446,8 +445,6 @@ pub struct StyledRun {
     pub style: ComputedTextStyle,
     /// Stable resolved font identity (0 means policy fallback).
     pub font_id: u32,
-    /// Resolved family selected by the font resolver.
-    pub resolved_family: Option<Arc<str>>,
 }
 
 /// Styled inline image payload.
@@ -689,7 +686,6 @@ impl Styler {
                                     text: " | ".to_string(),
                                     style,
                                     font_id: 0,
-                                    resolved_family: None,
                                 }));
                             }
                             *cell_count = cell_count.saturating_add(1);
@@ -732,7 +728,6 @@ impl Styler {
                                     text: " | ".to_string(),
                                     style,
                                     font_id: 0,
-                                    resolved_family: None,
                                 }));
                             }
                             *cell_count = cell_count.saturating_add(1);
@@ -793,7 +788,6 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: None,
                     }));
                 }
                 Ok(Event::CData(e)) => {
@@ -822,7 +816,6 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: None,
                     }));
                 }
                 Ok(Event::GeneralRef(e)) => {
@@ -866,7 +859,6 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: None,
                     }));
                 }
                 Ok(Event::Eof) => break,
@@ -1984,7 +1976,6 @@ fn resolve_item_with_font(
         StyledEventOrRun::Run(mut run) => {
             let trace = font_resolver.resolve_with_trace_for_text(&run.style, Some(&run.text));
             run.font_id = trace.face.font_id;
-            run.resolved_family = Some(Arc::from(trace.face.family.as_str()));
             let style = run.style.clone();
             (
                 StyledEventOrRun::Run(run),
@@ -2674,7 +2665,7 @@ mod tests {
     }
 
     #[test]
-    fn styler_run_resolved_family_defaults_to_none() {
+    fn styler_run_font_id_defaults_to_zero() {
         let mut styler = Styler::new(StyleConfig::default());
         styler
             .load_stylesheets(&ChapterStylesheets::default())
@@ -2683,7 +2674,7 @@ mod tests {
             .style_chapter("<p>Hello world</p>")
             .expect("style should succeed");
         let run = chapter.runs().next().expect("expected run");
-        assert_eq!(run.resolved_family, None);
+        assert_eq!(run.font_id, 0);
     }
 
     #[test]
