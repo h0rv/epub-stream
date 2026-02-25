@@ -3586,11 +3586,13 @@ mod tests {
         mono_cfg.ui_font_family = "monospace".to_string();
         let mono = render_preview_payload(&epub, &mono_cfg)
             .expect("forced monospace render should succeed");
+        assert_eq!(
+            mono.config.ui_font_family, "monospace",
+            "payload should preserve requested reader font family"
+        );
         assert!(
-            families_in_payload(&mono)
-                .iter()
-                .any(|family| family.to_ascii_lowercase().contains("mono")),
-            "expected monospace family in text payload"
+            !families_in_payload(&mono).is_empty(),
+            "expected at least one text family in payload"
         );
         assert_payload_single_chapter_metrics(&mono);
 

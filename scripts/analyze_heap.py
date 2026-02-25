@@ -54,10 +54,36 @@ def parse_profile(path: str) -> Profile:
     pps = d["pps"]
     ftbl = d["ftbl"]
     basename = os.path.basename(path).replace(".json", "")
-    # Extract phase and book name from dhat-<phase>-<name> or dhat-<phase>
-    parts = basename.split("-", 2)  # ["dhat", phase, name?]
-    phase = parts[1] if len(parts) >= 2 else "unknown"
-    name = parts[2] if len(parts) >= 3 else "(aggregate)"
+    # Extract phase and book name from dhat-<phase>-<name> or dhat-<phase>.
+    # Match known phases by longest prefix so "session_once" doesn't bleed
+    # into "session" reports.
+    stem = basename.removeprefix("dhat-")
+    known_phases = [
+        "session_once",
+        "session-once",
+        "tokenize",
+        "render",
+        "cover",
+        "open",
+        "full",
+        "session",
+    ]
+    phase = "unknown"
+    name = "(aggregate)"
+    for candidate in sorted(known_phases, key=len, reverse=True):
+        if stem == candidate:
+            phase = candidate
+            name = "(aggregate)"
+            break
+        prefix = f"{candidate}-"
+        if stem.startswith(prefix):
+            phase = candidate
+            name = stem[len(prefix) :]
+            break
+    if phase == "unknown":
+        parts = basename.split("-", 2)  # ["dhat", phase, name?]
+        phase = parts[1] if len(parts) >= 2 else "unknown"
+        name = parts[2] if len(parts) >= 3 else "(aggregate)"
     return Profile(
         path=path,
         name=name,

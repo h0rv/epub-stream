@@ -18,7 +18,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use epub_stream::EpubBook;
+use epub_stream::{CoverImageOptions, EpubBook, ImageReadOptions};
 use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DISPLAY_WIDTH: i32 = 480;
@@ -34,18 +34,24 @@ const DEFAULT_FIXTURES: &[&str] = &[
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Open,
+    Cover,
     Tokenize,
     Render,
     Full,
+    SessionOnce,
+    Session,
 }
 
 impl Phase {
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "open" => Some(Self::Open),
+            "cover" => Some(Self::Cover),
             "tokenize" => Some(Self::Tokenize),
             "render" => Some(Self::Render),
             "full" => Some(Self::Full),
+            "session-once" | "session_once" => Some(Self::SessionOnce),
+            "session" => Some(Self::Session),
             _ => None,
         }
     }
@@ -53,9 +59,12 @@ impl Phase {
     fn name(self) -> &'static str {
         match self {
             Self::Open => "open",
+            Self::Cover => "cover",
             Self::Tokenize => "tokenize",
             Self::Render => "render",
             Self::Full => "full",
+            Self::SessionOnce => "session_once",
+            Self::Session => "session",
         }
     }
 }
@@ -78,6 +87,22 @@ fn profile_file(path: &Path, phase: Phase) {
     match phase {
         Phase::Open => {
             let _book = EpubBook::open(path).unwrap_or_else(|e| panic!("open {}: {}", path_str, e));
+        }
+        Phase::Cover => {
+            let mut book =
+                EpubBook::open(path).unwrap_or_else(|e| panic!("open {}: {}", path_str, e));
+            let mut cover_buf = Vec::with_capacity(8);
+            let cover_opts = CoverImageOptions {
+                image: ImageReadOptions {
+                    max_bytes: 4 * 1024 * 1024,
+                    allow_svg: true,
+                    allow_unknown_images: true,
+                },
+                ..CoverImageOptions::default()
+            };
+            for _ in 0..5 {
+                let _ = book.read_cover_image_into_with_options(&mut cover_buf, cover_opts);
+            }
         }
         Phase::Tokenize => {
             let mut book =
@@ -115,6 +140,45 @@ fn profile_file(path: &Path, phase: Phase) {
                 let _ = engine.prepare_chapter_with_config_collect(&mut book, ch, config.clone());
             }
         }
+        Phase::SessionOnce | Phase::Session => {
+            let mut book =
+                EpubBook::open(path).unwrap_or_else(|e| panic!("open {}: {}", path_str, e));
+            let mut cover_buf = Vec::with_capacity(8);
+            let cover_opts = CoverImageOptions {
+                image: ImageReadOptions {
+                    max_bytes: 4 * 1024 * 1024,
+                    allow_svg: true,
+                    allow_unknown_images: true,
+                },
+                ..CoverImageOptions::default()
+            };
+            for _ in 0..3 {
+                let _ = book.read_cover_image_into_with_options(&mut cover_buf, cover_opts);
+            }
+
+            // Stream-like page flip simulation: render chapter-by-chapter without retaining page vecs.
+            let engine = RenderEngine::new(RenderEngineOptions::for_display(
+                DISPLAY_WIDTH,
+                DISPLAY_HEIGHT,
+            ));
+            let config =
+                epub_stream_embedded_graphics::with_embedded_text_measurer(RenderConfig::default());
+            let mut flips = 0usize;
+            let count = book.chapter_count();
+            let pass_count = if matches!(phase, Phase::Session) { 2 } else { 1 };
+            for _pass in 0..pass_count {
+                for ch in 0..count {
+                    let result =
+                        engine.prepare_chapter_with_config(&mut book, ch, config.clone(), |_| {
+                            flips = flips.saturating_add(1);
+                        });
+                    let _ = result;
+                }
+            }
+            if flips == 0 {
+                panic!("session {} produced zero pages", path_str);
+            }
+        }
     }
 }
 
@@ -129,7 +193,9 @@ fn usage() {
     eprintln!("Usage: heap-profile [OPTIONS] [EPUB_FILES...]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --phase <open|tokenize|render|full>  Pipeline phase to profile (default: render)");
+    eprintln!(
+        "  --phase <open|cover|tokenize|render|full|session_once|session>  Pipeline phase to profile (default: render)"
+    );
     eprintln!("  --out-dir <DIR>                      Output directory for dhat JSON (default: target/memory)");
     eprintln!(
         "  --aggregate                          Single profile for all files (default: per-file)"

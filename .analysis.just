@@ -72,11 +72,14 @@ heap-profile phase="render" *files:
 heap-profile-all *files:
     @mkdir -p target/memory
     cargo run -p epub-stream-heap-profile --release -- --phase open --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase cover --out-dir target/memory {{ files }}
     cargo run -p epub-stream-heap-profile --release -- --phase tokenize --out-dir target/memory {{ files }}
     cargo run -p epub-stream-heap-profile --release -- --phase render --out-dir target/memory {{ files }}
     cargo run -p epub-stream-heap-profile --release -- --phase full --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase session_once --out-dir target/memory {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase session --out-dir target/memory {{ files }}
     @echo ""
-    @echo "Profiles saved to target/memory/dhat-{open,tokenize,render,full}.json"
+    @echo "Profiles saved to target/memory/dhat-{open,cover,tokenize,render,full,session_once,session}.json"
     @echo "Open with: just analysis heap-view <phase>"
 
 # Open the DHAT viewer in the browser and list available profiles.
@@ -101,11 +104,21 @@ heap-profile-view phase="render" *files:
 
 # Analyze DHAT profiles (summary, hotspots, churn, peak, budget, compare, report).
 heap-analyze *args:
-    uv run scripts/analyze_heap.py {{ args }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py {{ args }}
 
 # Full analysis report: summary + hotspots + churn + peak + budget check.
 heap-report phase="full" target="512KB":
-    uv run scripts/analyze_heap.py report --phase {{ phase }} --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py report --phase {{ phase }} --target {{ target }}
+
+# Budget guardrail across all supported phases (fails fast on any regression).
+heap-budget-all target="512KB":
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase open --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase cover --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase tokenize --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase render --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase full --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session_once --target {{ target }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session --target {{ target }}
 
 # Run Miri to detect undefined behavior in unsafe code.
 miri:
