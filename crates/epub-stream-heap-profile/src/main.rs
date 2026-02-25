@@ -165,7 +165,11 @@ fn profile_file(path: &Path, phase: Phase) {
                 epub_stream_embedded_graphics::with_embedded_text_measurer(RenderConfig::default());
             let mut flips = 0usize;
             let count = book.chapter_count();
-            let pass_count = if matches!(phase, Phase::Session) { 2 } else { 1 };
+            let pass_count = if matches!(phase, Phase::Session) {
+                2
+            } else {
+                1
+            };
             for _pass in 0..pass_count {
                 for ch in 0..count {
                     let result =
