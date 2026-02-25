@@ -93,6 +93,8 @@ pub struct OpenConfig {
     /// Baseline high-level open options.
     pub options: EpubBookOptions,
     /// When enabled, navigation parsing is deferred until `ensure_navigation`.
+    ///
+    /// This is enabled by default for memory-first behavior.
     pub lazy_navigation: bool,
 }
 
@@ -100,7 +102,7 @@ impl From<EpubBookOptions> for OpenConfig {
     fn from(options: EpubBookOptions) -> Self {
         Self {
             options,
-            lazy_navigation: false,
+            lazy_navigation: true,
         }
     }
 }
@@ -2735,11 +2737,14 @@ mod tests {
             "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
         )
         .expect("fixture should open");
-        let err = match EpubBook::from_reader_with_options(
+        let err = match EpubBook::from_reader_with_config(
             file,
-            EpubBookOptions {
-                max_nav_bytes: Some(8),
-                ..EpubBookOptions::default()
+            OpenConfig {
+                options: EpubBookOptions {
+                    max_nav_bytes: Some(8),
+                    ..EpubBookOptions::default()
+                },
+                lazy_navigation: false,
             },
         ) {
             Ok(_) => panic!("open should fail when navigation exceeds cap"),
@@ -2763,14 +2768,17 @@ mod tests {
             "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
         )
         .expect("fixture should open");
-        let err = match EpubBook::from_reader_with_options(
+        let err = match EpubBook::from_reader_with_config(
             file,
-            EpubBookOptions {
-                navigation_limits: NavigationLimits {
-                    max_href_bytes: 0,
-                    ..NavigationLimits::default()
+            OpenConfig {
+                options: EpubBookOptions {
+                    navigation_limits: NavigationLimits {
+                        max_href_bytes: 0,
+                        ..NavigationLimits::default()
+                    },
+                    ..EpubBookOptions::default()
                 },
-                ..EpubBookOptions::default()
+                lazy_navigation: false,
             },
         ) {
             Ok(_) => panic!("open should fail when navigation points exceed cap"),
@@ -2797,6 +2805,21 @@ mod tests {
             },
         )
         .expect("book should open");
+        assert!(book.navigation().is_none());
+        let nav = book
+            .ensure_navigation()
+            .expect("ensure navigation should parse");
+        assert!(nav.is_some());
+    }
+
+    #[test]
+    fn test_from_reader_with_options_defaults_to_lazy_navigation() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader_with_options(file, EpubBookOptions::default())
+            .expect("book should open");
         assert!(book.navigation().is_none());
         let nav = book
             .ensure_navigation()

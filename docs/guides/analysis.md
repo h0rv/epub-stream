@@ -117,7 +117,7 @@ just analysis heap-analyze compare target/memory/before.json target/memory/after
 ```
 
 Phase notes:
-- `open`: open + metadata/navigation parse.
+- `open`: open + metadata parse (navigation is lazy by default).
 - `cover`: cover discovery + bounded cover reads.
 - `tokenize`: open + chapter tokenization.
 - `render`: open + single chapter style/layout/render.

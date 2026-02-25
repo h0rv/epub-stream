@@ -16,7 +16,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "espidf")]
 pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
 #[cfg(not(target_os = "espidf"))]
-pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 8 * 1024;
+pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 4 * 1024;
 
 /// Maximum number of central directory entries to cache
 const MAX_CD_ENTRIES: usize = 256;
