@@ -508,6 +508,7 @@ pub trait RenderCacheStore {
 
 const CACHE_SCHEMA_VERSION: u8 = 1;
 const DEFAULT_MAX_CACHE_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PAGE_CONTENT_COMMAND_CAPACITY_HINT: usize = 256;
 static CACHE_WRITE_NONCE: AtomicUsize = AtomicUsize::new(0);
 
 /// File-backed render-page cache store.
@@ -1643,6 +1644,7 @@ pub struct RenderEngine {
     opts: RenderEngineOptions,
     layout: LayoutEngine,
     pagination_profile: PaginationProfileId,
+    page_content_command_capacity_hint: Arc<AtomicUsize>,
     diagnostic_sink: DiagnosticSink,
 }
 
@@ -1668,6 +1670,7 @@ impl RenderEngine {
             layout: LayoutEngine::new(opts.layout),
             opts,
             pagination_profile,
+            page_content_command_capacity_hint: Arc::new(AtomicUsize::new(0)),
             diagnostic_sink: None,
         }
     }
@@ -1686,6 +1689,14 @@ impl RenderEngine {
         };
         if let Ok(mut sink) = sink.lock() {
             sink(diagnostic);
+        }
+    }
+
+    fn update_page_content_command_capacity_hint(&self, observed: usize) {
+        let hint = observed.min(MAX_PAGE_CONTENT_COMMAND_CAPACITY_HINT);
+        if hint > 0 {
+            self.page_content_command_capacity_hint
+                .fetch_max(hint, Ordering::Relaxed);
         }
     }
 
@@ -1728,7 +1739,13 @@ impl RenderEngine {
         let inner = if cached_hit {
             None
         } else {
-            let mut session = self.layout.start_session_with_text_measurer(text_measurer);
+            let content_hint = self
+                .page_content_command_capacity_hint
+                .load(Ordering::Relaxed)
+                .min(MAX_PAGE_CONTENT_COMMAND_CAPACITY_HINT);
+            let mut session = self
+                .layout
+                .start_session_with_text_measurer_and_content_capacity(text_measurer, content_hint);
             session.set_chapter_index(chapter_index);
             if let Some(family) = config.forced_font_family.as_deref() {
                 session.set_override_family(Arc::from(family));
@@ -2418,6 +2435,8 @@ impl LayoutSession<'_> {
                 }
                 *page_index += 1;
             });
+            self.engine
+                .update_page_content_command_capacity_hint(inner.content_command_capacity_hint());
         }
         let chapter_total = self.page_index.max(1);
         for page in self.pending_pages.iter_mut() {
@@ -2459,6 +2478,8 @@ impl LayoutSession<'_> {
                 }
                 *page_index += 1;
             });
+            self.engine
+                .update_page_content_command_capacity_hint(inner.content_command_capacity_hint());
         }
         self.completed = true;
         Ok(())
@@ -2816,6 +2837,44 @@ mod tests {
         }
         assert_eq!(streamed, expected);
         assert!(streamed.iter().all(|page| page.metrics.chapter_index == 3));
+    }
+
+    #[test]
+    fn begin_page_refs_carries_content_capacity_hint_between_sessions() {
+        let mut opts = RenderEngineOptions::for_display(300, 120);
+        opts.layout.margin_top = 8;
+        opts.layout.margin_bottom = 8;
+        let engine = RenderEngine::new(opts);
+
+        let mut items = Vec::new();
+        for _ in 0..48 {
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphStart));
+            items.push(body_run("one two three four five six seven eight nine ten"));
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphEnd));
+        }
+
+        let mut first = engine.begin(1, RenderConfig::default());
+        for item in &items {
+            first
+                .push_page_refs(item.clone(), &mut |_| {})
+                .expect("push should pass");
+        }
+        first
+            .finish_page_refs(&mut |_| {})
+            .expect("finish should pass");
+
+        let hinted = engine
+            .page_content_command_capacity_hint
+            .load(Ordering::Relaxed);
+        assert!(hinted > 0);
+
+        let second = engine.begin(2, RenderConfig::default());
+        let seeded = second
+            .inner
+            .as_ref()
+            .expect("session should have core layout")
+            .content_command_capacity_hint();
+        assert_eq!(seeded, hinted.min(MAX_PAGE_CONTENT_COMMAND_CAPACITY_HINT));
     }
 
     #[test]

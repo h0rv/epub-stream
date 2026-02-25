@@ -255,9 +255,21 @@ impl LayoutEngine {
         &self,
         measurer: Option<Arc<dyn TextMeasurer>>,
     ) -> LayoutSession {
+        self.start_session_with_text_measurer_and_content_capacity(measurer, 0)
+    }
+
+    pub(crate) fn start_session_with_text_measurer_and_content_capacity(
+        &self,
+        measurer: Option<Arc<dyn TextMeasurer>>,
+        page_content_command_capacity_hint: usize,
+    ) -> LayoutSession {
         LayoutSession {
             engine: self.clone(),
-            st: LayoutState::new(self.cfg, measurer),
+            st: LayoutState::new_with_page_content_capacity_hint(
+                self.cfg,
+                measurer,
+                page_content_command_capacity_hint,
+            ),
             ctx: BlockCtx::default(),
         }
     }
@@ -536,6 +548,10 @@ impl LayoutSession {
     pub fn set_chapter_index(&mut self, chapter_index: usize) {
         self.st.chapter_index = Some(chapter_index);
     }
+
+    pub(crate) fn content_command_capacity_hint(&self) -> usize {
+        self.st.content_command_capacity_hint()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -615,6 +631,7 @@ struct LayoutState {
     page_no: usize,
     cursor_y: i32,
     page: RenderPage,
+    page_content_command_capacity_hint: usize,
     line: Option<CurrentLine>,
     emitted: Vec<RenderPage>,
     in_paragraph: bool,
@@ -658,6 +675,14 @@ impl Default for LayoutState {
 
 impl LayoutState {
     fn new(cfg: LayoutConfig, text_measurer: Option<Arc<dyn TextMeasurer>>) -> Self {
+        Self::new_with_page_content_capacity_hint(cfg, text_measurer, 0)
+    }
+
+    fn new_with_page_content_capacity_hint(
+        cfg: LayoutConfig,
+        text_measurer: Option<Arc<dyn TextMeasurer>>,
+        page_content_command_capacity_hint: usize,
+    ) -> Self {
         let paragraph_word_cap = cfg.max_buffered_paragraph_words;
         let paragraph_char_cap = cfg.max_buffered_paragraph_chars;
         Self {
@@ -665,7 +690,8 @@ impl LayoutState {
             text_measurer,
             page_no: 1,
             cursor_y: cfg.margin_top,
-            page: RenderPage::new(1),
+            page: RenderPage::with_layer_capacities(1, page_content_command_capacity_hint, 0, 0),
+            page_content_command_capacity_hint,
             line: None,
             emitted: Vec::with_capacity(2),
             in_paragraph: false,
@@ -699,6 +725,17 @@ impl LayoutState {
             borrowed_page_sink: None,
             override_family: None,
         }
+    }
+
+    fn update_page_content_capacity_hint(&mut self) {
+        let observed = self.page.content_commands.capacity();
+        if observed > self.page_content_command_capacity_hint {
+            self.page_content_command_capacity_hint = observed;
+        }
+    }
+
+    fn content_command_capacity_hint(&self) -> usize {
+        self.page_content_command_capacity_hint
     }
 
     fn with_borrowed_page_sink<F, R>(&mut self, sink: &mut F, f: impl FnOnce(&mut Self) -> R) -> R
@@ -1979,7 +2016,12 @@ impl LayoutState {
             return false;
         }
         if self.borrowed_page_sink.is_none() {
-            self.page = RenderPage::new(self.page_no + 1);
+            self.page = RenderPage::with_layer_capacities(
+                self.page_no + 1,
+                self.page_content_command_capacity_hint,
+                0,
+                0,
+            );
         }
         true
     }
@@ -1990,6 +2032,7 @@ impl LayoutState {
     }
 
     fn emit_current_page_if_non_empty(&mut self) -> bool {
+        self.update_page_content_capacity_hint();
         if self.page.content_commands.is_empty()
             && self.page.chrome_commands.is_empty()
             && self.page.overlay_commands.is_empty()

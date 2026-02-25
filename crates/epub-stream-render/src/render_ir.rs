@@ -64,13 +64,22 @@ impl RenderPage {
 
     /// Create an empty page.
     pub fn new(page_number: usize) -> Self {
+        Self::with_layer_capacities(page_number, 0, 0, 0)
+    }
+
+    pub(crate) fn with_layer_capacities(
+        page_number: usize,
+        content_capacity: usize,
+        chrome_capacity: usize,
+        overlay_capacity: usize,
+    ) -> Self {
         Self {
             page_number,
             // Keep command-layer defaults lazy so empty pages avoid baseline heap traffic.
             commands: Vec::with_capacity(0),
-            content_commands: Vec::with_capacity(0),
-            chrome_commands: Vec::with_capacity(0),
-            overlay_commands: Vec::with_capacity(0),
+            content_commands: Vec::with_capacity(content_capacity),
+            chrome_commands: Vec::with_capacity(chrome_capacity),
+            overlay_commands: Vec::with_capacity(overlay_capacity),
             overlay_items: Vec::with_capacity(0),
             annotations: Vec::with_capacity(0),
             metrics: PageMetrics {
