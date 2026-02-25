@@ -1,6 +1,6 @@
 # Embedded EPUB Rendering Production Tracker
 
-Last updated: 2026-02-21
+Last updated: 2026-02-25
 
 ## Scope
 This tracker covers remaining work to make embedded rendering production-grade across:
@@ -29,7 +29,7 @@ This tracker covers remaining work to make embedded rendering production-grade a
 Known blockers in current code:
 
 - TTF backend draw path still falls back to mono rasterization for glyph drawing.
-- Image commands without registered bitmap payload still use deterministic placeholder fallback (outline or outline+label), not full source decode/raster.
+- Non-PNG unresolved image sources still use deterministic placeholder fallback (outline or outline+label); streamed decode currently covers PNG only.
 - SVG vector rasterization remains unsupported in embedded backend; current render path relies on deterministic image/alt-text fallback policy.
 - Default layout still uses heuristic width when no explicit measurer is injected.
 
@@ -50,7 +50,7 @@ Every item below must follow `docs/specs/memory-management.md`.
 ### P0 Must-Have (production blocker)
 
 - [ ] `EMB-001` Real embedded image rendering (`partial`)
-  Current: image commands can render registered monochrome bitmaps; unresolved sources fallback to explicit policy-driven placeholders (`OutlineOnly` or `OutlineWithAltText`).
+  Current: image commands can render registered monochrome bitmaps, and unresolved PNG sources can stream-decode row-by-row from EPUB ZIP resources at render time. Non-PNG unresolved sources still fallback to explicit policy-driven placeholders (`OutlineOnly` or `OutlineWithAltText`).
   Done when: decode and render core EPUB image types (PNG, JPEG, GIF, WebP where available) with deterministic scaling.
   Memory constraints: row/tile decode, bounded scratch, hard pixel and byte caps.
   Required tests: decode fixtures, pagination with images, allocation counter checks, out-of-budget failure behavior.

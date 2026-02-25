@@ -125,6 +125,33 @@ Phase notes:
 - `session_once`: cover reads + one full chapter flip pass.
 - `session`: cover reads + two full flip passes (accumulation check).
 
+Embedded phase peak targets (recommended):
+
+| Phase | Peak heap target |
+|-------|------------------|
+| `open` | `192KB` |
+| `cover` | `256KB` |
+| `tokenize` | `320KB` |
+| `render` | `384KB` |
+| `full` | `384KB` |
+| `session_once` | `448KB` |
+| `session` | `512KB` |
+
+Use per-phase checks for strict regressions:
+
+```sh
+just analysis heap-analyze budget --phase open --target 192KB
+just analysis heap-analyze budget --phase cover --target 256KB
+just analysis heap-analyze budget --phase tokenize --target 320KB
+just analysis heap-analyze budget --phase render --target 384KB
+just analysis heap-analyze budget --phase full --target 384KB
+just analysis heap-analyze budget --phase session_once --target 448KB
+just analysis heap-analyze budget --phase session --target 512KB
+```
+
+`just analysis heap-budget-all` remains the fast single-threshold guardrail
+(default `512KB`) across every phase.
+
 Or open a JSON file in the
 [DHAT viewer](https://nnethercote.github.io/dh_view/dh_view.html) for
 interactive exploration.

@@ -155,11 +155,18 @@ book.
 Images are the hardest part on constrained devices. A 480x800 grayscale PNG
 might be 384KB uncompressed — exceeding the entire free heap.
 
-**Current approach:** images flow as reference strings (`src`, `alt`,
-dimensions) through the pipeline. Pixel data is only materialized in the
-embedded-graphics `ImageRegistry` with strict slot and pixel-budget limits.
-Unregistered images fall back to deterministic placeholders (outline or
-outline+alt-text).
+**Current approach:** image references (`src`, `alt`, dimensions) flow through
+prep/layout, and rasterization is deferred to the backend. The embedded backend
+supports two bounded paths:
+
+1. Pre-registered bitmaps in `ImageRegistry` with strict slot and pixel-budget
+   limits.
+2. Streaming PNG decode (`render_page_with_streamed_images`) that reads ZIP
+   bytes under a hard cap, decodes row-by-row, and draws directly to the
+   display target.
+
+Sources that are not resolvable through those paths fall back to deterministic
+placeholders (outline or outline+alt-text).
 
 **Target architecture:** streaming decode with on-the-fly downscale, writing
 scan lines directly to the framebuffer. At any point, hold at most 2-3 rows
@@ -176,8 +183,9 @@ The library exposes image data as a `Read` stream (compressed bytes from ZIP).
 The rendering crate handles decode-to-display. Memory used: one or two row
 buffers regardless of image size.
 
-**Gap:** real streaming image decode is not yet implemented (tracked as
-`EMB-001` in the [embedded render tracker](embedded-render-tracker.md)).
+**Gap:** multi-format streaming decode is still partial. PNG is supported; JPEG,
+GIF, and WebP streamed decode paths are still tracked under `EMB-001` in the
+[embedded render tracker](embedded-render-tracker.md).
 
 ## Streaming Architecture
 
@@ -223,6 +231,19 @@ yields. The caller controls flow with the callback.
    init right after the framebuffer while heap is contiguous. They sit there
    for the app lifetime.
 
+## Intentional Internal Allocations (Allowlist)
+
+These are currently accepted internal allocations. Each one is bounded and
+either reused or confined to a non-hot path.
+
+| Path | Allocation | Lifetime | Bound / guardrail |
+|------|------------|----------|-------------------|
+| `EpubBook` resource I/O (`resource_input_scratch`, `resource_output_scratch`) | `Vec<u8>` scratch growth on first large read | Reused for book lifetime | Entry-size limits (`ZipLimits`, explicit hard caps) |
+| Embedded font metadata discovery (`embedded_fonts_cache`) | `Vec<EmbeddedFontFace>` | Built once per book, reused | `FontLimits::max_faces`, CSS/read-size limits |
+| Render prep image-dimension cache | `BTreeMap<String, Option<(u16, u16)>>` | Reused per `RenderPrep` instance | Bounded by discovered image refs and prep budgets |
+| Render-page file cache I/O (`FileRenderCacheStore`) | Temporary `Vec<u8>` serialization buffers | Per cache load/store call | `max_file_bytes` hard cap on reads and writes |
+| Structured trace mode (`RenderPrepTrace`) | Boxed style/font context per traced run | Only in trace APIs | Not used in normal render path; debug/instrumentation only |
+
 ## Audit Checklist
 
 - [ ] No `Vec::new()` / `String::new()` in any per-chapter or per-page function
@@ -234,6 +255,7 @@ yields. The caller controls flow with the callback.
 - [ ] Every `_into` method calls `.clear()` before filling
 - [ ] No per-glyph heap allocation in draw loop
 - [ ] Image pipeline streams rows, never holds full decoded image
+- [ ] Every intentional internal allocation is documented in the allowlist with explicit bounds
 
 ## Gap Analysis
 
@@ -241,7 +263,7 @@ Areas where the codebase doesn't yet fully follow these patterns:
 
 | Gap | Current state | Target | Priority |
 |-----|--------------|--------|----------|
-| Image streaming decode | Reference strings + registry with pixel-budget limits | Row-by-row decode through `ImageSink` trait | P0 (`EMB-001`) |
+| Image streaming decode | Registry-backed bitmaps + streamed PNG decode path | Multi-format streamed decode (PNG/JPEG/GIF/WebP), deterministic scaling under strict caps | P0 (`EMB-001`) |
 | TTF glyph rasterization | Falls back to mono backend | Real glyph metrics + raster from registered faces | P0 (`EMB-002`) |
 | Layout measurement parity | Heuristic width estimates | Backend-consistent measurer | P0 (`EMB-004`) |
 | Arena for parse temps | Not used | `bumpalo` if profiling shows temp fragmentation | P2 (profile first) |

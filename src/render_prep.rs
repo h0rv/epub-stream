@@ -54,7 +54,7 @@ pub struct FontLimits {
     /// Maximum number of font faces accepted.
     ///
     /// Note: the embedded-graphics TTF backend structurally limits selectable
-    /// faces to [`epub_stream_embedded_graphics::TTF_MAX_SELECTABLE_FACES`] (32)
+    /// faces to `epub_stream_embedded_graphics::TTF_MAX_SELECTABLE_FACES` (32)
     /// due to 5-bit face ID encoding. Values above this cap are clamped with a
     /// warning at backend construction time.
     pub max_faces: usize,

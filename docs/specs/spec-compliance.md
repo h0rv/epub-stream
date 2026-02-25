@@ -54,8 +54,8 @@ Status key: **done** | **partial** | **--** (not started) | **n/a** (out of scop
 | Lists (`<ul>`, `<ol>`, `<li>`)   | done    | `ListStart(ordered)`, `ListItemStart/End`, `ListEnd`     |
 | Links (`<a>`)                    | done    | `LinkStart(href)` / `LinkEnd`; no-href treated as generic |
 | Images (`<img>`)                 | done    | `Image { src, alt }`; missing src skipped                |
-| Tables                           | n/a     |                                                          |
-| SVG content documents            | n/a     |                                                          |
+| Tables                           | partial | Deterministic text fallback (row/cell linearization), not full table layout |
+| SVG content documents            | partial | SVG `<image>` href extraction to image events; vector rasterization unsupported |
 | MathML                           | n/a     |                                                          |
 | JavaScript / forms               | n/a     |                                                          |
 | Audio / video                    | n/a     |                                                          |
@@ -70,6 +70,7 @@ Status key: **done** | **partial** | **--** (not started) | **n/a** (out of scop
 | `font-style` (normal, italic)    | done    | Also `oblique` maps to italic                            |
 | `text-align`                     | done    | left, center, right, justify                             |
 | `line-height`                    | done    | px values                                                |
+| `letter-spacing`                 | done    | `normal` and px values                                   |
 | `margin-top`, `margin-bottom`    | done    | px values; `margin` shorthand (single value)             |
 | Inline styles                    | done    | `parse_inline_style()` for `style=""` attributes         |
 | Tag / class selectors            | done    | Tag, `.class`, `tag.class` selectors                     |
@@ -89,7 +90,7 @@ Status key: **done** | **partial** | **--** (not started) | **n/a** (out of scop
 | List layout                      | done    | Bullets (•) / numbered (1. 2. 3.), nested indentation    |
 | Image placeholders               | done    | `[Image: alt]` or `[Image]` placeholder text             |
 | Link rendering                   | done    | Text flows normally; link tokens are informational       |
-| Page map persistence             | --      |                                                          |
+| Page map persistence             | done    | `RenderBookPageMap` + bounded file-backed cache store hooks |
 | Fixed layouts                    | n/a     |                                                          |
 | Spreads (two-page view)          | n/a     |                                                          |
 | Bidirectional text (RTL)         | --      | Behind `epub_full` flag                                  |
@@ -107,7 +108,7 @@ Status key: **done** | **partial** | **--** (not started) | **n/a** (out of scop
 | Feature                          | Status  | Notes                                          |
 |----------------------------------|---------|-------------------------------------------------|
 | Built-in fonts                   | partial | Mono backend default; TTF registration + metrics available |
-| User fonts from storage           | partial | Size cap ~200KB; registration API exists       |
+| User fonts from storage          | partial | Registration API + configurable `FontLimits` caps (`max_bytes_per_font`, `max_total_font_bytes`) |
 | Embedded fonts from EPUB         | partial | `@font-face` discovery + bounded loading       |
 | Font fallback chain              | partial | Reason codes exist; draw falls back to mono    |
 | Complex script shaping           | --      | Behind `epub_full` flag                        |

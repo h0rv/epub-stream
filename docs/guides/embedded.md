@@ -42,6 +42,31 @@ book.read_resource_into_with_limit("xhtml/nav.xhtml", &mut out, 1024 * 1024)?;
 # Ok::<(), epub_stream::EpubError>(())
 ```
 
+## Bounded Cover Discovery and Reads
+
+```rust,no_run
+use epub_stream::{CoverImageOptions, EpubBook, ImageReadOptions};
+
+let mut book = EpubBook::open("book.epub")?;
+let mut cover_bytes = Vec::new();
+let cover = book.read_cover_image_into_with_options(
+    &mut cover_bytes,
+    CoverImageOptions {
+        image: ImageReadOptions {
+            max_bytes: 1024 * 1024,
+            allow_svg: false,
+            allow_unknown_images: false,
+        },
+        max_cover_document_bytes: 128 * 1024,
+        ..CoverImageOptions::default()
+    },
+)?;
+if let Some(cover_ref) = cover {
+    let _ = (cover_ref.source, cover_bytes.len());
+}
+# Ok::<(), epub_stream::EpubError>(())
+```
+
 ## Stream Chapter Events
 
 ```rust,no_run
@@ -107,6 +132,35 @@ let opts = RenderEngineOptions {
 };
 
 let _engine = RenderEngine::new(opts);
+```
+
+## Streamed PNG Rendering Path
+
+```rust,no_run
+use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor};
+use epub_stream::EpubBook;
+use epub_stream_embedded_graphics::{EgRenderer, StreamedImageOptions};
+use epub_stream_render::{RenderEngine, RenderEngineOptions};
+
+let mut book = EpubBook::open("book.epub")?;
+let engine = RenderEngine::new(RenderEngineOptions::for_display(480, 800));
+let pages = engine.page_range(&mut book, 0, 0..1)?;
+
+let renderer = EgRenderer::default();
+let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
+if let Some(page) = pages.first() {
+    let streamed = renderer.render_page_with_streamed_images(
+        &mut book,
+        page,
+        &mut display,
+        StreamedImageOptions {
+            max_image_bytes: 2 * 1024 * 1024,
+            decode_png: true,
+        },
+    )?;
+    let _decoded_png = streamed.decoded_png;
+}
+# Ok::<(), core::convert::Infallible>(())
 ```
 
 ## Embedded Renderer Diagnostics
