@@ -13,6 +13,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 
 use crate::book::EpubBook;
 use crate::css::{
@@ -648,7 +649,20 @@ impl Styler {
     where
         F: FnMut(StyledEventOrRun),
     {
-        let mut reader = Reader::from_reader(html_bytes);
+        self.style_chapter_reader_with(html_bytes, &mut on_item)
+    }
+
+    /// Style a chapter from a streaming reader and emit each item.
+    pub fn style_chapter_reader_with<Rd, F>(
+        &self,
+        html_reader: Rd,
+        mut on_item: F,
+    ) -> Result<(), RenderPrepError>
+    where
+        Rd: BufRead,
+        F: FnMut(StyledEventOrRun),
+    {
+        let mut reader = Reader::from_reader(html_reader);
         reader.config_mut().trim_text(false);
         let mut buf = Vec::with_capacity(8);
         let mut stack: Vec<ElementCtx> = Vec::with_capacity(8);
@@ -1506,40 +1520,118 @@ impl RenderPrep {
         Ok(self)
     }
 
-    fn load_chapter_html_with_budget<R: std::io::Read + std::io::Seek>(
+    fn map_chapter_read_error(
         &self,
-        book: &mut EpubBook<R>,
-        index: usize,
-    ) -> Result<(String, Vec<u8>), RenderPrepError> {
-        let chapter = book.chapter(index).map_err(|e| {
-            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
-                .with_chapter_index(index)
-        })?;
-        let href = chapter.href;
-        let bytes = book.read_resource(&href).map_err(|e| {
-            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_HTML", e.to_string())
-                .with_path(href.clone())
-                .with_chapter_index(index)
-        })?;
-        if bytes.len() > self.opts.memory.max_entry_bytes {
-            return Err(RenderPrepError::new_with_phase(
+        chapter_href: &str,
+        chapter_index: usize,
+        err: EpubError,
+    ) -> RenderPrepError {
+        match err {
+            EpubError::Zip(ZipError::FileTooLarge) | EpubError::LimitExceeded { .. } => {
+                RenderPrepError::new_with_phase(
+                    ErrorPhase::Parse,
+                    "ENTRY_BYTES_LIMIT",
+                    format!(
+                        "Chapter entry exceeds max_entry_bytes (> {})",
+                        self.opts.memory.max_entry_bytes
+                    ),
+                )
+                .with_path(chapter_href.to_string())
+                .with_chapter_index(chapter_index)
+                .with_limit(
+                    "max_entry_bytes",
+                    self.opts.memory.max_entry_bytes.saturating_add(1),
+                    self.opts.memory.max_entry_bytes,
+                )
+            }
+            other => RenderPrepError::new_with_phase(
                 ErrorPhase::Parse,
-                "ENTRY_BYTES_LIMIT",
-                format!(
-                    "Chapter entry exceeds max_entry_bytes ({} > {})",
-                    bytes.len(),
-                    self.opts.memory.max_entry_bytes
-                ),
+                "BOOK_CHAPTER_HTML",
+                other.to_string(),
             )
-            .with_path(href.clone())
-            .with_chapter_index(index)
-            .with_limit(
-                "max_entry_bytes",
-                bytes.len(),
-                self.opts.memory.max_entry_bytes,
-            ));
+            .with_path(chapter_href.to_string())
+            .with_chapter_index(chapter_index),
         }
-        Ok((href, bytes))
+    }
+
+    fn open_chapter_reader_with_budget<'a, R: std::io::Read + std::io::Seek>(
+        &self,
+        book: &'a mut EpubBook<R>,
+        chapter_href: &str,
+        chapter_index: usize,
+    ) -> Result<BufReader<crate::zip::ZipEntryReader<'a, R>>, RenderPrepError> {
+        book.open_resource_reader_with_hard_cap(chapter_href, self.opts.memory.max_entry_bytes)
+            .map(BufReader::new)
+            .map_err(|err| self.map_chapter_read_error(chapter_href, chapter_index, err))
+    }
+
+    fn scan_chapter_assets_from_reader<Rd: BufRead>(
+        &self,
+        chapter_href: &str,
+        reader: Rd,
+    ) -> Result<(Vec<String>, Vec<String>), RenderPrepError> {
+        let mut xml = Reader::from_reader(reader);
+        xml.config_mut().trim_text(true);
+        let mut buf = Vec::with_capacity(8);
+        let mut stylesheet_links = Vec::with_capacity(8);
+        let mut image_sources = Vec::with_capacity(8);
+
+        loop {
+            match xml.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let name = e.name();
+                    let local = local_name_bytes(name.as_ref());
+                    if local.eq_ignore_ascii_case(b"link") {
+                        let mut href_raw: Option<Vec<u8>> = None;
+                        let mut rel_is_stylesheet = false;
+                        for attr in e.attributes().flatten() {
+                            if attr_key_matches(attr.key.as_ref(), b"href") {
+                                href_raw = Some(attr.value.as_ref().to_vec());
+                            } else if attr_key_matches(attr.key.as_ref(), b"rel") {
+                                rel_is_stylesheet = value_has_token_ignore_ascii_case(
+                                    attr.value.as_ref(),
+                                    b"stylesheet",
+                                );
+                            }
+                        }
+                        if rel_is_stylesheet {
+                            if let Some(href_raw) = href_raw {
+                                if let Ok(href) = xml.decoder().decode(href_raw.as_slice()) {
+                                    if !href.is_empty() {
+                                        stylesheet_links
+                                            .push(resolve_relative(chapter_href, href.as_ref()));
+                                    }
+                                }
+                            }
+                        }
+                    } else if local.eq_ignore_ascii_case(b"img")
+                        || local.eq_ignore_ascii_case(b"image")
+                    {
+                        if let Some(src) = image_src_from_start(&xml, true, &e) {
+                            image_sources.push(resolve_relative(chapter_href, &src));
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(RenderPrepError::new(
+                        "STYLE_TOKENIZE_ERROR",
+                        format!("XML error: {:?}", err),
+                    )
+                    .with_phase(ErrorPhase::Style)
+                    .with_source("xml tokenizer")
+                    .with_token_offset(reader_token_offset(&xml)));
+                }
+            }
+            buf.clear();
+        }
+
+        stylesheet_links.sort_unstable();
+        stylesheet_links.dedup();
+        image_sources.sort_unstable();
+        image_sources.dedup();
+        Ok((stylesheet_links, image_sources))
     }
 
     fn apply_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
@@ -1568,22 +1660,32 @@ impl RenderPrep {
         scratch_buf: &mut Vec<u8>,
     ) -> Result<(), RenderPrepError> {
         let links = parse_stylesheet_links_bytes(chapter_href, html);
+        self.apply_stylesheet_links_with_budget_scratch(book, chapter_index, &links, scratch_buf)
+    }
+
+    fn apply_stylesheet_links_with_budget_scratch<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        links: &[String],
+        scratch_buf: &mut Vec<u8>,
+    ) -> Result<(), RenderPrepError> {
         self.styler.clear_stylesheets();
         let css_limit = min(
             self.opts.style.limits.max_css_bytes,
             self.opts.memory.max_css_bytes,
         );
         scratch_buf.clear();
-        for href in links {
+        for href in links.iter() {
             scratch_buf.clear();
-            book.read_resource_into_with_hard_cap(&href, scratch_buf, css_limit)
+            book.read_resource_into_with_hard_cap(href, scratch_buf, css_limit)
                 .map_err(|e| {
                     RenderPrepError::new_with_phase(
                         ErrorPhase::Parse,
                         "BOOK_CHAPTER_STYLESHEET_READ",
                         e.to_string(),
                     )
-                    .with_path(href.clone())
+                    .with_path(href.to_string())
                     .with_chapter_index(chapter_index)
                 })?;
             if scratch_buf.len() > css_limit {
@@ -1596,7 +1698,7 @@ impl RenderPrep {
                         css_limit
                     ),
                 )
-                .with_path(href.clone())
+                .with_path(href.to_string())
                 .with_chapter_index(chapter_index)
                 .with_limit("max_css_bytes", scratch_buf.len(), css_limit));
             }
@@ -1606,11 +1708,11 @@ impl RenderPrep {
                     "STYLE_CSS_NOT_UTF8",
                     format!("Stylesheet is not UTF-8: {}", href),
                 )
-                .with_path(href.clone())
+                .with_path(href.to_string())
                 .with_chapter_index(chapter_index)
             })?;
             self.styler
-                .push_stylesheet_source(&href, css)
+                .push_stylesheet_source(href, css)
                 .map_err(|e| e.with_chapter_index(chapter_index))?;
         }
         Ok(())
@@ -1626,12 +1728,21 @@ impl RenderPrep {
         #[allow(clippy::disallowed_methods)]
         let mut out = BTreeMap::new(); // allow: per-chapter dimension lookup, bounded by image count
         let sources = collect_image_sources_from_html(chapter_href, html);
-        for src in sources {
-            if let Some((w, h)) = self.resolve_intrinsic_image_dimensions(book, &src) {
-                out.insert(resource_path_without_fragment(&src).to_string(), (w, h));
+        self.collect_intrinsic_image_dimensions_from_sources(book, &sources, &mut out);
+        out
+    }
+
+    fn collect_intrinsic_image_dimensions_from_sources<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        book: &mut EpubBook<R>,
+        sources: &[String],
+        out: &mut BTreeMap<String, (u16, u16)>,
+    ) {
+        for src in sources.iter() {
+            if let Some((w, h)) = self.resolve_intrinsic_image_dimensions(book, src) {
+                out.insert(resource_path_without_fragment(src).to_string(), (w, h));
             }
         }
-        out
     }
 
     fn resolve_intrinsic_image_dimensions<R: std::io::Read + std::io::Seek>(
@@ -1731,13 +1842,32 @@ impl RenderPrep {
         index: usize,
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
-        let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
-        self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
-        let image_dimensions =
-            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), &html);
+        let chapter = book.chapter(index).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
+                .with_chapter_index(index)
+        })?;
+        let chapter_href = chapter.href;
+        let (stylesheet_links, image_sources) = {
+            let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+            self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+        };
+        let mut stylesheet_scratch = Vec::with_capacity(8);
+        self.apply_stylesheet_links_with_budget_scratch(
+            book,
+            index,
+            &stylesheet_links,
+            &mut stylesheet_scratch,
+        )?;
+        let mut image_dimensions = BTreeMap::new();
+        self.collect_intrinsic_image_dimensions_from_sources(
+            book,
+            &image_sources,
+            &mut image_dimensions,
+        );
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
-        self.styler.style_chapter_bytes_with(&html, |item| {
+        let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+        self.styler.style_chapter_reader_with(reader, |item| {
             let item =
                 resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
             let item = resolve_item_with_font(font_resolver, item);
@@ -1860,13 +1990,32 @@ impl RenderPrep {
         index: usize,
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
-        let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
-        self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
-        let image_dimensions =
-            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), &html);
+        let chapter = book.chapter(index).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
+                .with_chapter_index(index)
+        })?;
+        let chapter_href = chapter.href;
+        let (stylesheet_links, image_sources) = {
+            let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+            self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+        };
+        let mut stylesheet_scratch = Vec::with_capacity(8);
+        self.apply_stylesheet_links_with_budget_scratch(
+            book,
+            index,
+            &stylesheet_links,
+            &mut stylesheet_scratch,
+        )?;
+        let mut image_dimensions = BTreeMap::new();
+        self.collect_intrinsic_image_dimensions_from_sources(
+            book,
+            &image_sources,
+            &mut image_dimensions,
+        );
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
-        self.styler.style_chapter_bytes_with(&html, |item| {
+        let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+        self.styler.style_chapter_reader_with(reader, |item| {
             let item =
                 resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
             let (item, trace) = resolve_item_with_font_trace(font_resolver, item);
@@ -1923,7 +2072,7 @@ struct ElementCtx {
     img_height_px: Option<u16>,
 }
 
-fn reader_token_offset(reader: &Reader<&[u8]>) -> usize {
+fn reader_token_offset<Rd: BufRead>(reader: &Reader<Rd>) -> usize {
     usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX)
 }
 
@@ -1943,7 +2092,10 @@ fn attr_key_matches(raw: &[u8], expected: &[u8]) -> bool {
     local_name_bytes(raw).eq_ignore_ascii_case(expected)
 }
 
-fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderPrepError> {
+fn decode_tag_name<Rd: BufRead>(
+    reader: &Reader<Rd>,
+    raw: &[u8],
+) -> Result<String, RenderPrepError> {
     let decoded = reader.decoder().decode(raw).map_err(|err| {
         RenderPrepError::new_with_phase(
             ErrorPhase::Style,
@@ -1958,7 +2110,7 @@ fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderP
 }
 
 fn element_ctx_from_start(
-    reader: &Reader<&[u8]>,
+    reader: &Reader<impl BufRead>,
     e: &quick_xml::events::BytesStart<'_>,
     tag: String,
     max_inline_style_bytes: usize,
@@ -2383,7 +2535,7 @@ fn collect_image_sources_from_html(chapter_href: &str, html: &[u8]) -> Vec<Strin
 }
 
 fn image_src_from_start(
-    reader: &Reader<&[u8]>,
+    reader: &Reader<impl BufRead>,
     image_tag: bool,
     start: &quick_xml::events::BytesStart<'_>,
 ) -> Option<String> {
