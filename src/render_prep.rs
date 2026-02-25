@@ -711,13 +711,11 @@ impl Styler {
                                     self.resolve_context_style(&stack);
                                 let style =
                                     self.compute_style(&resolved, role, bold_tag, italic_tag);
-                                emit_styled_item(
+                                emit_styled_run_text(
                                     &mut pending_run,
-                                    StyledEventOrRun::Run(StyledRun {
-                                        text: " | ".to_string(),
-                                        style,
-                                        font_id: 0,
-                                    }),
+                                    Cow::Borrowed(" | "),
+                                    style,
+                                    0,
                                     &mut on_item,
                                 );
                             }
@@ -765,13 +763,11 @@ impl Styler {
                                     self.resolve_context_style(&stack);
                                 let style =
                                     self.compute_style(&resolved, role, bold_tag, italic_tag);
-                                emit_styled_item(
+                                emit_styled_run_text(
                                     &mut pending_run,
-                                    StyledEventOrRun::Run(StyledRun {
-                                        text: " | ".to_string(),
-                                        style,
-                                        font_id: 0,
-                                    }),
+                                    Cow::Borrowed(" | "),
+                                    style,
+                                    0,
                                     &mut on_item,
                                 );
                             }
@@ -839,15 +835,7 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
-                    emit_styled_item(
-                        &mut pending_run,
-                        StyledEventOrRun::Run(StyledRun {
-                            text: normalized.into_owned(),
-                            style,
-                            font_id: 0,
-                        }),
-                        &mut on_item,
-                    );
+                    emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::CData(e)) => {
                     if skip_depth > 0 {
@@ -871,15 +859,7 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
-                    emit_styled_item(
-                        &mut pending_run,
-                        StyledEventOrRun::Run(StyledRun {
-                            text: normalized.into_owned(),
-                            style,
-                            font_id: 0,
-                        }),
-                        &mut on_item,
-                    );
+                    emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::GeneralRef(e)) => {
                     if skip_depth > 0 {
@@ -918,15 +898,7 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
-                    emit_styled_item(
-                        &mut pending_run,
-                        StyledEventOrRun::Run(StyledRun {
-                            text: normalized.into_owned(),
-                            style,
-                            font_id: 0,
-                        }),
-                        &mut on_item,
-                    );
+                    emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::Eof) => break,
                 Ok(_) => {}
@@ -2106,7 +2078,7 @@ impl PreparedChapter {
 #[derive(Clone, Debug, Default)]
 struct ElementCtx {
     tag: String,
-    classes: Vec<String>,
+    classes: SmallVec<[String; 4]>,
     inline_style: Option<CssStyle>,
     img_src: Option<String>,
     img_alt: Option<String>,
@@ -2157,7 +2129,7 @@ fn element_ctx_from_start(
     tag: String,
     max_inline_style_bytes: usize,
 ) -> Result<ElementCtx, RenderPrepError> {
-    let mut classes = Vec::with_capacity(8);
+    let mut classes = SmallVec::<[String; 4]>::with_capacity(4);
     let mut inline_style = None;
     let mut img_src: Option<String> = None;
     let mut img_alt: Option<String> = None;
@@ -2435,30 +2407,47 @@ fn flush_pending_run<F: FnMut(StyledEventOrRun)>(
     }
 }
 
+fn emit_styled_run_text<F: FnMut(StyledEventOrRun)>(
+    pending_run: &mut Option<StyledRun>,
+    text: Cow<'_, str>,
+    style: ComputedTextStyle,
+    font_id: u32,
+    on_item: &mut F,
+) {
+    if let Some(prev) = pending_run.as_mut() {
+        let next_text = text.as_ref();
+        let keep_separate = prev.text == " | " || next_text == " | ";
+        if prev.style == style && !keep_separate {
+            if !next_text.is_empty() {
+                if !prev.text.is_empty() && !matches!(style.block_role, BlockRole::Preformatted) {
+                    prev.text.push(' ');
+                }
+                prev.text.push_str(next_text);
+            }
+            return;
+        }
+    }
+    flush_pending_run(pending_run, on_item);
+    *pending_run = Some(StyledRun {
+        text: text.into_owned(),
+        style,
+        font_id,
+    });
+}
+
 fn emit_styled_item<F: FnMut(StyledEventOrRun)>(
     pending_run: &mut Option<StyledRun>,
     item: StyledEventOrRun,
     on_item: &mut F,
 ) {
     match item {
-        StyledEventOrRun::Run(run) => {
-            if let Some(prev) = pending_run.as_mut() {
-                let keep_separate = prev.text == " | " || run.text == " | ";
-                if prev.style == run.style && !keep_separate {
-                    if !run.text.is_empty() {
-                        if !prev.text.is_empty()
-                            && !matches!(run.style.block_role, BlockRole::Preformatted)
-                        {
-                            prev.text.push(' ');
-                        }
-                        prev.text.push_str(&run.text);
-                    }
-                    return;
-                }
-            }
-            flush_pending_run(pending_run, on_item);
-            *pending_run = Some(run);
-        }
+        StyledEventOrRun::Run(run) => emit_styled_run_text(
+            pending_run,
+            Cow::Owned(run.text),
+            run.style,
+            run.font_id,
+            on_item,
+        ),
         other => {
             flush_pending_run(pending_run, on_item);
             on_item(other);

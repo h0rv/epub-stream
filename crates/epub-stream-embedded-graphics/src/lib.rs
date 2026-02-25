@@ -793,12 +793,18 @@ impl MonoFontBackend {
     }
 
     fn family_supported(family: &str) -> bool {
-        let f = family.trim();
-        f.eq_ignore_ascii_case("monospace")
-            || f.eq_ignore_ascii_case("mono")
-            || f.eq_ignore_ascii_case("fixed")
-            || f.eq_ignore_ascii_case("serif")
-            || f.eq_ignore_ascii_case("sans-serif")
+        let f = family
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .as_bytes();
+        match f.len() {
+            4 => eq_ascii_token(f, b"mono"),
+            5 => eq_ascii_token(f, b"fixed") || eq_ascii_token(f, b"serif"),
+            9 => eq_ascii_token(f, b"monospace"),
+            10 => eq_ascii_token(f, b"sans-serif"),
+            _ => false,
+        }
     }
 
     fn base_selections() -> &'static [FontSelection; 16] {
@@ -821,6 +827,14 @@ impl MonoFontBackend {
             table
         })
     }
+}
+
+fn eq_ascii_token(value: &[u8], expected: &[u8]) -> bool {
+    value.len() == expected.len()
+        && value
+            .iter()
+            .zip(expected.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 impl FontBackend for MonoFontBackend {
@@ -2783,14 +2797,21 @@ fn truncate_ascii_with_ellipsis(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::with_capacity(32);
     }
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
         return text.into(); // allow: no-op path, avoids char iteration
     }
     if max_chars <= 3 {
         return ".".repeat(max_chars);
     }
-    let mut out: String = chars[..(max_chars - 3)].iter().collect();
+    let keep_chars = max_chars - 3;
+    let cutoff = text
+        .char_indices()
+        .nth(keep_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    let mut out = String::with_capacity(cutoff + 3);
+    out.push_str(&text[..cutoff]);
     out.push_str("...");
     out
 }

@@ -58,6 +58,10 @@ pub struct RenderPage {
 }
 
 impl RenderPage {
+    const INITIAL_CONTENT_COMMAND_CAPACITY: usize = 8;
+    const INITIAL_CHROME_COMMAND_CAPACITY: usize = 2;
+    const INITIAL_OVERLAY_COMMAND_CAPACITY: usize = 2;
+
     /// Create an empty page.
     pub fn new(page_number: usize) -> Self {
         Self {
@@ -93,16 +97,28 @@ impl RenderPage {
 
     /// Push a content-layer command.
     pub fn push_content_command(&mut self, cmd: DrawCommand) {
+        if self.content_commands.capacity() == 0 {
+            self.content_commands
+                .reserve(Self::INITIAL_CONTENT_COMMAND_CAPACITY);
+        }
         self.content_commands.push(cmd);
     }
 
     /// Push a chrome-layer command.
     pub fn push_chrome_command(&mut self, cmd: DrawCommand) {
+        if self.chrome_commands.capacity() == 0 {
+            self.chrome_commands
+                .reserve(Self::INITIAL_CHROME_COMMAND_CAPACITY);
+        }
         self.chrome_commands.push(cmd);
     }
 
     /// Push an overlay-layer command.
     pub fn push_overlay_command(&mut self, cmd: DrawCommand) {
+        if self.overlay_commands.capacity() == 0 {
+            self.overlay_commands
+                .reserve(Self::INITIAL_OVERLAY_COMMAND_CAPACITY);
+        }
         self.overlay_commands.push(cmd);
     }
 
