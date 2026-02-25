@@ -27,14 +27,17 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
+use epub_stream::EpubBook;
 use epub_stream_render::{
     DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeConfig,
     PageChromeKind, PageChromeTextStyle, RenderConfig, RenderPage, ResolvedTextStyle, TextCommand,
 };
+use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use std::borrow::Cow;
+use std::convert::Infallible;
 #[cfg(feature = "ttf-backend")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Backend-local font identifier used for metrics and rasterization dispatch.
 pub type FontId = u8;
@@ -223,6 +226,182 @@ impl EgRenderDiagnostics {
     fn note_text_fallback(&mut self, reason: FontFallbackReason) {
         self.text_fallbacks.note_reason(reason);
     }
+}
+
+/// Error returned when constructing a packed framebuffer target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedFrameBufferError {
+    BufferTooSmall,
+    InvalidStride,
+}
+
+/// Borrowed 1bpp framebuffer draw target (MSB-first per byte).
+///
+/// This is intended for embedded displays that expose a caller-owned packed
+/// framebuffer: render commands draw directly into `bytes`.
+pub struct PackedBinaryFrameBuffer<'a> {
+    width: u32,
+    height: u32,
+    stride_bytes: usize,
+    bytes: &'a mut [u8],
+}
+
+impl<'a> PackedBinaryFrameBuffer<'a> {
+    /// Create a tightly-packed framebuffer (`stride = ceil(width / 8)`).
+    pub fn new(
+        width: u32,
+        height: u32,
+        bytes: &'a mut [u8],
+    ) -> Result<Self, PackedFrameBufferError> {
+        let stride_bytes = (width as usize).div_ceil(8);
+        Self::with_stride(width, height, stride_bytes, bytes)
+    }
+
+    /// Create a framebuffer with explicit stride in bytes.
+    pub fn with_stride(
+        width: u32,
+        height: u32,
+        stride_bytes: usize,
+        bytes: &'a mut [u8],
+    ) -> Result<Self, PackedFrameBufferError> {
+        let min_stride = (width as usize).div_ceil(8);
+        if stride_bytes < min_stride {
+            return Err(PackedFrameBufferError::InvalidStride);
+        }
+        let required = stride_bytes
+            .checked_mul(height as usize)
+            .ok_or(PackedFrameBufferError::BufferTooSmall)?;
+        if bytes.len() < required {
+            return Err(PackedFrameBufferError::BufferTooSmall);
+        }
+        Ok(Self {
+            width,
+            height,
+            stride_bytes,
+            bytes,
+        })
+    }
+
+    /// Backing packed bytes (mutable).
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        self.bytes
+    }
+
+    /// Backing packed bytes (immutable).
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes
+    }
+
+    /// Row stride in bytes.
+    pub fn stride_bytes(&self) -> usize {
+        self.stride_bytes
+    }
+}
+
+impl OriginDimensions for PackedBinaryFrameBuffer<'_> {
+    fn size(&self) -> Size {
+        Size::new(self.width, self.height)
+    }
+}
+
+impl DrawTarget for PackedBinaryFrameBuffer<'_> {
+    type Color = BinaryColor;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(point, color) in pixels {
+            if point.x < 0 || point.y < 0 {
+                continue;
+            }
+            let x = point.x as u32;
+            let y = point.y as u32;
+            if x >= self.width || y >= self.height {
+                continue;
+            }
+
+            let byte_idx = y as usize * self.stride_bytes + (x as usize / 8);
+            let bit = 7 - (x as usize % 8);
+            let mask = 1u8 << bit;
+            match color {
+                BinaryColor::On => self.bytes[byte_idx] |= mask,
+                BinaryColor::Off => self.bytes[byte_idx] &= !mask,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Options for streaming image decode during render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamedImageOptions {
+    /// Hard cap applied to compressed resource bytes pulled from the EPUB.
+    pub max_image_bytes: usize,
+    /// Enable PNG streaming decode path.
+    pub decode_png: bool,
+}
+
+impl Default for StreamedImageOptions {
+    fn default() -> Self {
+        Self {
+            max_image_bytes: 4 * 1024 * 1024,
+            decode_png: true,
+        }
+    }
+}
+
+/// Per-page diagnostics for streamed image rendering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamedImageDiagnostics {
+    pub attempted: u64,
+    pub decoded_png: u64,
+    pub decode_failures: u64,
+    pub unsupported_sources: u64,
+    pub resource_errors: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamedImageOutcome {
+    Drawn,
+    ResourceError,
+    DecodeFailure,
+    UnsupportedFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PngColorType {
+    Grayscale,
+    Rgb,
+    Indexed,
+    GrayscaleAlpha,
+    Rgba,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PngHeader {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: PngColorType,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PngDecodeError {
+    InvalidSignature,
+    InvalidChunk,
+    MissingHeader,
+    MissingImageData,
+    UnsupportedFormat,
+    DimensionOverflow,
+    DecodeFailed,
+}
+
+#[derive(Debug)]
+enum PngStreamRowsError<E> {
+    Decode(PngDecodeError),
+    Draw(E),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -614,10 +793,33 @@ impl MonoFontBackend {
     }
 
     fn family_supported(family: &str) -> bool {
-        matches!(
-            family.trim().to_ascii_lowercase().as_str(),
-            "monospace" | "mono" | "fixed" | "serif" | "sans-serif"
-        )
+        let f = family.trim();
+        f.eq_ignore_ascii_case("monospace")
+            || f.eq_ignore_ascii_case("mono")
+            || f.eq_ignore_ascii_case("fixed")
+            || f.eq_ignore_ascii_case("serif")
+            || f.eq_ignore_ascii_case("sans-serif")
+    }
+
+    fn base_selections() -> &'static [FontSelection; 16] {
+        static TABLE: OnceLock<[FontSelection; 16]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut table = [FontSelection {
+                font_id: 0,
+                fallback_reason: None,
+            }; 16];
+            for size in 0..4u8 {
+                for variant in 0..4u8 {
+                    let id = Self::encode_font_id(size, variant);
+                    let (_, style_fallback) = Self::font_for(id);
+                    table[id as usize] = FontSelection {
+                        font_id: id,
+                        fallback_reason: style_fallback,
+                    };
+                }
+            }
+            table
+        })
     }
 }
 
@@ -627,23 +829,25 @@ impl FontBackend for MonoFontBackend {
     }
 
     fn resolve_font(&self, style: &ResolvedTextStyle, font_id: Option<u32>) -> FontSelection {
-        let mut fallback_reason =
-            (!Self::family_supported(&style.family)).then_some(FontFallbackReason::UnknownFamily);
-
-        if font_id.is_some_and(|id| id > u8::MAX as u32) {
-            fallback_reason = Some(FontFallbackReason::UnknownFontId);
-        }
-
-        let mapped_by_style =
+        let mapped_id =
             Self::encode_font_id(Self::size_bucket_for(style), Self::style_variant_for(style));
-        let (_, style_fallback) = Self::font_for(mapped_by_style);
-        if style_fallback.is_some() {
-            fallback_reason = style_fallback;
-        }
+        let base = Self::base_selections()[mapped_id as usize];
 
-        FontSelection {
-            font_id: mapped_by_style,
-            fallback_reason,
+        let family_unsupported = !Self::family_supported(&style.family);
+        let id_out_of_range = font_id.is_some_and(|id| id > u8::MAX as u32);
+
+        if family_unsupported {
+            FontSelection {
+                fallback_reason: Some(FontFallbackReason::UnknownFamily),
+                ..base
+            }
+        } else if id_out_of_range {
+            FontSelection {
+                fallback_reason: Some(FontFallbackReason::UnknownFontId),
+                ..base
+            }
+        } else {
+            base
         }
     }
 
@@ -1300,6 +1504,59 @@ where
         Ok(diagnostics)
     }
 
+    /// Render a page while streaming image payloads from EPUB resources.
+    ///
+    /// This path avoids materializing whole image resources in memory for
+    /// supported formats (currently PNG). Image bytes are streamed from ZIP,
+    /// decoded row-by-row, and drawn directly into the caller display target.
+    pub fn render_page_with_streamed_images<R, D>(
+        &self,
+        book: &mut EpubBook<R>,
+        page: &RenderPage,
+        display: &mut D,
+        options: StreamedImageOptions,
+    ) -> Result<StreamedImageDiagnostics, D::Error>
+    where
+        R: std::io::Read + std::io::Seek,
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let mut diagnostics = StreamedImageDiagnostics::default();
+        if self.cfg.clear_first {
+            display.clear(BinaryColor::Off)?;
+        }
+        if let Some([content, chrome, overlay]) = Self::split_command_layers(page) {
+            for cmd in content {
+                self.draw_command_with_streamed_images(
+                    book,
+                    display,
+                    cmd,
+                    options,
+                    &mut diagnostics,
+                )?;
+            }
+            for cmd in chrome.iter().chain(overlay.iter()) {
+                self.draw_command(display, cmd)?;
+            }
+            return Ok(diagnostics);
+        }
+
+        for cmd in page
+            .commands
+            .iter()
+            .filter(|cmd| !matches!(cmd, DrawCommand::PageChrome(_)))
+        {
+            self.draw_command_with_streamed_images(book, display, cmd, options, &mut diagnostics)?;
+        }
+        for cmd in page
+            .commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DrawCommand::PageChrome(_)))
+        {
+            self.draw_command(display, cmd)?;
+        }
+        Ok(diagnostics)
+    }
+
     fn split_command_layers(page: &RenderPage) -> Option<[&[DrawCommand]; 3]> {
         if page.content_commands.is_empty()
             && page.chrome_commands.is_empty()
@@ -1485,6 +1742,144 @@ where
             self.draw_command_with_diagnostics(display, cmd, diagnostics)?;
         }
         Ok(())
+    }
+
+    fn draw_command_with_streamed_images<R, D>(
+        &self,
+        book: &mut EpubBook<R>,
+        display: &mut D,
+        cmd: &DrawCommand,
+        options: StreamedImageOptions,
+        diagnostics: &mut StreamedImageDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        R: std::io::Read + std::io::Seek,
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        match cmd {
+            DrawCommand::ImageObject(image) => {
+                self.draw_image_with_streamed_source(book, display, image, options, diagnostics)
+            }
+            _ => self.draw_command(display, cmd),
+        }
+    }
+
+    fn draw_image_with_streamed_source<R, D>(
+        &self,
+        book: &mut EpubBook<R>,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        options: StreamedImageOptions,
+        diagnostics: &mut StreamedImageDiagnostics,
+    ) -> Result<(), D::Error>
+    where
+        R: std::io::Read + std::io::Seek,
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        if let Some(bitmap) = self.images.bitmap_for(&image.src) {
+            return self.draw_registered_bitmap(display, image, bitmap);
+        }
+
+        diagnostics.attempted = diagnostics.attempted.saturating_add(1);
+        if options.decode_png && source_is_png(&image.src) {
+            match self.draw_png_streamed_from_book(book, display, image, options.max_image_bytes)? {
+                StreamedImageOutcome::Drawn => {
+                    diagnostics.decoded_png = diagnostics.decoded_png.saturating_add(1);
+                    return Ok(());
+                }
+                StreamedImageOutcome::ResourceError => {
+                    diagnostics.resource_errors = diagnostics.resource_errors.saturating_add(1);
+                }
+                StreamedImageOutcome::DecodeFailure => {
+                    diagnostics.decode_failures = diagnostics.decode_failures.saturating_add(1);
+                }
+                StreamedImageOutcome::UnsupportedFormat => {
+                    diagnostics.unsupported_sources =
+                        diagnostics.unsupported_sources.saturating_add(1);
+                }
+            }
+        } else {
+            diagnostics.unsupported_sources = diagnostics.unsupported_sources.saturating_add(1);
+        }
+
+        self.draw_image_fallback(display, image)
+    }
+
+    fn draw_png_streamed_from_book<R, D>(
+        &self,
+        book: &mut EpubBook<R>,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        max_image_bytes: usize,
+    ) -> Result<StreamedImageOutcome, D::Error>
+    where
+        R: std::io::Read + std::io::Seek,
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let mut resource_reader =
+            match book.open_resource_reader_with_hard_cap(&image.src, max_image_bytes) {
+                Ok(reader) => reader,
+                Err(_) => return Ok(StreamedImageOutcome::ResourceError),
+            };
+
+        let mut saw_row = false;
+        let mut src_h = 0u32;
+        let mut target_w = 0u32;
+        let mut target_h = 0u32;
+        let mut origin_x = 0i32;
+        let mut origin_y = 0i32;
+        let mut dst_row = 0u32;
+
+        let decode_result = decode_png_rows_streaming(
+            &mut resource_reader,
+            max_image_bytes,
+            |src_row, header, row| {
+                saw_row = true;
+                if src_h == 0 {
+                    src_h = header.height.max(1);
+                    (target_w, target_h) = fit_bitmap_inside(
+                        header.width.max(1),
+                        src_h,
+                        image.width.max(1),
+                        image.height.max(1),
+                    );
+                    origin_x = image.x + (image.width as i32 - target_w as i32) / 2;
+                    origin_y = image.y + (image.height as i32 - target_h as i32) / 2;
+                }
+
+                while dst_row < target_h {
+                    let mapped_src = ((dst_row as u64 * src_h as u64) / target_h as u64) as u32;
+                    if mapped_src != src_row {
+                        break;
+                    }
+                    let y = origin_y + dst_row as i32;
+                    display.draw_iter((0..target_w).map(|dx| {
+                        let src_x = ((dx as u64 * header.width as u64) / target_w as u64) as u32;
+                        let luma =
+                            png_row_sample_luma(row, header.color_type, header.bit_depth, src_x)
+                                .unwrap_or(255);
+                        let color = if luma < 128 {
+                            BinaryColor::On
+                        } else {
+                            BinaryColor::Off
+                        };
+                        Pixel(Point::new(origin_x + dx as i32, y), color)
+                    }))?;
+                    dst_row = dst_row.saturating_add(1);
+                }
+                Ok(())
+            },
+        );
+
+        match decode_result {
+            Ok(()) if saw_row => Ok(StreamedImageOutcome::Drawn),
+            Ok(()) => Ok(StreamedImageOutcome::DecodeFailure),
+            Err(PngStreamRowsError::Draw(err)) => Err(err),
+            Err(PngStreamRowsError::Decode(PngDecodeError::UnsupportedFormat)) => {
+                Ok(StreamedImageOutcome::UnsupportedFormat)
+            }
+            Err(PngStreamRowsError::Decode(_)) => Ok(StreamedImageOutcome::DecodeFailure),
+        }
     }
 
     fn draw_command<D>(&self, display: &mut D, cmd: &DrawCommand) -> Result<(), D::Error>
@@ -1872,6 +2267,476 @@ where
         }
         Ok(())
     }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+const PNG_CHUNK_IO_BYTES: usize = 2048;
+const PNG_DEFLATE_OUT_BYTES: usize = 4096;
+const PNG_MAX_ROW_BYTES: usize = 8 * 1024;
+const PNG_DECODE_EXPANSION_FACTOR: usize = 16;
+
+fn source_is_png(src: &str) -> bool {
+    let mut stem = src;
+    if let Some((base, _)) = stem.split_once('#') {
+        stem = base;
+    }
+    if let Some((base, _)) = stem.split_once('?') {
+        stem = base;
+    }
+    stem.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("png"))
+}
+
+fn decode_png_rows_streaming<R, E, F>(
+    reader: &mut R,
+    max_image_bytes: usize,
+    mut on_row: F,
+) -> Result<(), PngStreamRowsError<E>>
+where
+    R: std::io::Read,
+    F: FnMut(u32, &PngHeader, &[u8]) -> Result<(), E>,
+{
+    let mut signature = [0u8; 8];
+    reader
+        .read_exact(&mut signature)
+        .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidSignature))?;
+    if signature != PNG_SIGNATURE {
+        return Err(PngStreamRowsError::Decode(PngDecodeError::InvalidSignature));
+    }
+
+    let max_decoded_bytes = max_image_bytes
+        .saturating_mul(PNG_DECODE_EXPANSION_FACTOR)
+        .max(max_image_bytes);
+    let mut header: Option<PngHeader> = None;
+    let mut saw_idat = false;
+    let mut saw_iend = false;
+
+    let mut row_bytes = 0usize;
+    let mut row_with_filter = 0usize;
+    let mut filter_bpp = 0usize;
+    let mut expected_rows = 0u32;
+    let mut decoded_rows = 0u32;
+    let mut decoded_bytes = 0usize;
+
+    let mut scanline = [0u8; PNG_MAX_ROW_BYTES + 1];
+    let mut scanline_fill = 0usize;
+    let mut row_buf = [0u8; PNG_MAX_ROW_BYTES];
+    let mut prev_row = [0u8; PNG_MAX_ROW_BYTES];
+
+    let mut chunk_header = [0u8; 8];
+    let mut chunk_io = [0u8; PNG_CHUNK_IO_BYTES];
+    let mut inflate_out = [0u8; PNG_DEFLATE_OUT_BYTES];
+    let mut crc_buf = [0u8; 4];
+    let mut ihdr_buf = [0u8; 13];
+    let mut inflate_state = miniz_oxide::inflate::stream::InflateState::new(DataFormat::Zlib);
+    let mut inflate_finished = false;
+
+    while !saw_iend {
+        reader
+            .read_exact(&mut chunk_header)
+            .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+        let chunk_len = u32::from_be_bytes([
+            chunk_header[0],
+            chunk_header[1],
+            chunk_header[2],
+            chunk_header[3],
+        ]) as usize;
+        let chunk_type = [
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ];
+
+        match &chunk_type {
+            b"IHDR" => {
+                if header.is_some() || chunk_len != ihdr_buf.len() {
+                    return Err(PngStreamRowsError::Decode(PngDecodeError::InvalidChunk));
+                }
+                reader
+                    .read_exact(&mut ihdr_buf)
+                    .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+                reader
+                    .read_exact(&mut crc_buf)
+                    .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+
+                let parsed = parse_png_header(&ihdr_buf).map_err(PngStreamRowsError::Decode)?;
+                row_bytes = png_row_bytes(parsed.width, parsed.color_type, parsed.bit_depth)
+                    .ok_or(PngStreamRowsError::Decode(
+                        PngDecodeError::DimensionOverflow,
+                    ))?;
+                if row_bytes == 0 || row_bytes > PNG_MAX_ROW_BYTES {
+                    return Err(PngStreamRowsError::Decode(
+                        PngDecodeError::DimensionOverflow,
+                    ));
+                }
+                row_with_filter = row_bytes.checked_add(1).ok_or(PngStreamRowsError::Decode(
+                    PngDecodeError::DimensionOverflow,
+                ))?;
+                filter_bpp = png_filter_bpp(parsed.color_type, parsed.bit_depth).ok_or(
+                    PngStreamRowsError::Decode(PngDecodeError::UnsupportedFormat),
+                )?;
+                expected_rows = parsed.height;
+                let predicted_raw = row_with_filter.checked_mul(expected_rows as usize).ok_or(
+                    PngStreamRowsError::Decode(PngDecodeError::DimensionOverflow),
+                )?;
+                if predicted_raw > max_decoded_bytes {
+                    return Err(PngStreamRowsError::Decode(
+                        PngDecodeError::DimensionOverflow,
+                    ));
+                }
+                header = Some(parsed);
+            }
+            b"IDAT" => {
+                let Some(parsed_header) = header else {
+                    return Err(PngStreamRowsError::Decode(PngDecodeError::MissingHeader));
+                };
+                saw_idat = true;
+                if inflate_finished && chunk_len > 0 {
+                    return Err(PngStreamRowsError::Decode(PngDecodeError::DecodeFailed));
+                }
+                let mut chunk_remaining = chunk_len;
+                while chunk_remaining > 0 {
+                    let take = chunk_remaining.min(chunk_io.len());
+                    reader
+                        .read_exact(&mut chunk_io[..take])
+                        .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+                    chunk_remaining -= take;
+                    if inflate_finished {
+                        return Err(PngStreamRowsError::Decode(PngDecodeError::DecodeFailed));
+                    }
+
+                    let mut pending = &chunk_io[..take];
+                    while !pending.is_empty() {
+                        let result = miniz_oxide::inflate::stream::inflate(
+                            &mut inflate_state,
+                            pending,
+                            &mut inflate_out,
+                            MZFlush::None,
+                        );
+                        let consumed = result.bytes_consumed;
+                        let produced = result.bytes_written;
+                        pending = &pending[consumed..];
+
+                        if produced > 0 {
+                            let mut out_idx = 0usize;
+                            while out_idx < produced {
+                                let needed = row_with_filter.saturating_sub(scanline_fill);
+                                let take_out = needed.min(produced - out_idx);
+                                scanline[scanline_fill..scanline_fill + take_out]
+                                    .copy_from_slice(&inflate_out[out_idx..out_idx + take_out]);
+                                scanline_fill += take_out;
+                                out_idx += take_out;
+
+                                if scanline_fill == row_with_filter {
+                                    if decoded_rows >= expected_rows {
+                                        return Err(PngStreamRowsError::Decode(
+                                            PngDecodeError::DimensionOverflow,
+                                        ));
+                                    }
+                                    row_buf[..row_bytes]
+                                        .copy_from_slice(&scanline[1..row_with_filter]);
+                                    png_unfilter_scanline(
+                                        scanline[0],
+                                        &mut row_buf[..row_bytes],
+                                        &prev_row[..row_bytes],
+                                        filter_bpp,
+                                    )
+                                    .map_err(PngStreamRowsError::Decode)?;
+                                    on_row(decoded_rows, &parsed_header, &row_buf[..row_bytes])
+                                        .map_err(PngStreamRowsError::Draw)?;
+                                    prev_row[..row_bytes].copy_from_slice(&row_buf[..row_bytes]);
+                                    decoded_rows = decoded_rows.saturating_add(1);
+                                    decoded_bytes = decoded_bytes.saturating_add(row_with_filter);
+                                    if decoded_bytes > max_decoded_bytes {
+                                        return Err(PngStreamRowsError::Decode(
+                                            PngDecodeError::DimensionOverflow,
+                                        ));
+                                    }
+                                    scanline_fill = 0;
+                                }
+                            }
+                        }
+
+                        match result.status {
+                            Ok(MZStatus::Ok) => {
+                                if consumed == 0 && produced == 0 {
+                                    return Err(PngStreamRowsError::Decode(
+                                        PngDecodeError::DecodeFailed,
+                                    ));
+                                }
+                            }
+                            Ok(MZStatus::StreamEnd) => {
+                                inflate_finished = true;
+                                if !pending.is_empty() {
+                                    return Err(PngStreamRowsError::Decode(
+                                        PngDecodeError::DecodeFailed,
+                                    ));
+                                }
+                                break;
+                            }
+                            Ok(MZStatus::NeedDict) | Err(_) => {
+                                return Err(PngStreamRowsError::Decode(
+                                    PngDecodeError::DecodeFailed,
+                                ))
+                            }
+                        }
+                    }
+                }
+                reader
+                    .read_exact(&mut crc_buf)
+                    .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+            }
+            b"IEND" => {
+                if chunk_len != 0 {
+                    return Err(PngStreamRowsError::Decode(PngDecodeError::InvalidChunk));
+                }
+                reader
+                    .read_exact(&mut crc_buf)
+                    .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+                saw_iend = true;
+            }
+            _ => {
+                let mut chunk_remaining = chunk_len;
+                while chunk_remaining > 0 {
+                    let take = chunk_remaining.min(chunk_io.len());
+                    reader
+                        .read_exact(&mut chunk_io[..take])
+                        .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+                    chunk_remaining -= take;
+                }
+                reader
+                    .read_exact(&mut crc_buf)
+                    .map_err(|_| PngStreamRowsError::Decode(PngDecodeError::InvalidChunk))?;
+            }
+        }
+    }
+
+    if header.is_none() {
+        return Err(PngStreamRowsError::Decode(PngDecodeError::MissingHeader));
+    }
+    if !saw_idat {
+        return Err(PngStreamRowsError::Decode(PngDecodeError::MissingImageData));
+    }
+    if !inflate_finished || scanline_fill != 0 || decoded_rows != expected_rows {
+        return Err(PngStreamRowsError::Decode(PngDecodeError::DecodeFailed));
+    }
+
+    Ok(())
+}
+
+fn parse_png_header(bytes: &[u8; 13]) -> Result<PngHeader, PngDecodeError> {
+    let width = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let height = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let bit_depth = bytes[8];
+    let color_type = match bytes[9] {
+        0 => PngColorType::Grayscale,
+        2 => PngColorType::Rgb,
+        3 => PngColorType::Indexed,
+        4 => PngColorType::GrayscaleAlpha,
+        6 => PngColorType::Rgba,
+        _ => return Err(PngDecodeError::UnsupportedFormat),
+    };
+    let compression_method = bytes[10];
+    let filter_method = bytes[11];
+    let interlace_method = bytes[12];
+
+    if width == 0
+        || height == 0
+        || compression_method != 0
+        || filter_method != 0
+        || interlace_method != 0
+    {
+        return Err(PngDecodeError::UnsupportedFormat);
+    }
+
+    let supported_depth = match color_type {
+        PngColorType::Grayscale => matches!(bit_depth, 1 | 2 | 4 | 8),
+        PngColorType::Rgb => bit_depth == 8,
+        PngColorType::Indexed => false,
+        PngColorType::GrayscaleAlpha => bit_depth == 8,
+        PngColorType::Rgba => bit_depth == 8,
+    };
+    if !supported_depth {
+        return Err(PngDecodeError::UnsupportedFormat);
+    }
+
+    Ok(PngHeader {
+        width,
+        height,
+        bit_depth,
+        color_type,
+    })
+}
+
+fn png_row_bytes(width: u32, color_type: PngColorType, bit_depth: u8) -> Option<usize> {
+    let channels = match color_type {
+        PngColorType::Grayscale => 1usize,
+        PngColorType::Rgb => 3usize,
+        PngColorType::Indexed => 1usize,
+        PngColorType::GrayscaleAlpha => 2usize,
+        PngColorType::Rgba => 4usize,
+    };
+    let bits_per_pixel = channels.checked_mul(bit_depth as usize)?;
+    let width = usize::try_from(width).ok()?;
+    let row_bits = width.checked_mul(bits_per_pixel)?;
+    Some(row_bits.div_ceil(8))
+}
+
+fn png_filter_bpp(color_type: PngColorType, bit_depth: u8) -> Option<usize> {
+    let channels = match color_type {
+        PngColorType::Grayscale => 1usize,
+        PngColorType::Rgb => 3usize,
+        PngColorType::Indexed => 1usize,
+        PngColorType::GrayscaleAlpha => 2usize,
+        PngColorType::Rgba => 4usize,
+    };
+    if bit_depth >= 8 {
+        channels.checked_mul((bit_depth / 8) as usize)
+    } else {
+        Some(1)
+    }
+}
+
+fn png_unfilter_scanline(
+    filter: u8,
+    row: &mut [u8],
+    prev_row: &[u8],
+    bpp: usize,
+) -> Result<(), PngDecodeError> {
+    if prev_row.len() < row.len() || bpp == 0 {
+        return Err(PngDecodeError::DecodeFailed);
+    }
+    match filter {
+        0 => {}
+        1 => {
+            for i in 0..row.len() {
+                let left = if i >= bpp { row[i - bpp] } else { 0 };
+                row[i] = row[i].wrapping_add(left);
+            }
+        }
+        2 => {
+            for i in 0..row.len() {
+                row[i] = row[i].wrapping_add(prev_row[i]);
+            }
+        }
+        3 => {
+            for i in 0..row.len() {
+                let left = if i >= bpp { row[i - bpp] } else { 0 };
+                let up = prev_row[i];
+                row[i] = row[i].wrapping_add(((left as u16 + up as u16) / 2) as u8);
+            }
+        }
+        4 => {
+            for i in 0..row.len() {
+                let left = if i >= bpp { row[i - bpp] } else { 0 };
+                let up = prev_row[i];
+                let up_left = if i >= bpp { prev_row[i - bpp] } else { 0 };
+                row[i] = row[i].wrapping_add(paeth_predictor(left, up, up_left));
+            }
+        }
+        _ => return Err(PngDecodeError::UnsupportedFormat),
+    }
+    Ok(())
+}
+
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let a = a as i32;
+    let b = b as i32;
+    let c = c as i32;
+    let p = a + b - c;
+    let pa = (p - a).abs();
+    let pb = (p - b).abs();
+    let pc = (p - c).abs();
+    if pa <= pb && pa <= pc {
+        a as u8
+    } else if pb <= pc {
+        b as u8
+    } else {
+        c as u8
+    }
+}
+
+fn png_row_sample_luma(
+    row: &[u8],
+    color_type: PngColorType,
+    bit_depth: u8,
+    src_x: u32,
+) -> Option<u8> {
+    let x = usize::try_from(src_x).ok()?;
+    match color_type {
+        PngColorType::Grayscale => match bit_depth {
+            1 | 2 | 4 => {
+                let sample = sample_packed_grayscale(row, x, bit_depth)?;
+                Some(scale_packed_grayscale(sample, bit_depth))
+            }
+            8 => row.get(x).copied(),
+            _ => None,
+        },
+        PngColorType::Rgb if bit_depth == 8 => {
+            let idx = x.checked_mul(3)?;
+            let r = *row.get(idx)?;
+            let g = *row.get(idx + 1)?;
+            let b = *row.get(idx + 2)?;
+            Some(rgb_to_luma(r, g, b))
+        }
+        PngColorType::GrayscaleAlpha if bit_depth == 8 => {
+            let idx = x.checked_mul(2)?;
+            let luma = *row.get(idx)?;
+            let alpha = *row.get(idx + 1)?;
+            Some(alpha_blend_luma(luma, alpha))
+        }
+        PngColorType::Rgba if bit_depth == 8 => {
+            let idx = x.checked_mul(4)?;
+            let r = *row.get(idx)?;
+            let g = *row.get(idx + 1)?;
+            let b = *row.get(idx + 2)?;
+            let alpha = *row.get(idx + 3)?;
+            Some(alpha_blend_luma(rgb_to_luma(r, g, b), alpha))
+        }
+        _ => None,
+    }
+}
+
+fn sample_packed_grayscale(row: &[u8], x: usize, bit_depth: u8) -> Option<u8> {
+    let bit_depth = bit_depth as usize;
+    let bit_index = x.checked_mul(bit_depth)?;
+    let byte_index = bit_index / 8;
+    let bit_offset = bit_index % 8;
+    let shift = 8usize.checked_sub(bit_depth + bit_offset)?;
+    let mask = ((1u16 << bit_depth) - 1) as u8;
+    Some((row.get(byte_index)? >> shift) & mask)
+}
+
+fn scale_packed_grayscale(sample: u8, bit_depth: u8) -> u8 {
+    match bit_depth {
+        1 => {
+            if sample == 0 {
+                0
+            } else {
+                255
+            }
+        }
+        2 => sample.saturating_mul(85),
+        4 => sample.saturating_mul(17),
+        _ => sample,
+    }
+}
+
+fn rgb_to_luma(r: u8, g: u8, b: u8) -> u8 {
+    ((r as u16 * 77 + g as u16 * 150 + b as u16 * 29) >> 8) as u8
+}
+
+fn alpha_blend_luma(luma: u8, alpha: u8) -> u8 {
+    if alpha == 255 {
+        return luma;
+    }
+    if alpha == 0 {
+        return 255;
+    }
+    let fg = luma as u16 * alpha as u16;
+    let bg = 255u16 * (255u16 - alpha as u16);
+    ((fg + bg + 127) / 255) as u8
 }
 
 fn pressure_percent(used: usize, limit: usize) -> u8 {
@@ -2818,6 +3683,83 @@ mod tests {
         let result = renderer.render_page(&page, &mut display);
         assert!(result.is_ok());
         assert!(display.on_pixels.is_empty());
+    }
+
+    #[test]
+    fn streamed_png_source_detection_handles_case_and_suffixes() {
+        assert!(source_is_png("images/cover.png"));
+        assert!(source_is_png("images/cover.PNG#frag"));
+        assert!(source_is_png("images/cover.pNg?size=1"));
+        assert!(!source_is_png("images/cover.jpg"));
+        assert!(!source_is_png("images/cover"));
+    }
+
+    #[test]
+    fn streamed_png_decoder_handles_minimal_grayscale_payload() {
+        let mut png = Vec::new();
+        png.extend_from_slice(&PNG_SIGNATURE);
+
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 0, 0, 0, 0]);
+        png.extend_from_slice(&[0, 0, 0, 0]); // CRC ignored by decoder
+
+        // zlib stream for two raw bytes: [filter=0, pixel=0]
+        let idat = [
+            0x78, 0x01, 0x01, 0x02, 0x00, 0xfd, 0xff, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+        ];
+        png.extend_from_slice(&(idat.len() as u32).to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(&idat);
+        png.extend_from_slice(&[0, 0, 0, 0]); // CRC ignored by decoder
+
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(b"IEND");
+        png.extend_from_slice(&[0, 0, 0, 0]); // CRC ignored by decoder
+
+        let mut cursor = std::io::Cursor::new(png);
+        let mut rows = 0u32;
+        let mut sampled = 255u8;
+        decode_png_rows_streaming(&mut cursor, 1024, |row_idx, header, row| {
+            assert_eq!(row_idx, 0);
+            assert_eq!(header.width, 1);
+            assert_eq!(header.height, 1);
+            sampled = png_row_sample_luma(row, header.color_type, header.bit_depth, 0)
+                .expect("single grayscale pixel");
+            rows += 1;
+            Result::<(), ()>::Ok(())
+        })
+        .expect("streaming decode should succeed");
+
+        assert_eq!(rows, 1);
+        assert_eq!(sampled, 0);
+    }
+
+    #[test]
+    fn packed_framebuffer_draw_target_sets_and_clears_bits() {
+        let mut bytes = [0u8; 2];
+        let mut fb = PackedBinaryFrameBuffer::new(8, 2, &mut bytes).expect("buffer shape");
+        fb.draw_iter([
+            Pixel(Point::new(0, 0), BinaryColor::On),
+            Pixel(Point::new(7, 0), BinaryColor::On),
+            Pixel(Point::new(0, 1), BinaryColor::On),
+        ])
+        .expect("draw should succeed");
+        assert_eq!(fb.as_bytes()[0], 0b1000_0001);
+        assert_eq!(fb.as_bytes()[1], 0b1000_0000);
+
+        fb.draw_iter([Pixel(Point::new(7, 0), BinaryColor::Off)])
+            .expect("draw should succeed");
+        assert_eq!(fb.as_bytes()[0], 0b1000_0000);
+    }
+
+    #[test]
+    fn packed_framebuffer_rejects_invalid_stride() {
+        let mut bytes = [0u8; 1];
+        let result = PackedBinaryFrameBuffer::with_stride(9, 1, 1, &mut bytes);
+        assert!(matches!(result, Err(PackedFrameBufferError::InvalidStride)));
     }
 
     #[cfg(feature = "ttf-backend")]

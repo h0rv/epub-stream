@@ -92,12 +92,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let renderer: EgRenderer = EgRenderer::default();
     let base_render_cfg = with_embedded_text_measurer(RenderConfig::default());
 
-    let mut chapter_total_pages = 0usize;
-    engine
-        .prepare_chapter_with_config(&mut book, cfg.chapter, base_render_cfg.clone(), |_| {
-            chapter_total_pages += 1;
-        })
+    let summary = engine
+        .prepare_chapter_with_config(&mut book, cfg.chapter, base_render_cfg.clone(), |_| {})
         .map_err(|e| format!("unable to count chapter pages: {}", e))?;
+    let chapter_total_pages = summary.page_count;
 
     let mut rendered = 0usize;
     let mut manifest = String::from(

@@ -75,6 +75,21 @@ impl RenderPage {
         }
     }
 
+    /// Clear all commands and reset for reuse, preserving allocated capacity.
+    pub fn clear_for_reuse(&mut self, new_page_number: usize) {
+        self.page_number = new_page_number;
+        self.commands.clear();
+        self.content_commands.clear();
+        self.chrome_commands.clear();
+        self.overlay_commands.clear();
+        self.overlay_items.clear();
+        self.annotations.clear();
+        self.metrics = PageMetrics {
+            chapter_page_index: new_page_number.saturating_sub(1),
+            ..PageMetrics::default()
+        };
+    }
+
     /// Push a content-layer command.
     pub fn push_content_command(&mut self, cmd: DrawCommand) {
         self.content_commands.push(cmd);

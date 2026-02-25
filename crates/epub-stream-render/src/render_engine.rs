@@ -28,6 +28,13 @@ pub trait CancelToken {
     fn is_cancelled(&self) -> bool;
 }
 
+/// Summary emitted after chapter layout completes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChapterLayoutSummary {
+    /// Total pages produced for this chapter.
+    pub page_count: usize,
+}
+
 /// Never-cancel token for default call paths.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NeverCancel;
@@ -1763,18 +1770,17 @@ impl RenderEngine {
         let page_limit = self.opts.prep.memory.max_pages_in_memory;
         let mut pages = Vec::with_capacity(page_limit.min(8));
         let mut dropped_pages = 0usize;
-        self.prepare_chapter_with_config(book, chapter_index, config, |page| {
+        let summary = self.prepare_chapter_with_config(book, chapter_index, config, |page| {
             if pages.len() < page_limit {
                 pages.push(page);
             } else {
                 dropped_pages = dropped_pages.saturating_add(1);
             }
         })?;
-        let chapter_total = pages.len().max(1);
+        // Post-hoc: set total count now that layout is complete.
         for page in pages.iter_mut() {
-            Self::annotate_page_for_chapter(page, chapter_index);
             if page.metrics.chapter_page_count.is_none() {
-                Self::annotate_page_metrics(page, chapter_total);
+                Self::annotate_page_metrics(page, summary.page_count);
             }
         }
         if dropped_pages > 0 {
@@ -1798,7 +1804,7 @@ impl RenderEngine {
         book: &mut EpubBook<R>,
         chapter_index: usize,
         on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         F: FnMut(RenderPage),
@@ -1813,7 +1819,7 @@ impl RenderEngine {
         chapter_index: usize,
         config: RenderConfig<'_>,
         mut on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         F: FnMut(RenderPage),
@@ -1834,7 +1840,7 @@ impl RenderEngine {
         chapter_index: usize,
         html: &[u8],
         on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         F: FnMut(RenderPage),
@@ -1856,7 +1862,7 @@ impl RenderEngine {
         html: &[u8],
         config: RenderConfig<'_>,
         on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         F: FnMut(RenderPage),
@@ -1879,7 +1885,7 @@ impl RenderEngine {
         chapter_index: usize,
         cancel: &C,
         on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         C: CancelToken,
@@ -1896,7 +1902,7 @@ impl RenderEngine {
         cancel: &C,
         config: RenderConfig<'_>,
         mut on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         C: CancelToken + ?Sized,
@@ -1912,9 +1918,14 @@ impl RenderEngine {
         }
         let mut session = self.begin(chapter_index, config);
         session.set_hyphenation_language(book.language());
+        let mut page_count = 0usize;
         if session.is_complete() {
-            session.drain_pages(&mut on_page);
-            return Ok(());
+            session.drain_pages(|mut page| {
+                Self::annotate_page_for_chapter(&mut page, chapter_index);
+                page_count += 1;
+                on_page(page);
+            });
+            return Ok(ChapterLayoutSummary { page_count });
         }
         let mut prep = if let Some(family) = forced_font_family.as_deref() {
             RenderPrep::new(self.opts.prep).with_font_policy(forced_font_policy(family))
@@ -1935,7 +1946,11 @@ impl RenderEngine {
                 return;
             }
             if !defer_emit_until_finish {
-                session.drain_pages(&mut on_page);
+                session.drain_pages(|mut page| {
+                    Self::annotate_page_for_chapter(&mut page, chapter_index);
+                    page_count += 1;
+                    on_page(page);
+                });
             }
         })?;
         if saw_cancelled || cancel.is_cancelled() {
@@ -1943,10 +1958,14 @@ impl RenderEngine {
             return Err(RenderEngineError::Cancelled);
         }
         session.finish()?;
-        session.drain_pages(&mut on_page);
+        session.drain_pages(|mut page| {
+            Self::annotate_page_for_chapter(&mut page, chapter_index);
+            page_count += 1;
+            on_page(page);
+        });
         let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         self.emit_diagnostic(RenderDiagnostic::ReflowTimeMs(elapsed));
-        Ok(())
+        Ok(ChapterLayoutSummary { page_count })
     }
 
     fn prepare_chapter_bytes_with_cancel_and_config<R, C, F>(
@@ -1957,7 +1976,7 @@ impl RenderEngine {
         cancel: &C,
         config: RenderConfig<'_>,
         mut on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         C: CancelToken + ?Sized,
@@ -1973,9 +1992,14 @@ impl RenderEngine {
         }
         let mut session = self.begin(chapter_index, config);
         session.set_hyphenation_language(book.language());
+        let mut page_count = 0usize;
         if session.is_complete() {
-            session.drain_pages(&mut on_page);
-            return Ok(());
+            session.drain_pages(|mut page| {
+                Self::annotate_page_for_chapter(&mut page, chapter_index);
+                page_count += 1;
+                on_page(page);
+            });
+            return Ok(ChapterLayoutSummary { page_count });
         }
         let mut prep = if let Some(family) = forced_font_family.as_deref() {
             RenderPrep::new(self.opts.prep).with_font_policy(forced_font_policy(family))
@@ -1996,7 +2020,11 @@ impl RenderEngine {
                 return;
             }
             if !defer_emit_until_finish {
-                session.drain_pages(&mut on_page);
+                session.drain_pages(|mut page| {
+                    Self::annotate_page_for_chapter(&mut page, chapter_index);
+                    page_count += 1;
+                    on_page(page);
+                });
             }
         })?;
         if saw_cancelled || cancel.is_cancelled() {
@@ -2004,10 +2032,14 @@ impl RenderEngine {
             return Err(RenderEngineError::Cancelled);
         }
         session.finish()?;
-        session.drain_pages(&mut on_page);
+        session.drain_pages(|mut page| {
+            Self::annotate_page_for_chapter(&mut page, chapter_index);
+            page_count += 1;
+            on_page(page);
+        });
         let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         self.emit_diagnostic(RenderDiagnostic::ReflowTimeMs(elapsed));
-        Ok(())
+        Ok(ChapterLayoutSummary { page_count })
     }
 
     /// Prepare and layout a chapter, returning pages within `[start, end)`.
@@ -2086,7 +2118,7 @@ impl RenderEngine {
                 return;
             }
             match result {
-                Ok(()) => {
+                Ok(_summary) => {
                     let _ = tx.send(StreamMessage::Done);
                 }
                 Err(err) => {
@@ -2109,7 +2141,7 @@ impl RenderEngine {
         viewport: OverlaySize,
         composer: &O,
         mut on_page: F,
-    ) -> Result<(), RenderEngineError>
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
     where
         R: std::io::Read + std::io::Seek,
         O: crate::render_ir::OverlayComposer,

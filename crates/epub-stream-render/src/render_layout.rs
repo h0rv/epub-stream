@@ -1,7 +1,8 @@
 use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
 use crate::render_ir::{
     CoverPageMode, DrawCommand, ImageObjectCommand, JustificationStrategy, JustifyMode,
@@ -765,7 +766,7 @@ impl LayoutState {
                 .saturating_add(sanitized_word.chars().count())
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
             self.paragraph_words.push(ParagraphWord {
-                text: sanitized_word,
+                text: sanitized_word.into_owned(),
                 style_idx,
                 left_inset_px,
                 width_px: word_w,
@@ -894,7 +895,7 @@ impl LayoutState {
                 return;
             }
             if line.text.is_empty() {
-                line.text = display_word.clone();
+                line.text = display_word.into_owned();
                 line.width_px = word_w;
                 if line.style != *style {
                     line.style = style.clone();
@@ -905,7 +906,7 @@ impl LayoutState {
             self.line = Some(line);
             self.flush_line(false, false);
             self.line = Some(CurrentLine {
-                text: display_word,
+                text: display_word.into_owned(),
                 style: style.clone(),
                 width_px: word_w,
                 line_height_px: line_height_px(style, &self.cfg),
@@ -1545,7 +1546,7 @@ impl LayoutState {
     }
 
     fn drain_emitted_pages(&mut self) -> Vec<RenderPage> {
-        core::mem::take(&mut self.emitted)
+        self.emitted.drain(..).collect()
     }
 }
 
@@ -1573,12 +1574,32 @@ fn truncate_text_to_width(
     out
 }
 
+fn intern_family(name: &str) -> Arc<str> {
+    static COMMON: OnceLock<[Arc<str>; 5]> = OnceLock::new();
+    let common = COMMON.get_or_init(|| {
+        [
+            Arc::from("serif"),
+            Arc::from("sans-serif"),
+            Arc::from("monospace"),
+            Arc::from("cursive"),
+            Arc::from("fantasy"),
+        ]
+    });
+    let trimmed = name.trim();
+    for entry in common {
+        if trimmed.eq_ignore_ascii_case(entry) {
+            return Arc::clone(entry);
+        }
+    }
+    Arc::from(trimmed)
+}
+
 fn to_resolved_style(style: &ComputedTextStyle) -> ResolvedTextStyle {
     let family = style
         .family_stack
         .first()
-        .map(|family| Arc::from(family.as_str()))
-        .unwrap_or_else(|| Arc::from("serif")); // allow: fallback family default
+        .map(|family| intern_family(family.as_str()))
+        .unwrap_or_else(|| intern_family("serif"));
     ResolvedTextStyle {
         font_id: None,
         family,
@@ -1967,11 +1988,11 @@ fn english_hyphenation_exception(word: &str) -> Option<&'static [usize]> {
     }
 }
 
-fn strip_soft_hyphens(text: &str) -> String {
+fn strip_soft_hyphens(text: &str) -> Cow<'_, str> {
     if text.contains(SOFT_HYPHEN) {
-        text.chars().filter(|ch| *ch != SOFT_HYPHEN).collect()
+        Cow::Owned(text.chars().filter(|ch| *ch != SOFT_HYPHEN).collect())
     } else {
-        text.into() // allow: no-op path avoids char iteration
+        Cow::Borrowed(text)
     }
 }
 
