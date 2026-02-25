@@ -674,6 +674,7 @@ impl Styler {
         let mut table_row_cells: Vec<usize> = Vec::with_capacity(8);
         let mut entity_buf = String::with_capacity(16);
         let mut pending_run: Option<StyledRun> = None;
+        let mut resolved_style_cache: Option<(CssStyle, BlockRole, bool, bool)> = None;
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -707,10 +708,13 @@ impl Styler {
                     } else if matches!(ctx.tag.as_ref(), "td" | "th") {
                         if let Some(cell_count) = table_row_cells.last_mut() {
                             if *cell_count > 0 {
+                                if resolved_style_cache.is_none() {
+                                    resolved_style_cache = Some(self.resolve_context_style(&stack));
+                                }
                                 let (resolved, role, bold_tag, italic_tag) =
-                                    self.resolve_context_style(&stack);
+                                    resolved_style_cache.as_ref().expect("cache initialized");
                                 let style =
-                                    self.compute_style(&resolved, role, bold_tag, italic_tag);
+                                    self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                                 emit_styled_run_text(
                                     &mut pending_run,
                                     Cow::Borrowed(" | "),
@@ -735,6 +739,7 @@ impl Styler {
                     } else {
                         stack.push(ctx);
                     }
+                    resolved_style_cache = None;
                 }
                 Ok(Event::Empty(e)) => {
                     let tag = decode_tag_name(&reader, e.name().as_ref())?;
@@ -759,10 +764,13 @@ impl Styler {
                     if matches!(ctx.tag.as_ref(), "td" | "th") {
                         if let Some(cell_count) = table_row_cells.last_mut() {
                             if *cell_count > 0 {
+                                if resolved_style_cache.is_none() {
+                                    resolved_style_cache = Some(self.resolve_context_style(&stack));
+                                }
                                 let (resolved, role, bold_tag, italic_tag) =
-                                    self.resolve_context_style(&stack);
+                                    resolved_style_cache.as_ref().expect("cache initialized");
                                 let style =
-                                    self.compute_style(&resolved, role, bold_tag, italic_tag);
+                                    self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                                 emit_styled_run_text(
                                     &mut pending_run,
                                     Cow::Borrowed(" | "),
@@ -812,6 +820,7 @@ impl Styler {
                             stack.pop();
                         }
                     }
+                    resolved_style_cache = None;
                 }
                 Ok(Event::Text(e)) => {
                     if skip_depth > 0 {
@@ -833,8 +842,12 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
+                    if resolved_style_cache.is_none() {
+                        resolved_style_cache = Some(self.resolve_context_style(&stack));
+                    }
+                    let (resolved, role, bold_tag, italic_tag) =
+                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::CData(e)) => {
@@ -857,8 +870,12 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
+                    if resolved_style_cache.is_none() {
+                        resolved_style_cache = Some(self.resolve_context_style(&stack));
+                    }
+                    let (resolved, role, bold_tag, italic_tag) =
+                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::GeneralRef(e)) => {
@@ -896,8 +913,12 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
-                    let style = self.compute_style(&resolved, role, bold_tag, italic_tag);
+                    if resolved_style_cache.is_none() {
+                        resolved_style_cache = Some(self.resolve_context_style(&stack));
+                    }
+                    let (resolved, role, bold_tag, italic_tag) =
+                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
                 Ok(Event::Eof) => break,
