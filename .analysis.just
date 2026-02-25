@@ -99,6 +99,14 @@ heap-profile-view phase="render" *files:
     just analysis heap-profile {{ phase }} {{ files }}
     just analysis heap-view
 
+# Analyze DHAT profiles (summary, hotspots, churn, peak, budget, compare, report).
+heap-analyze *args:
+    uv run scripts/analyze_heap.py {{ args }}
+
+# Full analysis report: summary + hotspots + churn + peak + budget check.
+heap-report phase="full" target="512KB":
+    uv run scripts/analyze_heap.py report --phase {{ phase }} --target {{ target }}
+
 # Run Miri to detect undefined behavior in unsafe code.
 miri:
     cargo +nightly miri test --all-features --lib

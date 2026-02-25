@@ -55,6 +55,8 @@ JSON files viewable in the [DHAT viewer](https://nnethercote.github.io/dh_view/d
 | `heap-profile-view` | Profile a phase and open the viewer | browser + JSON |
 | `heap-view` | Open the DHAT viewer and list available profiles | browser |
 | `heap-list` | List available profile files | terminal |
+| `heap-analyze` | Run analysis subcommands (see below) | terminal |
+| `heap-report` | Full report: summary + hotspots + churn + peak + budget | terminal |
 
 By default, each EPUB gets its own clean DHAT profile (separate process), so
 allocations from one book don't bleed into another. Pass `--aggregate` to get
@@ -91,9 +93,24 @@ just analysis heap-profile render path/to/book.epub
 just analysis heap-profile full path/to/book.epub
 ```
 
-After profiling, open a JSON file in the
-[DHAT viewer](https://nnethercote.github.io/dh_view/dh_view.html) to explore
-allocation patterns interactively.
+After profiling, analyze the results:
+
+```sh
+# Full report with budget check (default 512KB for ESP)
+just analysis heap-report
+
+# Individual analysis commands
+just analysis heap-analyze summary --phase full
+just analysis heap-analyze hotspots --phase full -n 20
+just analysis heap-analyze churn --phase full
+just analysis heap-analyze peak --phase render
+just analysis heap-analyze budget --target 4MB
+just analysis heap-analyze compare target/memory/before.json target/memory/after.json
+```
+
+Or open a JSON file in the
+[DHAT viewer](https://nnethercote.github.io/dh_view/dh_view.html) for
+interactive exploration.
 
 ### Runtime
 
