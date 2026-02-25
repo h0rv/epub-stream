@@ -2442,7 +2442,7 @@ mod tests {
 
     fn cache_fixture_page(page_number: usize, chapter_page_count: usize) -> RenderPage {
         let mut page = RenderPage::new(page_number);
-        page.push_content_command(DrawCommand::Text(TextCommand {
+        page.push_content_text_command(TextCommand {
             x: 12,
             baseline_y: 24,
             text: format!("page-{page_number}"),
@@ -2458,22 +2458,22 @@ mod tests {
                 role: BlockRole::Body,
                 justify_mode: JustifyMode::InterWord { extra_px_total: 6 },
             },
-        }));
-        page.push_content_command(DrawCommand::Rule(RuleCommand {
+        });
+        page.push_content_rule_command(RuleCommand {
             x: 10,
             y: 28,
             length: 100,
             thickness: 1,
             horizontal: true,
-        }));
-        page.push_content_command(DrawCommand::ImageObject(ImageObjectCommand {
+        });
+        page.push_content_image_object_command(ImageObjectCommand {
             src: "images/pic.png".to_string(),
             alt: "diagram".to_string(),
             x: 10,
             y: 40,
             width: 64,
             height: 48,
-        }));
+        });
         page.push_chrome_command(DrawCommand::PageChrome(PageChromeCommand {
             kind: PageChromeKind::Footer,
             text: Some(format!("{page_number}/{chapter_page_count}")),
@@ -2674,13 +2674,13 @@ mod tests {
         let chapter_index = 0;
 
         let mut page = RenderPage::new(1);
-        page.push_content_command(DrawCommand::Rule(RuleCommand {
+        page.push_content_rule_command(RuleCommand {
             x: 0,
             y: 0,
             length: 8,
             thickness: 1,
             horizontal: true,
-        }));
+        });
         assert!(page.commands.is_empty());
 
         store.store_chapter_pages(profile, chapter_index, &[page.clone()]);

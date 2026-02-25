@@ -97,11 +97,88 @@ impl RenderPage {
 
     /// Push a content-layer command.
     pub fn push_content_command(&mut self, cmd: DrawCommand) {
+        match cmd {
+            DrawCommand::Text(cmd) => self.push_content_text_command(cmd),
+            DrawCommand::Rule(cmd) => self.push_content_rule_command(cmd),
+            DrawCommand::ImageObject(cmd) => self.push_content_image_object_command(cmd),
+            DrawCommand::Rect(cmd) => self.push_content_rect_command(cmd),
+            DrawCommand::PageChrome(cmd) => self.push_content_page_chrome_command(cmd),
+        }
+    }
+
+    /// Push a content-layer text command.
+    pub fn push_content_text_command(&mut self, cmd: TextCommand) {
+        self.push_content_text_impl(cmd);
+    }
+
+    /// Push a content-layer rule command.
+    pub fn push_content_rule_command(&mut self, cmd: RuleCommand) {
+        self.push_content_rule_impl(cmd);
+    }
+
+    /// Push a content-layer image object command.
+    pub fn push_content_image_object_command(&mut self, cmd: ImageObjectCommand) {
+        self.push_content_image_object_impl(cmd);
+    }
+
+    /// Push a content-layer rectangle command.
+    pub fn push_content_rect_command(&mut self, cmd: RectCommand) {
+        self.push_content_rect_impl(cmd);
+    }
+
+    /// Push a content-layer page chrome command.
+    pub fn push_content_page_chrome_command(&mut self, cmd: PageChromeCommand) {
+        self.push_content_page_chrome_impl(cmd);
+    }
+
+    #[inline(never)]
+    fn push_content_text_impl(&mut self, cmd: TextCommand) {
+        if self.content_commands.len() == self.content_commands.capacity() {
+            self.reserve_content_command_slot();
+        }
+        self.content_commands.push(DrawCommand::Text(cmd));
+    }
+
+    #[inline(never)]
+    fn push_content_rule_impl(&mut self, cmd: RuleCommand) {
+        if self.content_commands.len() == self.content_commands.capacity() {
+            self.reserve_content_command_slot();
+        }
+        self.content_commands.push(DrawCommand::Rule(cmd));
+    }
+
+    #[inline(never)]
+    fn push_content_image_object_impl(&mut self, cmd: ImageObjectCommand) {
+        if self.content_commands.len() == self.content_commands.capacity() {
+            self.reserve_content_command_slot();
+        }
+        self.content_commands.push(DrawCommand::ImageObject(cmd));
+    }
+
+    #[inline(never)]
+    fn push_content_rect_impl(&mut self, cmd: RectCommand) {
+        if self.content_commands.len() == self.content_commands.capacity() {
+            self.reserve_content_command_slot();
+        }
+        self.content_commands.push(DrawCommand::Rect(cmd));
+    }
+
+    #[inline(never)]
+    fn push_content_page_chrome_impl(&mut self, cmd: PageChromeCommand) {
+        if self.content_commands.len() == self.content_commands.capacity() {
+            self.reserve_content_command_slot();
+        }
+        self.content_commands.push(DrawCommand::PageChrome(cmd));
+    }
+
+    #[inline(never)]
+    fn reserve_content_command_slot(&mut self) {
         if self.content_commands.capacity() == 0 {
             self.content_commands
                 .reserve(Self::INITIAL_CONTENT_COMMAND_CAPACITY);
+        } else {
+            self.content_commands.reserve(1);
         }
-        self.content_commands.push(cmd);
     }
 
     /// Push a chrome-layer command.
@@ -466,13 +543,13 @@ mod tests {
     #[test]
     fn render_page_merged_commands_iter_reads_split_layers_without_sync() {
         let mut page = RenderPage::new(1);
-        page.push_content_command(DrawCommand::Rule(RuleCommand {
+        page.push_content_rule_command(RuleCommand {
             x: 0,
             y: 0,
             length: 10,
             thickness: 1,
             horizontal: true,
-        }));
+        });
         page.push_chrome_command(DrawCommand::Rect(RectCommand {
             x: 0,
             y: 0,
@@ -495,13 +572,13 @@ mod tests {
     #[test]
     fn render_page_sync_commands_remains_explicit_compatibility_path() {
         let mut page = RenderPage::new(2);
-        page.push_content_command(DrawCommand::Rule(RuleCommand {
+        page.push_content_rule_command(RuleCommand {
             x: 0,
             y: 0,
             length: 10,
             thickness: 1,
             horizontal: true,
-        }));
+        });
         assert!(page.commands.is_empty());
         page.sync_commands();
         assert_eq!(page.commands.len(), 1);

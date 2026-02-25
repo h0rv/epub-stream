@@ -795,14 +795,14 @@ impl LayoutState {
             image_x = self.cfg.margin_left + ((content_w - image_w) / 2);
         }
         self.page
-            .push_content_command(DrawCommand::ImageObject(ImageObjectCommand {
+            .push_content_image_object_command(ImageObjectCommand {
                 src: image.src.clone(),
                 alt: image.alt.clone(),
                 x: image_x,
                 y: image_y,
                 width: image_w.max(1) as u32,
                 height: image_h.max(1) as u32,
-            }));
+            });
         // Keep src as structured annotation for debug/telemetry.
         if !image.src.is_empty() {
             self.page
@@ -820,13 +820,13 @@ impl LayoutState {
             let caption_text =
                 truncate_text_to_width(self, &caption, &caption_style, max_caption_w);
             self.page
-                .push_content_command(DrawCommand::Text(TextCommand {
+                .push_content_text_command(TextCommand {
                     x: self.cfg.margin_left + 4,
                     baseline_y: self.cursor_y + line_ascent_px(&caption_style, caption_line_h),
                     text: caption_text,
                     font_id: caption_style.font_id,
                     style: caption_style,
-                }));
+                });
             self.cursor_y += caption_line_h;
         }
         if enable_caption {
@@ -1760,13 +1760,13 @@ impl LayoutState {
         );
 
         self.page
-            .push_content_command(DrawCommand::Text(TextCommand {
+            .push_content_text_command(TextCommand {
                 x: self.cfg.margin_left + line.left_inset_px,
                 baseline_y: self.cursor_y + line_ascent_px(&line.style, line.line_height_px),
                 text: line.text,
                 font_id: line.style.font_id,
                 style: line.style,
-            }));
+            });
 
         self.cursor_y += line.line_height_px + self.cfg.line_gap_px;
         if self.in_paragraph {
