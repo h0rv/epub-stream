@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,6 +20,9 @@ use crate::css::{
     Stylesheet,
 };
 use crate::error::{EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext};
+
+const IMAGE_DIMENSION_PROBE_MAX_BYTES: usize = 64 * 1024;
+const IMAGE_DIMENSION_PROBE_CHUNK_BYTES: usize = 2 * 1024;
 
 /// Limits for stylesheet parsing and application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,7 +789,7 @@ impl Styler {
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
                     on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized,
+                        text: normalized.into_owned(),
                         style,
                         font_id: 0,
                     }));
@@ -813,7 +817,7 @@ impl Styler {
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
                     on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized,
+                        text: normalized.into_owned(),
                         style,
                         font_id: 0,
                     }));
@@ -856,7 +860,7 @@ impl Styler {
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
                     on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized,
+                        text: normalized.into_owned(),
                         style,
                         font_id: 0,
                     }));
@@ -1296,6 +1300,7 @@ pub struct RenderPrep {
     styler: Styler,
     font_resolver: FontResolver,
     image_dimension_cache: BTreeMap<String, Option<(u16, u16)>>,
+    image_probe_scratch: Vec<u8>,
 }
 
 /// Structured trace context for a streamed chapter item.
@@ -1342,6 +1347,7 @@ impl RenderPrep {
             // TODO: move to caller-owned or bounded cache to avoid per-RenderPrep map alloc
             #[allow(clippy::disallowed_methods)]
             image_dimension_cache: BTreeMap::new(), // allow: per-RenderPrep, bounded by manifest
+            image_probe_scratch: Vec::with_capacity(IMAGE_DIMENSION_PROBE_CHUNK_BYTES),
         }
     }
 
@@ -1513,10 +1519,41 @@ impl RenderPrep {
             return *cached;
         }
 
-        let mut bytes = Vec::with_capacity(8);
-        let cap = self.opts.memory.max_entry_bytes.max(16 * 1024);
-        let dimensions = match book.read_resource_into_with_hard_cap(key, &mut bytes, cap) {
-            Ok(_) => infer_image_dimensions_from_bytes(&bytes),
+        // Probe only a bounded header prefix through a streaming reader; no full
+        // image materialization for intrinsic dimension inference.
+        let cap = self
+            .opts
+            .memory
+            .max_entry_bytes
+            .min(IMAGE_DIMENSION_PROBE_MAX_BYTES)
+            .max(1);
+        self.image_probe_scratch.clear();
+        let dimensions = match book.open_resource_reader(key) {
+            Ok(mut reader) => {
+                let mut chunk = [0u8; IMAGE_DIMENSION_PROBE_CHUNK_BYTES];
+                let mut found = None;
+                while self.image_probe_scratch.len() < cap {
+                    let remaining = cap.saturating_sub(self.image_probe_scratch.len());
+                    let take = remaining.min(chunk.len());
+                    if take == 0 {
+                        break;
+                    }
+                    match std::io::Read::read(&mut reader, &mut chunk[..take]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            self.image_probe_scratch.extend_from_slice(&chunk[..n]);
+                            if let Some(dimensions) =
+                                infer_image_dimensions_from_bytes(&self.image_probe_scratch)
+                            {
+                                found = Some(dimensions);
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                found
+            }
             Err(_) => None,
         };
         self.image_dimension_cache
@@ -1773,6 +1810,14 @@ fn first_non_empty_declaration_index(style_attr: &str) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
+fn local_name_bytes(raw: &[u8]) -> &[u8] {
+    raw.rsplit(|b| *b == b':').next().unwrap_or(raw)
+}
+
+fn attr_key_matches(raw: &[u8], expected: &[u8]) -> bool {
+    local_name_bytes(raw).eq_ignore_ascii_case(expected)
+}
+
 fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderPrepError> {
     let decoded = reader.decoder().decode(raw).map_err(|err| {
         RenderPrepError::new_with_phase(
@@ -1800,75 +1845,105 @@ fn element_ctx_from_start(
     let mut img_width_px: Option<u16> = None;
     let mut img_height_px: Option<u16> = None;
     for attr in e.attributes().flatten() {
-        let key = match reader.decoder().decode(attr.key.as_ref()) {
-            Ok(v) => v.to_ascii_lowercase(),
-            Err(_) => continue,
-        };
-        let val = match reader.decoder().decode(&attr.value) {
-            Ok(v) => v.to_string(),
-            Err(_) => continue,
-        };
-        if key == "class" {
-            classes = val
-                .split_whitespace()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .collect();
-        } else if key == "style" {
-            if val.len() > max_inline_style_bytes {
+        let key = attr.key.as_ref();
+        if attr_key_matches(key, b"class") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            classes.clear();
+            classes.extend(
+                value
+                    .split_whitespace()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(ToString::to_string),
+            );
+            continue;
+        }
+        if attr_key_matches(key, b"style") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            let value = value.into_owned();
+            if value.len() > max_inline_style_bytes {
                 let mut prep_err = RenderPrepError::new_with_phase(
                     ErrorPhase::Style,
                     "STYLE_INLINE_BYTES_LIMIT",
                     format!(
                         "Inline style exceeds max_inline_style_bytes ({} > {})",
-                        val.len(),
+                        value.len(),
                         max_inline_style_bytes
                     ),
                 )
                 .with_source(format!("inline style on <{}>", tag))
-                .with_declaration(val.clone())
+                .with_declaration(value.clone())
                 .with_token_offset(reader_token_offset(reader))
                 .with_limit(
                     "max_inline_style_bytes",
-                    val.len(),
+                    value.len(),
                     max_inline_style_bytes,
                 );
-                if let Some(declaration_index) = first_non_empty_declaration_index(&val) {
+                if let Some(declaration_index) = first_non_empty_declaration_index(&value) {
                     prep_err = prep_err.with_declaration_index(declaration_index);
                 }
                 return Err(prep_err);
             }
-            let parsed = parse_inline_style(&val).map_err(|err| {
+            let parsed = parse_inline_style(&value).map_err(|err| {
                 let mut prep_err = RenderPrepError::new_with_phase(
                     ErrorPhase::Style,
                     "STYLE_INLINE_PARSE_ERROR",
                     err.to_string(),
                 )
                 .with_source(format!("inline style on <{}>", tag))
-                .with_declaration(val.clone())
+                .with_declaration(value.clone())
                 .with_token_offset(reader_token_offset(reader));
-                if let Some(declaration_index) = first_non_empty_declaration_index(&val) {
+                if let Some(declaration_index) = first_non_empty_declaration_index(&value) {
                     prep_err = prep_err.with_declaration_index(declaration_index);
                 }
                 prep_err
             })?;
             inline_style = Some(parsed);
-        } else if key == "src"
-            || ((key == "href" || key == "xlink:href") && matches!(tag.as_str(), "img" | "image"))
+            continue;
+        }
+        if attr_key_matches(key, b"src")
+            || (matches!(tag.as_str(), "img" | "image") && attr_key_matches(key, b"href"))
         {
-            if !val.is_empty() {
-                img_src = Some(val);
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            if !value.is_empty() {
+                img_src = Some(value.into_owned());
             }
-        } else if key == "alt" {
-            img_alt = Some(val);
-        } else if key == "title" {
-            if img_alt.is_none() && !val.is_empty() {
-                img_alt = Some(val);
+            continue;
+        }
+        if attr_key_matches(key, b"alt") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            img_alt = Some(value.into_owned());
+            continue;
+        }
+        if attr_key_matches(key, b"title") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            if img_alt.is_none() && !value.is_empty() {
+                img_alt = Some(value.into_owned());
             }
-        } else if key == "width" {
-            img_width_px = parse_dimension_hint_px(&val);
-        } else if key == "height" {
-            img_height_px = parse_dimension_hint_px(&val);
+            continue;
+        }
+        if attr_key_matches(key, b"width") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            img_width_px = parse_dimension_hint_px(value.as_ref());
+            continue;
+        }
+        if attr_key_matches(key, b"height") {
+            let Ok(value) = reader.decoder().decode(attr.value.as_ref()) else {
+                continue;
+            };
+            img_height_px = parse_dimension_hint_px(value.as_ref());
         }
     }
     Ok(ElementCtx {
@@ -1971,9 +2046,29 @@ fn is_preformatted_context(stack: &[ElementCtx]) -> bool {
     })
 }
 
-fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> String {
+fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> Cow<'_, str> {
     if preserve {
-        return text.to_string();
+        return Cow::Borrowed(text);
+    }
+    // Fast path: already normalized single-space text with no trimming needed.
+    let mut prev_space = true;
+    let mut needs_rewrite = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if prev_space {
+                needs_rewrite = true;
+                break;
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+        }
+    }
+    if text.chars().last().is_some_and(char::is_whitespace) {
+        needs_rewrite = true;
+    }
+    if !needs_rewrite {
+        return Cow::Borrowed(text);
     }
     let mut result = String::with_capacity(text.len());
     let mut prev_space = true;
@@ -1991,7 +2086,7 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> String {
     if result.ends_with(' ') {
         result.pop();
     }
-    result
+    Cow::Owned(result)
 }
 
 fn normalize_family(family: &str) -> String {
@@ -2163,19 +2258,16 @@ fn image_src_from_start(
     start: &quick_xml::events::BytesStart<'_>,
 ) -> Option<String> {
     for attr in start.attributes().flatten() {
-        let key = match reader.decoder().decode(attr.key.as_ref()) {
-            Ok(v) => v.to_ascii_lowercase(),
-            Err(_) => continue,
-        };
-        if key == "src"
-            || ((key == "href" || key == "xlink:href") && matches!(tag, "img" | "image"))
+        let key = attr.key.as_ref();
+        if attr_key_matches(key, b"src")
+            || (matches!(tag, "img" | "image") && attr_key_matches(key, b"href"))
         {
-            let value = match reader.decoder().decode(&attr.value) {
-                Ok(v) => v.to_string(),
+            let value = match reader.decoder().decode(attr.value.as_ref()) {
+                Ok(v) => v,
                 Err(_) => continue,
             };
             if !value.is_empty() {
-                return Some(value);
+                return Some(value.into_owned());
             }
         }
     }
@@ -2456,33 +2548,25 @@ pub(crate) fn parse_stylesheet_links_bytes(chapter_href: &str, html_bytes: &[u8]
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let tag = match reader.decoder().decode(e.name().as_ref()) {
-                    Ok(v) => v.to_string(),
-                    Err(_) => {
-                        buf.clear();
-                        continue;
-                    }
-                };
-                let tag_local = tag.rsplit(':').next().unwrap_or(tag.as_str());
-                if tag_local != "link" {
+                if !local_name_bytes(e.name().as_ref()).eq_ignore_ascii_case(b"link") {
                     buf.clear();
                     continue;
                 }
                 let mut href = None;
                 let mut rel = None;
                 for attr in e.attributes().flatten() {
-                    let key = match reader.decoder().decode(attr.key.as_ref()) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let val = match reader.decoder().decode(&attr.value) {
-                        Ok(v) => v.to_string(),
-                        Err(_) => continue,
-                    };
-                    if key == "href" {
-                        href = Some(val);
-                    } else if key == "rel" {
-                        rel = Some(val);
+                    if attr_key_matches(attr.key.as_ref(), b"href") {
+                        let val = match reader.decoder().decode(attr.value.as_ref()) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        href = Some(val.into_owned());
+                    } else if attr_key_matches(attr.key.as_ref(), b"rel") {
+                        let val = match reader.decoder().decode(attr.value.as_ref()) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        rel = Some(val.into_owned());
                     }
                 }
                 if let (Some(href), Some(rel)) = (href, rel) {
