@@ -20,3 +20,4 @@ epub_stream_render = { package = "epub-stream-render", version = "0.1.0", path =
 epub_stream = { package = "epub-stream", version = "0.1.0", path = "../.." }
 embedded-graphics = "0.8"
 log = { version = "0.4", default-features = false }
+miniz_oxide = "0.8"

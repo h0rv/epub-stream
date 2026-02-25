@@ -1203,6 +1203,38 @@ impl<R: Read + Seek> EpubBook<R> {
         read_entry_into_with_limit(&mut self.zip, &zip_path, writer, hard_cap_bytes)
     }
 
+    /// Open a pull-based resource reader by OPF-relative href.
+    ///
+    /// This returns a `Read` stream over decompressed bytes and avoids
+    /// materializing the full resource in memory.
+    pub fn open_resource_reader<'a>(
+        &'a mut self,
+        href: &str,
+    ) -> Result<crate::zip::ZipEntryReader<'a, R>, EpubError> {
+        self.open_resource_reader_with_hard_cap(href, usize::MAX)
+    }
+
+    /// Open a pull-based resource reader by OPF-relative href with explicit cap.
+    pub fn open_resource_reader_with_limit<'a>(
+        &'a mut self,
+        href: &str,
+        max_bytes: usize,
+    ) -> Result<crate::zip::ZipEntryReader<'a, R>, EpubError> {
+        self.open_resource_reader_with_hard_cap(href, max_bytes)
+    }
+
+    /// Open a pull-based resource reader by OPF-relative href with hard cap.
+    pub fn open_resource_reader_with_hard_cap<'a>(
+        &'a mut self,
+        href: &str,
+        hard_cap_bytes: usize,
+    ) -> Result<crate::zip::ZipEntryReader<'a, R>, EpubError> {
+        let zip_path = resolve_opf_relative_path(&self.opf_path, href);
+        self.zip
+            .open_file_reader_by_name_with_limit(&zip_path, hard_cap_bytes)
+            .map_err(EpubError::Zip)
+    }
+
     /// Read spine item content bytes by index.
     pub fn read_spine_item_bytes(&mut self, index: usize) -> Result<Vec<u8>, EpubError> {
         let href = self.chapter(index)?.href;
@@ -2523,6 +2555,36 @@ mod tests {
             .expect("limit should allow nav payload");
         assert_eq!(n, out.len());
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_open_resource_reader_streams_payload() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let mut reader = book
+            .open_resource_reader("xhtml/nav.xhtml")
+            .expect("resource reader should open");
+        let mut out = Vec::with_capacity(8);
+        std::io::Read::read_to_end(&mut reader, &mut out).expect("streamed read should succeed");
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_open_resource_reader_with_hard_cap_errors_when_exceeded() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+
+        let err = book
+            .open_resource_reader_with_hard_cap("xhtml/nav.xhtml", 8)
+            .expect_err("hard cap should fail");
+        assert!(matches!(err, EpubError::Zip(ZipError::FileTooLarge)));
     }
 
     #[test]

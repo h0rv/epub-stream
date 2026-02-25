@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use heapless::Vec as HeaplessVec;
 use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 #[cfg(target_os = "espidf")]
 const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
@@ -139,6 +139,235 @@ struct Zip64EocdInfo {
     num_entries: u64,
     cd_size: u64,
     cd_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EntryReadSpec {
+    method: u16,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    local_header_offset: u64,
+    crc32: u32,
+}
+
+impl EntryReadSpec {
+    fn from_entry(entry: &CdEntry) -> Self {
+        Self {
+            method: entry.method,
+            compressed_size: entry.compressed_size,
+            uncompressed_size: entry.uncompressed_size,
+            local_header_offset: entry.local_header_offset,
+            crc32: entry.crc32,
+        }
+    }
+}
+
+/// Pull-based reader over a single ZIP entry.
+///
+/// The reader streams stored/deflated payload bytes directly from the archive,
+/// reusing the parent `StreamingZip` inflate state and fixed internal scratch
+/// buffers. This avoids materializing the full entry in memory.
+pub struct ZipEntryReader<'a, F: Read + Seek> {
+    zip: &'a mut StreamingZip<F>,
+    spec: EntryReadSpec,
+    remaining_compressed: usize,
+    remaining_uncompressed: usize,
+    inflate_finished: bool,
+    crc_verified: bool,
+    hasher: crc32fast::Hasher,
+    input_buf: [u8; DEFAULT_ZIP_SCRATCH_BYTES],
+    input_start: usize,
+    input_end: usize,
+    output_buf: [u8; DEFAULT_ZIP_SCRATCH_BYTES],
+    output_start: usize,
+    output_end: usize,
+}
+
+impl<F: Read + Seek> core::fmt::Debug for ZipEntryReader<'_, F> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ZipEntryReader")
+            .field("remaining_compressed", &self.remaining_compressed)
+            .field("remaining_uncompressed", &self.remaining_uncompressed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, F: Read + Seek> ZipEntryReader<'a, F> {
+    fn new(zip: &'a mut StreamingZip<F>, spec: EntryReadSpec) -> Result<Self, ZipError> {
+        let remaining_compressed =
+            usize::try_from(spec.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
+        let remaining_uncompressed =
+            usize::try_from(spec.uncompressed_size).map_err(|_| ZipError::FileTooLarge)?;
+        let data_offset = zip.calc_data_offset_at(spec.local_header_offset)?;
+        zip.file
+            .seek(SeekFrom::Start(data_offset))
+            .map_err(|_| ZipError::IoError)?;
+        if spec.method == METHOD_DEFLATED {
+            zip.inflate_state.reset(DataFormat::Raw);
+        }
+        Ok(Self {
+            zip,
+            spec,
+            remaining_compressed,
+            remaining_uncompressed,
+            inflate_finished: false,
+            crc_verified: false,
+            hasher: crc32fast::Hasher::new(),
+            input_buf: [0u8; DEFAULT_ZIP_SCRATCH_BYTES],
+            input_start: 0,
+            input_end: 0,
+            output_buf: [0u8; DEFAULT_ZIP_SCRATCH_BYTES],
+            output_start: 0,
+            output_end: 0,
+        })
+    }
+
+    fn verify_crc(&mut self) -> io::Result<()> {
+        if self.crc_verified || self.remaining_uncompressed != 0 {
+            return Ok(());
+        }
+        if self.spec.crc32 != 0 {
+            let calc = self.hasher.clone().finalize();
+            if calc != self.spec.crc32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "zip crc mismatch",
+                ));
+            }
+        }
+        self.crc_verified = true;
+        Ok(())
+    }
+
+    fn fill_output_from_deflate(&mut self) -> io::Result<()> {
+        self.output_start = 0;
+        self.output_end = 0;
+
+        loop {
+            if self.input_start == self.input_end && self.remaining_compressed > 0 {
+                let take = core::cmp::min(self.remaining_compressed, self.input_buf.len());
+                self.zip
+                    .file
+                    .read_exact(&mut self.input_buf[..take])
+                    .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "zip read failed"))?;
+                self.input_start = 0;
+                self.input_end = take;
+                self.remaining_compressed -= take;
+            }
+
+            let pending = &self.input_buf[self.input_start..self.input_end];
+            let result = miniz_oxide::inflate::stream::inflate(
+                &mut self.zip.inflate_state,
+                pending,
+                &mut self.output_buf,
+                MZFlush::None,
+            );
+            self.input_start += result.bytes_consumed;
+            if result.bytes_written > 0 {
+                self.output_end = result.bytes_written;
+                return Ok(());
+            }
+
+            match result.status {
+                Ok(MZStatus::StreamEnd) => {
+                    if self.remaining_compressed != 0 || self.input_start < self.input_end {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "zip deflate trailing bytes",
+                        ));
+                    }
+                    self.inflate_finished = true;
+                    return Ok(());
+                }
+                Ok(MZStatus::Ok) => {
+                    if result.bytes_consumed == 0
+                        && self.remaining_compressed == 0
+                        && self.input_start == self.input_end
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "zip deflate stream truncated",
+                        ));
+                    }
+                }
+                Ok(MZStatus::NeedDict) | Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "zip deflate decode failed",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl<'a, F: Read + Seek> Read for ZipEntryReader<'a, F> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining_uncompressed == 0 {
+            self.verify_crc()?;
+            return Ok(0);
+        }
+
+        let mut written = 0usize;
+        while written < out.len() {
+            if self.output_start < self.output_end {
+                let take = core::cmp::min(out.len() - written, self.output_end - self.output_start);
+                out[written..written + take]
+                    .copy_from_slice(&self.output_buf[self.output_start..self.output_start + take]);
+                self.output_start += take;
+                self.remaining_uncompressed = self.remaining_uncompressed.saturating_sub(take);
+                self.hasher.update(&out[written..written + take]);
+                written += take;
+                if self.remaining_uncompressed == 0 {
+                    self.verify_crc()?;
+                    break;
+                }
+                continue;
+            }
+
+            match self.spec.method {
+                METHOD_STORED => {
+                    let take = core::cmp::min(out.len() - written, self.remaining_uncompressed);
+                    self.zip
+                        .file
+                        .read_exact(&mut out[written..written + take])
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::UnexpectedEof, "zip read failed")
+                        })?;
+                    self.remaining_uncompressed = self.remaining_uncompressed.saturating_sub(take);
+                    self.remaining_compressed = self.remaining_compressed.saturating_sub(take);
+                    self.hasher.update(&out[written..written + take]);
+                    written += take;
+                    if self.remaining_uncompressed == 0 {
+                        self.verify_crc()?;
+                        break;
+                    }
+                }
+                METHOD_DEFLATED => {
+                    if self.inflate_finished {
+                        self.verify_crc()?;
+                        break;
+                    }
+                    self.fill_output_from_deflate()?;
+                    if self.output_start == self.output_end && self.inflate_finished {
+                        self.verify_crc()?;
+                        break;
+                    }
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsupported zip compression",
+                    ))
+                }
+            }
+        }
+
+        Ok(written)
+    }
 }
 
 /// Central directory entry metadata
@@ -876,9 +1105,73 @@ impl<F: Read + Seek> StreamingZip<F> {
         self.read_file(&entry_clone, buf)
     }
 
+    /// Open a pull-based reader for a ZIP entry.
+    ///
+    /// This streams decompressed bytes directly from archive storage and avoids
+    /// materializing the full entry.
+    pub fn open_file_reader(&mut self, entry: &CdEntry) -> Result<ZipEntryReader<'_, F>, ZipError> {
+        self.open_file_reader_with_limit(entry, usize::MAX)
+    }
+
+    /// Open a pull-based reader for a ZIP entry by filename.
+    pub fn open_file_reader_by_name(
+        &mut self,
+        filename: &str,
+    ) -> Result<ZipEntryReader<'_, F>, ZipError> {
+        self.open_file_reader_by_name_with_limit(filename, usize::MAX)
+    }
+
+    /// Open a pull-based reader for a ZIP entry with an explicit hard byte cap.
+    pub fn open_file_reader_with_limit(
+        &mut self,
+        entry: &CdEntry,
+        max_bytes: usize,
+    ) -> Result<ZipEntryReader<'_, F>, ZipError> {
+        let spec = EntryReadSpec::from_entry(entry);
+        if spec.uncompressed_size > max_bytes as u64 || spec.compressed_size > max_bytes as u64 {
+            return Err(ZipError::FileTooLarge);
+        }
+        if let Some(limits) = self.limits {
+            if spec.uncompressed_size > limits.max_file_read_size as u64
+                || spec.compressed_size > limits.max_file_read_size as u64
+            {
+                return Err(ZipError::FileTooLarge);
+            }
+        }
+        match spec.method {
+            METHOD_STORED | METHOD_DEFLATED => ZipEntryReader::new(self, spec),
+            _ => Err(ZipError::UnsupportedCompression),
+        }
+    }
+
+    /// Open a pull-based reader for a ZIP entry by filename with explicit cap.
+    pub fn open_file_reader_by_name_with_limit(
+        &mut self,
+        filename: &str,
+        max_bytes: usize,
+    ) -> Result<ZipEntryReader<'_, F>, ZipError> {
+        let spec = {
+            let entry = self.get_entry(filename).ok_or(ZipError::FileNotFound)?;
+            EntryReadSpec::from_entry(entry)
+        };
+        if spec.uncompressed_size > max_bytes as u64 || spec.compressed_size > max_bytes as u64 {
+            return Err(ZipError::FileTooLarge);
+        }
+        if let Some(limits) = self.limits {
+            if spec.uncompressed_size > limits.max_file_read_size as u64
+                || spec.compressed_size > limits.max_file_read_size as u64
+            {
+                return Err(ZipError::FileTooLarge);
+            }
+        }
+        match spec.method {
+            METHOD_STORED | METHOD_DEFLATED => ZipEntryReader::new(self, spec),
+            _ => Err(ZipError::UnsupportedCompression),
+        }
+    }
+
     /// Calculate the offset to the actual file data (past local header)
-    fn calc_data_offset(&mut self, entry: &CdEntry) -> Result<u64, ZipError> {
-        let offset = entry.local_header_offset;
+    fn calc_data_offset_at(&mut self, offset: u64) -> Result<u64, ZipError> {
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(|_| ZipError::IoError)?;
@@ -903,6 +1196,11 @@ impl<F: Read + Seek> StreamingZip<F> {
         let data_offset = offset + 30 + name_len + extra_len;
 
         Ok(data_offset)
+    }
+
+    /// Calculate the offset to the actual file data (past local header)
+    fn calc_data_offset(&mut self, entry: &CdEntry) -> Result<u64, ZipError> {
+        self.calc_data_offset_at(entry.local_header_offset)
     }
 
     /// Read u16 from buffer at offset (little-endian)
@@ -1393,6 +1691,34 @@ mod tests {
             .read_file_to_writer_with_scratch(&entry, &mut out, &mut input, &mut output)
             .expect_err("empty input buffer must fail");
         assert!(matches!(err, ZipError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_open_file_reader_streams_stored_entry() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let entry = zip.get_entry("mimetype").unwrap().clone();
+
+        let mut reader = zip
+            .open_file_reader(&entry)
+            .expect("reader should open for stored entry");
+        let mut out = Vec::with_capacity(8);
+        std::io::Read::read_to_end(&mut reader, &mut out).expect("streaming read should succeed");
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn test_open_file_reader_by_name_with_limit_enforces_cap() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let err = zip
+            .open_file_reader_by_name_with_limit("mimetype", 8)
+            .expect_err("hard cap should reject larger entries");
+        assert!(matches!(err, ZipError::FileTooLarge));
     }
 
     #[test]
