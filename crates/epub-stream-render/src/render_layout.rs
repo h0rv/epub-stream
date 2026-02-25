@@ -1,7 +1,6 @@
 use epub_stream::{
     BlockRole, ComputedTextStyle, StyledEvent, StyledEventOrRun, StyledImage, StyledRun,
 };
-use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use crate::render_ir::{
@@ -295,6 +294,11 @@ impl LayoutEngine {
             style.justify_mode = JustifyMode::None;
         }
 
+        if matches!(style.role, BlockRole::Preformatted) {
+            self.handle_preformatted_run(st, &run.text, &style);
+            return;
+        }
+
         for word in run.text.split_whitespace() {
             let mut extra_indent_px = 0;
             if ctx.pending_indent
@@ -306,6 +310,28 @@ impl LayoutEngine {
                 ctx.pending_indent = false;
             }
             st.push_word(word, &style, extra_indent_px);
+        }
+    }
+
+    fn handle_preformatted_run(&self, st: &mut LayoutState, text: &str, style: &ResolvedTextStyle) {
+        if text.is_empty() {
+            return;
+        }
+        let mut start = 0usize;
+        for (idx, ch) in text.char_indices() {
+            if ch != '\n' {
+                continue;
+            }
+            let mut segment = &text[start..idx];
+            if let Some(stripped) = segment.strip_suffix('\r') {
+                segment = stripped;
+            }
+            st.push_raw_text_direct(segment, style, 0);
+            st.flush_line(false, true);
+            start = idx + ch.len_utf8();
+        }
+        if start < text.len() {
+            st.push_raw_text_direct(&text[start..], style, 0);
         }
     }
 
@@ -503,6 +529,17 @@ struct LayoutState {
     paragraph_breaks_scratch: Vec<usize>,
     paragraph_dp_scratch: Vec<i64>,
     paragraph_next_break_scratch: Vec<usize>,
+    hyphen_char_boundaries_scratch: Vec<usize>,
+    hyphen_candidates_scratch: Vec<usize>,
+    soft_hyphen_break_cleaned_scratch: String,
+    soft_hyphen_split_points_scratch: Vec<usize>,
+    soft_hyphen_scratch: String,
+    soft_hyphen_candidate_scratch: String,
+    auto_hyphen_left_scratch: String,
+    #[cfg(not(target_os = "espidf"))]
+    overflow_text_scratch: String,
+    #[cfg(not(target_os = "espidf"))]
+    overflow_word_bounds_scratch: Vec<(usize, usize)>,
     paragraph_chars: usize,
     replay_direct_mode: bool,
     buffered_flush_mode: bool,
@@ -518,6 +555,8 @@ impl Default for LayoutState {
 
 impl LayoutState {
     fn new(cfg: LayoutConfig, text_measurer: Option<Arc<dyn TextMeasurer>>) -> Self {
+        let paragraph_word_cap = cfg.max_buffered_paragraph_words;
+        let paragraph_char_cap = cfg.max_buffered_paragraph_chars;
         Self {
             cfg,
             text_measurer,
@@ -530,15 +569,26 @@ impl LayoutState {
             lines_on_current_paragraph_page: 0,
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
-            paragraph_words: Vec::with_capacity(cfg.max_buffered_paragraph_words),
-            paragraph_text: String::with_capacity(cfg.max_buffered_paragraph_chars),
+            paragraph_words: Vec::with_capacity(paragraph_word_cap),
+            paragraph_text: String::with_capacity(paragraph_char_cap),
             paragraph_styles: Vec::with_capacity(4),
-            paragraph_words_scratch: Vec::new(),
-            paragraph_text_scratch: String::new(),
-            paragraph_styles_scratch: Vec::new(),
-            paragraph_breaks_scratch: Vec::new(),
-            paragraph_dp_scratch: Vec::new(),
-            paragraph_next_break_scratch: Vec::new(),
+            paragraph_words_scratch: Vec::with_capacity(0),
+            paragraph_text_scratch: String::with_capacity(0),
+            paragraph_styles_scratch: Vec::with_capacity(0),
+            paragraph_breaks_scratch: Vec::with_capacity(0),
+            paragraph_dp_scratch: Vec::with_capacity(0),
+            paragraph_next_break_scratch: Vec::with_capacity(0),
+            hyphen_char_boundaries_scratch: Vec::with_capacity(0),
+            hyphen_candidates_scratch: Vec::with_capacity(0),
+            soft_hyphen_break_cleaned_scratch: String::with_capacity(0),
+            soft_hyphen_split_points_scratch: Vec::with_capacity(0),
+            soft_hyphen_scratch: String::with_capacity(0),
+            soft_hyphen_candidate_scratch: String::with_capacity(0),
+            auto_hyphen_left_scratch: String::with_capacity(0),
+            #[cfg(not(target_os = "espidf"))]
+            overflow_text_scratch: String::with_capacity(0),
+            #[cfg(not(target_os = "espidf"))]
+            overflow_word_bounds_scratch: Vec::with_capacity(0),
             paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
@@ -832,9 +882,8 @@ impl LayoutState {
         };
         left_inset_px += extra_first_line_indent_px.max(0);
 
-        let sanitized_word = strip_soft_hyphens(word);
         if self.should_buffer_paragraph_word(style, word) {
-            let word_chars = sanitized_word.chars().count();
+            let word_chars = word.chars().count();
             let projected_chars = self
                 .paragraph_chars
                 .saturating_add(word_chars)
@@ -844,14 +893,14 @@ impl LayoutState {
             {
                 self.flush_buffered_paragraph(false, false);
             }
-            let word_w = self.measure_text(&sanitized_word, style);
+            let word_w = self.measure_text(word, style);
             let style_idx = self.paragraph_style_index(style);
             self.paragraph_chars = self
                 .paragraph_chars
                 .saturating_add(word_chars)
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
             let text_start = self.paragraph_text.len();
-            self.paragraph_text.push_str(&sanitized_word);
+            self.paragraph_text.push_str(word);
             let text_end = self.paragraph_text.len();
             self.paragraph_words.push(ParagraphWord {
                 text_start,
@@ -889,12 +938,37 @@ impl LayoutState {
     }
 
     fn push_word_direct(&mut self, word: &str, style: &ResolvedTextStyle, left_inset_px: i32) {
-        if word.is_empty() {
-            return;
+        let mut display_soft_scratch = core::mem::take(&mut self.soft_hyphen_scratch);
+        let mut break_cleaned_scratch =
+            core::mem::take(&mut self.soft_hyphen_break_cleaned_scratch);
+        let mut soft_split_points = core::mem::take(&mut self.soft_hyphen_split_points_scratch);
+        macro_rules! finish {
+            () => {{
+                self.soft_hyphen_scratch = display_soft_scratch;
+                self.soft_hyphen_break_cleaned_scratch = break_cleaned_scratch;
+                self.soft_hyphen_split_points_scratch = soft_split_points;
+                return;
+            }};
         }
-        let display_word = strip_soft_hyphens(word);
+
+        if word.is_empty() {
+            finish!();
+        }
+
+        let has_soft_hyphen = word.contains(SOFT_HYPHEN);
+        let display_word = if has_soft_hyphen {
+            display_soft_scratch.clear();
+            for ch in word.chars() {
+                if ch != SOFT_HYPHEN {
+                    display_soft_scratch.push(ch);
+                }
+            }
+            display_soft_scratch.as_str()
+        } else {
+            word
+        };
         if display_word.is_empty() {
-            return;
+            finish!();
         }
 
         if self.line.is_none() {
@@ -909,7 +983,7 @@ impl LayoutState {
         }
 
         let Some(mut line) = self.line.take() else {
-            return;
+            finish!();
         };
 
         if line.text.is_empty() {
@@ -925,7 +999,7 @@ impl LayoutState {
         } else {
             self.measure_text(" ", &line.style)
         };
-        let word_w = self.measure_text(&display_word, style);
+        let word_w = self.measure_text(display_word, style);
         let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
             - line_fit_guard_px(self.cfg.line_fit_guard_px, style))
         .max(1.0);
@@ -945,9 +1019,16 @@ impl LayoutState {
                     crate::render_ir::HyphenationMode::Discretionary
                 ))
                 && word.contains(SOFT_HYPHEN)
-                && self.try_break_word_at_soft_hyphen(&mut line, word, style, max_width, space_w)
+                && self.try_break_word_at_soft_hyphen(
+                    &mut line,
+                    word,
+                    style,
+                    max_width,
+                    &mut break_cleaned_scratch,
+                    &mut soft_split_points,
+                )
             {
-                return;
+                finish!();
             }
             if (self.cfg.soft_hyphen_policy == SoftHyphenPolicy::Discretionary
                 || matches!(
@@ -957,7 +1038,7 @@ impl LayoutState {
                 && !word.contains(SOFT_HYPHEN)
                 && self.try_auto_hyphenate(&mut line, word, style, max_width, space_w)
             {
-                return;
+                finish!();
             }
             #[cfg(not(target_os = "espidf"))]
             if let Some(split) = self.optimize_overflow_break(&line, word, style, max_width) {
@@ -992,38 +1073,102 @@ impl LayoutState {
                     line_height_px: line_height_px(style, &self.cfg),
                     left_inset_px: continuation_inset,
                 });
-                return;
+                finish!();
             }
             if line.text.is_empty() {
-                line.text = display_word.into_owned();
+                line.text.clear();
+                line.text.push_str(display_word);
                 line.width_px = word_w;
                 if line.style != *style {
                     line.style = style.clone();
                 }
                 self.line = Some(line);
-                return;
+                finish!();
             }
             self.line = Some(line);
             self.flush_line(false, false);
             self.line = Some(CurrentLine {
-                text: display_word.into_owned(),
+                text: display_word.to_string(),
                 style: style.clone(),
                 width_px: word_w,
                 line_height_px: line_height_px(style, &self.cfg),
                 left_inset_px,
             });
-            return;
+            finish!();
         }
 
         if !line.text.is_empty() {
             line.text.push(' ');
             line.width_px += space_w;
         }
-        line.text.push_str(&display_word);
+        line.text.push_str(display_word);
         line.width_px += word_w;
         if line.style != *style {
             line.style = style.clone();
         }
+        self.line = Some(line);
+        self.soft_hyphen_scratch = display_soft_scratch;
+        self.soft_hyphen_break_cleaned_scratch = break_cleaned_scratch;
+        self.soft_hyphen_split_points_scratch = soft_split_points;
+    }
+
+    fn push_raw_text_direct(&mut self, text: &str, style: &ResolvedTextStyle, left_inset_px: i32) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.line.is_none() {
+            self.prepare_for_new_line(style);
+            self.line = Some(CurrentLine {
+                text: String::with_capacity(text.len().max(32)),
+                style: style.clone(),
+                width_px: 0.0,
+                line_height_px: line_height_px(style, &self.cfg),
+                left_inset_px,
+            });
+        }
+
+        let Some(mut line) = self.line.take() else {
+            return;
+        };
+        if line.style != *style && !line.text.is_empty() {
+            self.line = Some(line);
+            self.flush_line(false, false);
+            self.prepare_for_new_line(style);
+            line = CurrentLine {
+                text: String::with_capacity(text.len().max(32)),
+                style: style.clone(),
+                width_px: 0.0,
+                line_height_px: line_height_px(style, &self.cfg),
+                left_inset_px,
+            };
+        } else if line.text.is_empty() {
+            line.left_inset_px = left_inset_px;
+            line.line_height_px = line_height_px(style, &self.cfg);
+            if line.style != *style {
+                line.style = style.clone();
+            }
+        }
+
+        let max_width = ((self.cfg.content_width() - line.left_inset_px).max(1) as f32
+            - line_fit_guard_px(self.cfg.line_fit_guard_px, style))
+        .max(1.0);
+        let text_w = self.measure_text(text, style);
+        if !line.text.is_empty() && line.width_px + text_w > max_width {
+            self.line = Some(line);
+            self.flush_line(false, false);
+            self.prepare_for_new_line(style);
+            line = CurrentLine {
+                text: String::with_capacity(text.len().max(32)),
+                style: style.clone(),
+                width_px: 0.0,
+                line_height_px: line_height_px(style, &self.cfg),
+                left_inset_px,
+            };
+        }
+
+        line.text.push_str(text);
+        line.width_px += text_w;
         self.line = Some(line);
     }
 
@@ -1259,7 +1404,7 @@ impl LayoutState {
 
     #[cfg(not(target_os = "espidf"))]
     fn optimize_overflow_break(
-        &self,
+        &mut self,
         line: &CurrentLine,
         incoming_word: &str,
         style: &ResolvedTextStyle,
@@ -1268,12 +1413,16 @@ impl LayoutState {
         if line.text.is_empty() || incoming_word.is_empty() {
             return None;
         }
-        let mut combined = String::with_capacity(line.text.len() + 1 + incoming_word.len());
+
+        let mut combined = core::mem::take(&mut self.overflow_text_scratch);
+        let mut words = core::mem::take(&mut self.overflow_word_bounds_scratch);
+        combined.clear();
+        words.clear();
+        combined.reserve(line.text.len() + 1 + incoming_word.len());
         combined.push_str(&line.text);
         combined.push(' ');
         combined.push_str(incoming_word);
 
-        let mut words = Vec::with_capacity(8);
         let mut word_start = None;
         for (idx, ch) in combined.char_indices() {
             if ch.is_whitespace() {
@@ -1287,50 +1436,58 @@ impl LayoutState {
         if let Some(start) = word_start {
             words.push((start, combined.len()));
         }
-        if words.len() < 3 {
-            return None;
-        }
-        let mut best: Option<(usize, usize, f32, f32, i32)> = None;
-        // Keep at least one word on each side.
-        for break_idx in 1..words.len() {
-            let left_end = words[break_idx - 1].1;
-            let right_start = words[break_idx].0;
-            let left = &combined[..left_end];
-            let right = &combined[right_start..];
-            let left_w = self.measure_text(left, style);
-            if left_w > max_width {
-                continue;
+
+        let result = if words.len() < 3 {
+            None
+        } else {
+            let mut best: Option<(usize, usize, f32, f32, i32)> = None;
+            // Keep at least one word on each side.
+            for break_idx in 1..words.len() {
+                let left_end = words[break_idx - 1].1;
+                let right_start = words[break_idx].0;
+                let left = &combined[..left_end];
+                let right = &combined[right_start..];
+                let left_w = self.measure_text(left, style);
+                if left_w > max_width {
+                    continue;
+                }
+                let right_w = self.measure_text(right, style);
+                let slack = (max_width - left_w).max(0.0);
+                let (last_left_start, last_left_end) = words[break_idx - 1];
+                let (first_right_start, first_right_end) = words[break_idx];
+                let last_left_len = combined[last_left_start..last_left_end].chars().count() as i32;
+                let first_right_len =
+                    combined[first_right_start..first_right_end].chars().count() as i32;
+                let mut score = (slack * slack).round() as i32;
+                if last_left_len <= 2 {
+                    score += 1400;
+                }
+                if first_right_len <= 2 {
+                    score += 900;
+                }
+                if words.len() - break_idx == 1 {
+                    score += 400;
+                }
+                match best {
+                    Some((_, _, _, _, best_score)) if score >= best_score => {}
+                    _ => best = Some((left_end, right_start, left_w, right_w, score)),
+                }
             }
-            let right_w = self.measure_text(right, style);
-            let slack = (max_width - left_w).max(0.0);
-            let (last_left_start, last_left_end) = words[break_idx - 1];
-            let (first_right_start, first_right_end) = words[break_idx];
-            let last_left_len = combined[last_left_start..last_left_end].chars().count() as i32;
-            let first_right_len =
-                combined[first_right_start..first_right_end].chars().count() as i32;
-            let mut score = (slack * slack).round() as i32;
-            if last_left_len <= 2 {
-                score += 1400;
-            }
-            if first_right_len <= 2 {
-                score += 900;
-            }
-            if words.len() - break_idx == 1 {
-                score += 400;
-            }
-            match best {
-                Some((_, _, _, _, best_score)) if score >= best_score => {}
-                _ => best = Some((left_end, right_start, left_w, right_w, score)),
-            }
-        }
-        best.map(
-            |(left_end, right_start, left_w, right_w, _)| OverflowBreak {
-                left_end,
-                right_start,
-                left_w,
-                right_w,
-            },
-        )
+            best.map(
+                |(left_end, right_start, left_w, right_w, _)| OverflowBreak {
+                    left_end,
+                    right_start,
+                    left_w,
+                    right_w,
+                },
+            )
+        };
+
+        words.clear();
+        combined.clear();
+        self.overflow_word_bounds_scratch = words;
+        self.overflow_text_scratch = combined;
+        result
     }
 
     fn try_break_word_at_soft_hyphen(
@@ -1339,10 +1496,12 @@ impl LayoutState {
         raw_word: &str,
         style: &ResolvedTextStyle,
         max_width: f32,
-        space_w: f32,
+        cleaned: &mut String,
+        split_points: &mut Vec<usize>,
     ) -> bool {
-        let mut cleaned = String::with_capacity(raw_word.len());
-        let mut split_points = Vec::with_capacity(4);
+        cleaned.clear();
+        split_points.clear();
+        cleaned.reserve(raw_word.len());
         for ch in raw_word.chars() {
             if ch == SOFT_HYPHEN {
                 if !cleaned.is_empty() && split_points.last().copied() != Some(cleaned.len()) {
@@ -1358,14 +1517,20 @@ impl LayoutState {
 
         let mut best_split = None;
         let mut best_candidate_w = 0.0f32;
-        let mut candidate_buf = String::with_capacity(cleaned.len() + 1);
-        for split in split_points {
+        let mut candidate_buf = core::mem::take(&mut self.soft_hyphen_candidate_scratch);
+        candidate_buf.clear();
+        candidate_buf.reserve(cleaned.len().saturating_add(1));
+        let space_w = if line.text.is_empty() {
+            0.0
+        } else {
+            self.measure_text(" ", &line.style)
+        };
+        for split in split_points.iter().copied() {
             if split == 0 || split >= cleaned.len() {
                 continue;
             }
             let prefix = &cleaned[..split];
-            let suffix = &cleaned[split..];
-            if prefix.is_empty() || suffix.is_empty() {
+            if prefix.is_empty() || split >= cleaned.len() {
                 continue;
             }
             candidate_buf.clear();
@@ -1386,6 +1551,7 @@ impl LayoutState {
         }
 
         let Some(split) = best_split else {
+            self.soft_hyphen_candidate_scratch = candidate_buf;
             return false;
         };
         let prefix = &cleaned[..split];
@@ -1398,6 +1564,7 @@ impl LayoutState {
         line.text.push('-');
         line.width_px += best_candidate_w;
 
+        self.soft_hyphen_candidate_scratch = candidate_buf;
         self.line = Some(line.clone());
         self.flush_line(false, false);
         self.push_word(&cleaned[split..], style, 0);
@@ -1415,12 +1582,16 @@ impl LayoutState {
         if !matches!(self.hyphenation_lang, HyphenationLang::English) {
             return false;
         }
-        let candidates = english_hyphenation_candidates(word);
+        let mut candidates = core::mem::take(&mut self.hyphen_candidates_scratch);
+        english_hyphenation_candidates_into(word, &mut candidates);
         if candidates.is_empty() {
+            self.hyphen_candidates_scratch = candidates;
             return false;
         }
 
-        let mut char_boundaries = Vec::with_capacity(word.chars().count().saturating_add(1));
+        let mut char_boundaries = core::mem::take(&mut self.hyphen_char_boundaries_scratch);
+        char_boundaries.clear();
+        char_boundaries.reserve(word.chars().count().saturating_add(1));
         char_boundaries.push(0);
         for (byte, _) in word.char_indices().skip(1) {
             char_boundaries.push(byte);
@@ -1429,8 +1600,10 @@ impl LayoutState {
         let char_count = char_boundaries.len().saturating_sub(1);
 
         let mut best_split: Option<(usize, f32, i32)> = None;
-        let mut left_buf = String::with_capacity(word.len() + 1);
-        for split in candidates {
+        let mut left_buf = core::mem::take(&mut self.auto_hyphen_left_scratch);
+        left_buf.clear();
+        left_buf.reserve(word.len().saturating_add(1));
+        for split in candidates.iter().copied() {
             if split < 3 || split + 3 > char_count {
                 continue;
             }
@@ -1463,6 +1636,12 @@ impl LayoutState {
         }
 
         let Some((split_byte, best_candidate_w, _)) = best_split else {
+            left_buf.clear();
+            char_boundaries.clear();
+            candidates.clear();
+            self.auto_hyphen_left_scratch = left_buf;
+            self.hyphen_char_boundaries_scratch = char_boundaries;
+            self.hyphen_candidates_scratch = candidates;
             return false;
         };
         left_buf.clear();
@@ -1476,6 +1655,12 @@ impl LayoutState {
         line.text.push_str(&left_buf);
         line.width_px += best_candidate_w;
 
+        left_buf.clear();
+        char_boundaries.clear();
+        candidates.clear();
+        self.auto_hyphen_left_scratch = left_buf;
+        self.hyphen_char_boundaries_scratch = char_boundaries;
+        self.hyphen_candidates_scratch = candidates;
         self.line = Some(line.clone());
         self.flush_line(false, false);
         self.push_word(&word[split_byte..], style, 0);
@@ -2089,14 +2274,15 @@ fn ends_with_terminal_punctuation(line: &str) -> bool {
     )
 }
 
-fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
+fn english_hyphenation_candidates_into(word: &str, out: &mut Vec<usize>) {
+    out.clear();
     let char_count = word.chars().count();
     if char_count < 7 {
-        return Vec::with_capacity(8);
+        return;
     }
-    let mut candidates = Vec::with_capacity(char_count / 2);
+    out.reserve(char_count / 2);
     if let Some(exception) = english_hyphenation_exception(word) {
-        candidates.extend_from_slice(exception);
+        out.extend_from_slice(exception);
     }
     let is_vowel = |c: char| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
 
@@ -2109,7 +2295,7 @@ fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
                 && ch.is_ascii_alphabetic()
                 && is_vowel(prev_ch) != is_vowel(ch)
             {
-                candidates.push(boundary);
+                out.push(boundary);
             }
         }
         prev = Some(ch);
@@ -2135,14 +2321,13 @@ fn english_hyphenation_candidates(word: &str) -> Vec<usize> {
         if lower.ends_with(suffix) {
             let split = char_count.saturating_sub(*suffix_len);
             if split >= 3 && split + 3 <= char_count {
-                candidates.push(split);
+                out.push(split);
             }
         }
     }
 
-    candidates.sort_unstable();
-    candidates.dedup();
-    candidates
+    out.sort_unstable();
+    out.dedup();
 }
 
 fn english_hyphenation_exception(word: &str) -> Option<&'static [usize]> {
@@ -2171,14 +2356,6 @@ fn english_hyphenation_exception(word: &str) -> Option<&'static [usize]> {
         "hitherto" => Some(&[3]),
         "merchantman" => Some(&[4, 7]),
         _ => None,
-    }
-}
-
-fn strip_soft_hyphens(text: &str) -> Cow<'_, str> {
-    if text.contains(SOFT_HYPHEN) {
-        Cow::Owned(text.chars().filter(|ch| *ch != SOFT_HYPHEN).collect())
-    } else {
-        Cow::Borrowed(text)
     }
 }
 
@@ -2269,6 +2446,22 @@ mod tests {
                 line_height: 1.2,
                 letter_spacing: 0.0,
                 block_role: BlockRole::FigureCaption,
+            },
+            font_id: 0,
+        })
+    }
+
+    fn preformatted_run(text: &str) -> StyledEventOrRun {
+        StyledEventOrRun::Run(StyledRun {
+            text: text.to_string(),
+            style: ComputedTextStyle {
+                family_stack: vec!["monospace".to_string()].into(),
+                weight: 400,
+                italic: false,
+                size_px: 16.0,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                block_role: BlockRole::Preformatted,
             },
             font_id: 0,
         })
@@ -2465,6 +2658,35 @@ mod tests {
             .expect("caption text expected");
         assert_eq!(first_text.style.justify_mode, JustifyMode::None);
         assert!(first_text.style.italic);
+    }
+
+    #[test]
+    fn preformatted_run_preserves_spaces_and_newlines() {
+        let cfg = LayoutConfig {
+            display_width: 360,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let items = vec![
+            StyledEventOrRun::Event(StyledEvent::ParagraphStart),
+            preformatted_run("alpha  beta\n  gamma"),
+            StyledEventOrRun::Event(StyledEvent::ParagraphEnd),
+        ];
+        let pages = engine.layout_items(items);
+        let lines: Vec<&TextCommand> = pages
+            .iter()
+            .flat_map(|p| p.merged_commands_iter())
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() >= 2, "expected explicit newline split");
+        assert_eq!(lines[0].text, "alpha  beta");
+        assert_eq!(lines[1].text, "  gamma");
+        assert!(lines
+            .iter()
+            .all(|line| line.style.justify_mode == JustifyMode::None));
     }
 
     #[test]

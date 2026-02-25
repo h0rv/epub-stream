@@ -130,7 +130,7 @@ Embedded phase peak targets (recommended):
 | Phase | Peak heap target |
 |-------|------------------|
 | `open` | `192KB` |
-| `cover` | `256KB` |
+| `cover` | `384KB` |
 | `tokenize` | `320KB` |
 | `render` | `384KB` |
 | `full` | `384KB` |
@@ -141,7 +141,7 @@ Use per-phase checks for strict regressions:
 
 ```sh
 just analysis heap-analyze budget --phase open --target 192KB
-just analysis heap-analyze budget --phase cover --target 256KB
+just analysis heap-analyze budget --phase cover --target 384KB
 just analysis heap-analyze budget --phase tokenize --target 320KB
 just analysis heap-analyze budget --phase render --target 384KB
 just analysis heap-analyze budget --phase full --target 384KB

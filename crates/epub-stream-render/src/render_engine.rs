@@ -1342,6 +1342,7 @@ enum PersistedBlockRole {
     Heading(u8),
     ListItem,
     FigureCaption,
+    Preformatted,
 }
 
 impl From<BlockRole> for PersistedBlockRole {
@@ -1352,6 +1353,7 @@ impl From<BlockRole> for PersistedBlockRole {
             BlockRole::Heading(level) => Self::Heading(level),
             BlockRole::ListItem => Self::ListItem,
             BlockRole::FigureCaption => Self::FigureCaption,
+            BlockRole::Preformatted => Self::Preformatted,
         }
     }
 }
@@ -1364,6 +1366,7 @@ impl From<PersistedBlockRole> for BlockRole {
             PersistedBlockRole::Heading(level) => Self::Heading(level),
             PersistedBlockRole::ListItem => Self::ListItem,
             PersistedBlockRole::FigureCaption => Self::FigureCaption,
+            PersistedBlockRole::Preformatted => Self::Preformatted,
         }
     }
 }

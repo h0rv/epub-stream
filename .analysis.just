@@ -64,22 +64,22 @@ analyze-static crates_n="20" symbols_n="30" nm_lines="40":
 # --- Runtime profiling ---
 
 # DHAT heap profile for a single pipeline phase.
-heap-profile phase="render" *files:
-    @mkdir -p target/memory
-    cargo run -p epub-stream-heap-profile --release -- --phase {{ phase }} --out-dir target/memory {{ files }}
+heap-profile phase="render" out_dir="target/memory" *files:
+    @mkdir -p {{ out_dir }}
+    cargo run -p epub-stream-heap-profile --release -- --phase {{ phase }} --out-dir {{ out_dir }} {{ files }}
 
 # DHAT heap profile for all pipeline phases.
-heap-profile-all *files:
-    @mkdir -p target/memory
-    cargo run -p epub-stream-heap-profile --release -- --phase open --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase cover --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase tokenize --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase render --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase full --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase session_once --out-dir target/memory {{ files }}
-    cargo run -p epub-stream-heap-profile --release -- --phase session --out-dir target/memory {{ files }}
+heap-profile-all out_dir="target/memory" *files:
+    @mkdir -p {{ out_dir }}
+    cargo run -p epub-stream-heap-profile --release -- --phase open --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase cover --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase tokenize --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase render --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase full --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase session_once --out-dir {{ out_dir }} {{ files }}
+    cargo run -p epub-stream-heap-profile --release -- --phase session --out-dir {{ out_dir }} {{ files }}
     @echo ""
-    @echo "Profiles saved to target/memory/dhat-{open,cover,tokenize,render,full,session_once,session}.json"
+    @echo "Profiles saved to {{ out_dir }}/dhat-{open,cover,tokenize,render,full,session_once,session}.json"
     @echo "Open with: just analysis heap-view <phase>"
 
 # Open the DHAT viewer in the browser and list available profiles.
@@ -98,8 +98,8 @@ heap-list:
     fi
 
 # Profile and immediately open the viewer.
-heap-profile-view phase="render" *files:
-    just analysis heap-profile {{ phase }} {{ files }}
+heap-profile-view phase="render" out_dir="target/memory" *files:
+    just analysis heap-profile {{ phase }} {{ out_dir }} {{ files }}
     just analysis heap-view
 
 # Analyze DHAT profiles (summary, hotspots, churn, peak, budget, compare, report).
@@ -107,18 +107,34 @@ heap-analyze *args:
     UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py {{ args }}
 
 # Full analysis report: summary + hotspots + churn + peak + budget check.
-heap-report phase="full" target="512KB":
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py report --phase {{ phase }} --target {{ target }}
+heap-report phase="full" target="512KB" dir="target/memory":
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py report --phase {{ phase }} --target {{ target }} --dir {{ dir }}
 
 # Budget guardrail across all supported phases (fails fast on any regression).
-heap-budget-all target="512KB":
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase open --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase cover --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase tokenize --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase render --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase full --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session_once --target {{ target }}
-    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session --target {{ target }}
+heap-budget-all target="512KB" dir="target/memory":
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase open --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase cover --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase tokenize --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase render --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase full --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session_once --target {{ target }} --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session --target {{ target }} --dir {{ dir }}
+
+# Embedded-focused per-phase guardrail using stricter phase budgets.
+heap-budget-embedded dir="target/memory":
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase open --target 192KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase cover --target 384KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase tokenize --target 320KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase render --target 384KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase full --target 384KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session_once --target 448KB --dir {{ dir }}
+    UV_CACHE_DIR=${UV_CACHE_DIR:-.uv-cache} uv run scripts/analyze_heap.py budget --phase session --target 512KB --dir {{ dir }}
+
+# One-command embedded heap regression gate:
+# profile all phases for a representative fixture, then enforce per-phase budgets.
+heap-guardrail-embedded file="tests/fixtures/bench/pg84-frankenstein.epub" out_dir="target/memory/embedded-guardrail":
+    just analysis heap-profile-all {{ out_dir }} {{ file }}
+    just analysis heap-budget-embedded {{ out_dir }}
 
 # Run Miri to detect undefined behavior in unsafe code.
 miri:

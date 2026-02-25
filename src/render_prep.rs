@@ -422,6 +422,8 @@ pub enum BlockRole {
     ListItem,
     /// Figure caption block.
     FigureCaption,
+    /// Preformatted/code block where whitespace/newlines are significant.
+    Preformatted,
 }
 
 /// Cascaded and normalized text style for rendering.
@@ -671,6 +673,7 @@ impl Styler {
         let max_nesting = self.config.limits.max_nesting;
         let mut table_row_cells: Vec<usize> = Vec::with_capacity(8);
         let mut entity_buf = String::with_capacity(16);
+        let mut pending_run: Option<StyledRun> = None;
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -693,7 +696,9 @@ impl Styler {
                     )?;
                     if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
-                        emit_image_event(&ctx, in_figure, &mut on_item);
+                        emit_image_event(&ctx, in_figure, &mut |item| {
+                            emit_styled_item(&mut pending_run, item, &mut on_item);
+                        });
                         buf.clear();
                         continue;
                     }
@@ -706,16 +711,22 @@ impl Styler {
                                     self.resolve_context_style(&stack);
                                 let style =
                                     self.compute_style(resolved, role, bold_tag, italic_tag);
-                                on_item(StyledEventOrRun::Run(StyledRun {
-                                    text: " | ".to_string(),
-                                    style,
-                                    font_id: 0,
-                                }));
+                                emit_styled_item(
+                                    &mut pending_run,
+                                    StyledEventOrRun::Run(StyledRun {
+                                        text: " | ".to_string(),
+                                        style,
+                                        font_id: 0,
+                                    }),
+                                    &mut on_item,
+                                );
                             }
                             *cell_count = cell_count.saturating_add(1);
                         }
                     }
-                    emit_start_event(&ctx.tag, &mut on_item);
+                    emit_start_event(&ctx.tag, &mut |item| {
+                        emit_styled_item(&mut pending_run, item, &mut on_item);
+                    });
                     if stack.len() >= max_nesting {
                         nesting_overflow += 1;
                         log::warn!(
@@ -741,7 +752,9 @@ impl Styler {
                     )?;
                     if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
-                        emit_image_event(&ctx, in_figure, &mut on_item);
+                        emit_image_event(&ctx, in_figure, &mut |item| {
+                            emit_styled_item(&mut pending_run, item, &mut on_item);
+                        });
                         buf.clear();
                         continue;
                     }
@@ -752,20 +765,32 @@ impl Styler {
                                     self.resolve_context_style(&stack);
                                 let style =
                                     self.compute_style(resolved, role, bold_tag, italic_tag);
-                                on_item(StyledEventOrRun::Run(StyledRun {
-                                    text: " | ".to_string(),
-                                    style,
-                                    font_id: 0,
-                                }));
+                                emit_styled_item(
+                                    &mut pending_run,
+                                    StyledEventOrRun::Run(StyledRun {
+                                        text: " | ".to_string(),
+                                        style,
+                                        font_id: 0,
+                                    }),
+                                    &mut on_item,
+                                );
                             }
                             *cell_count = cell_count.saturating_add(1);
                         }
                     }
-                    emit_start_event(&ctx.tag, &mut on_item);
+                    emit_start_event(&ctx.tag, &mut |item| {
+                        emit_styled_item(&mut pending_run, item, &mut on_item);
+                    });
                     if ctx.tag == "br" {
-                        on_item(StyledEventOrRun::Event(StyledEvent::LineBreak));
+                        emit_styled_item(
+                            &mut pending_run,
+                            StyledEventOrRun::Event(StyledEvent::LineBreak),
+                            &mut on_item,
+                        );
                     }
-                    emit_end_event(&ctx.tag, &mut on_item);
+                    emit_end_event(&ctx.tag, &mut |item| {
+                        emit_styled_item(&mut pending_run, item, &mut on_item);
+                    });
                 }
                 Ok(Event::End(e)) => {
                     let tag = decode_tag_name(&reader, e.name().as_ref())?;
@@ -778,7 +803,9 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    emit_end_event(&tag, &mut on_item);
+                    emit_end_event(&tag, &mut |item| {
+                        emit_styled_item(&mut pending_run, item, &mut on_item);
+                    });
                     if tag == "tr" {
                         table_row_cells.pop();
                     }
@@ -812,11 +839,15 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
-                    on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized.into_owned(),
-                        style,
-                        font_id: 0,
-                    }));
+                    emit_styled_item(
+                        &mut pending_run,
+                        StyledEventOrRun::Run(StyledRun {
+                            text: normalized.into_owned(),
+                            style,
+                            font_id: 0,
+                        }),
+                        &mut on_item,
+                    );
                 }
                 Ok(Event::CData(e)) => {
                     if skip_depth > 0 {
@@ -840,11 +871,15 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
-                    on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized.into_owned(),
-                        style,
-                        font_id: 0,
-                    }));
+                    emit_styled_item(
+                        &mut pending_run,
+                        StyledEventOrRun::Run(StyledRun {
+                            text: normalized.into_owned(),
+                            style,
+                            font_id: 0,
+                        }),
+                        &mut on_item,
+                    );
                 }
                 Ok(Event::GeneralRef(e)) => {
                     if skip_depth > 0 {
@@ -883,11 +918,15 @@ impl Styler {
                     }
                     let (resolved, role, bold_tag, italic_tag) = self.resolve_context_style(&stack);
                     let style = self.compute_style(resolved, role, bold_tag, italic_tag);
-                    on_item(StyledEventOrRun::Run(StyledRun {
-                        text: normalized.into_owned(),
-                        style,
-                        font_id: 0,
-                    }));
+                    emit_styled_item(
+                        &mut pending_run,
+                        StyledEventOrRun::Run(StyledRun {
+                            text: normalized.into_owned(),
+                            style,
+                            font_id: 0,
+                        }),
+                        &mut on_item,
+                    );
                 }
                 Ok(Event::Eof) => break,
                 Ok(_) => {}
@@ -903,6 +942,7 @@ impl Styler {
             }
             buf.clear();
         }
+        flush_pending_run(&mut pending_run, &mut on_item);
 
         Ok(())
     }
@@ -955,6 +995,8 @@ impl Styler {
             None => {
                 if matches!(role, BlockRole::FigureCaption) {
                     1.3
+                } else if matches!(role, BlockRole::Preformatted) {
+                    1.25
                 } else {
                     1.4
                 }
@@ -2265,7 +2307,7 @@ fn emit_image_event<F: FnMut(StyledEventOrRun)>(
 
 fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" | "figure" | "figcaption" | "table" | "tr" => {
+        "p" | "div" | "figure" | "figcaption" | "table" | "tr" | "pre" | "textarea" => {
             on_item(StyledEventOrRun::Event(StyledEvent::ParagraphStart))
         }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemStart)),
@@ -2281,7 +2323,7 @@ fn emit_start_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
 
 fn emit_end_event<F: FnMut(StyledEventOrRun)>(tag: &str, on_item: &mut F) {
     match tag {
-        "p" | "div" | "figure" | "figcaption" | "table" | "tr" => {
+        "p" | "div" | "figure" | "figcaption" | "table" | "tr" | "pre" | "textarea" => {
             on_item(StyledEventOrRun::Event(StyledEvent::ParagraphEnd))
         }
         "li" => on_item(StyledEventOrRun::Event(StyledEvent::ListItemEnd)),
@@ -2300,6 +2342,7 @@ fn role_from_tag(tag: &str) -> Option<BlockRole> {
         "p" | "div" => Some(BlockRole::Paragraph),
         "li" => Some(BlockRole::ListItem),
         "figcaption" => Some(BlockRole::FigureCaption),
+        "pre" | "textarea" | "code" | "kbd" | "samp" => Some(BlockRole::Preformatted),
         "h1" => Some(BlockRole::Heading(1)),
         "h2" => Some(BlockRole::Heading(2)),
         "h3" => Some(BlockRole::Heading(3)),
@@ -2383,6 +2426,46 @@ fn family_names_match(requested: &str, candidate: &str) -> bool {
 
 fn has_non_ascii(text: &str) -> bool {
     !text.is_ascii()
+}
+
+fn flush_pending_run<F: FnMut(StyledEventOrRun)>(
+    pending_run: &mut Option<StyledRun>,
+    on_item: &mut F,
+) {
+    if let Some(run) = pending_run.take() {
+        on_item(StyledEventOrRun::Run(run));
+    }
+}
+
+fn emit_styled_item<F: FnMut(StyledEventOrRun)>(
+    pending_run: &mut Option<StyledRun>,
+    item: StyledEventOrRun,
+    on_item: &mut F,
+) {
+    match item {
+        StyledEventOrRun::Run(run) => {
+            if let Some(prev) = pending_run.as_mut() {
+                let keep_separate = prev.text == " | " || run.text == " | ";
+                if prev.style == run.style && !keep_separate {
+                    if !run.text.is_empty() {
+                        if !prev.text.is_empty()
+                            && !matches!(run.style.block_role, BlockRole::Preformatted)
+                        {
+                            prev.text.push(' ');
+                        }
+                        prev.text.push_str(&run.text);
+                    }
+                    return;
+                }
+            }
+            flush_pending_run(pending_run, on_item);
+            *pending_run = Some(run);
+        }
+        other => {
+            flush_pending_run(pending_run, on_item);
+            on_item(other);
+        }
+    }
 }
 
 fn resolve_item_with_font(
@@ -3102,6 +3185,32 @@ mod tests {
             .expect("style should succeed");
         let run = chapter.runs().next().expect("expected run");
         assert_eq!(run.font_id, 0);
+    }
+
+    #[test]
+    fn styler_preserves_preformatted_run_whitespace_and_role() {
+        let mut styler = Styler::new(StyleConfig::default());
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let chapter = styler
+            .style_chapter("<pre>alpha  beta\n  gamma</pre>")
+            .expect("style should succeed");
+
+        let run = chapter.runs().next().expect("expected preformatted run");
+        assert_eq!(run.text, "alpha  beta\n  gamma");
+        assert!(matches!(run.style.block_role, BlockRole::Preformatted));
+
+        let starts = chapter
+            .iter()
+            .filter(|item| matches!(item, StyledEventOrRun::Event(StyledEvent::ParagraphStart)))
+            .count();
+        let ends = chapter
+            .iter()
+            .filter(|item| matches!(item, StyledEventOrRun::Event(StyledEvent::ParagraphEnd)))
+            .count();
+        assert!(starts >= 1);
+        assert_eq!(starts, ends);
     }
 
     #[test]

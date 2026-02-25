@@ -186,6 +186,36 @@ jobs:
       - name: Run embedded mode tests with tiny budgets
         run: just test-embedded
 
+  heap-guardrail-embedded:
+    name: Embedded Heap Guardrail
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-heap-guardrail-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stable-heap-guardrail-
+
+      - name: Run embedded heap guardrail
+        run: just analysis heap-guardrail-embedded
+
   docs:
     name: Docs
     runs-on: ubuntu-24.04

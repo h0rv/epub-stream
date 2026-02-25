@@ -63,12 +63,12 @@ impl RenderPage {
         Self {
             page_number,
             // Keep command-layer defaults lazy so empty pages avoid baseline heap traffic.
-            commands: Vec::new(),
-            content_commands: Vec::with_capacity(8),
-            chrome_commands: Vec::new(),
-            overlay_commands: Vec::new(),
-            overlay_items: Vec::new(),
-            annotations: Vec::new(),
+            commands: Vec::with_capacity(0),
+            content_commands: Vec::with_capacity(0),
+            chrome_commands: Vec::with_capacity(0),
+            overlay_commands: Vec::with_capacity(0),
+            overlay_items: Vec::with_capacity(0),
+            annotations: Vec::with_capacity(0),
             metrics: PageMetrics {
                 chapter_page_index: page_number.saturating_sub(1),
                 ..PageMetrics::default()
@@ -495,7 +495,7 @@ mod tests {
     fn render_page_new_defers_less_used_vector_allocations() {
         let page = RenderPage::new(1);
         assert_eq!(page.commands.capacity(), 0);
-        assert_eq!(page.content_commands.capacity(), 8);
+        assert_eq!(page.content_commands.capacity(), 0);
         assert_eq!(page.chrome_commands.capacity(), 0);
         assert_eq!(page.overlay_commands.capacity(), 0);
         assert_eq!(page.overlay_items.capacity(), 0);
