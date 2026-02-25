@@ -418,9 +418,7 @@ impl LayoutSession {
         F: FnMut(RenderPage),
     {
         self.push_item_impl(item);
-        for page in self.st.drain_emitted_pages() {
-            on_page(page);
-        }
+        self.st.drain_emitted_pages(on_page);
     }
 
     /// Finish the session and stream resulting pages.
@@ -433,8 +431,7 @@ impl LayoutSession {
         let chrome_cfg = self.engine.cfg.page_chrome;
         if !chrome_cfg.header_enabled && !chrome_cfg.footer_enabled && !chrome_cfg.progress_enabled
         {
-            self.st.flush_page_if_non_empty();
-            for page in self.st.drain_emitted_pages() {
+            for page in core::mem::take(&mut self.st).into_pages() {
                 on_page(page);
             }
             return;
@@ -1571,34 +1568,50 @@ impl LayoutState {
     }
 
     fn start_next_page(&mut self) {
-        self.flush_page_if_non_empty();
+        let emitted_current = self.flush_page_if_non_empty();
         self.page_no += 1;
-        self.page = RenderPage::new(self.page_no);
+        if !emitted_current {
+            self.page.clear_for_reuse(self.page_no);
+        }
         self.cursor_y = self.cfg.margin_top;
         if self.in_paragraph {
             self.lines_on_current_paragraph_page = 0;
         }
     }
 
-    fn flush_page_if_non_empty(&mut self) {
+    fn flush_page_if_non_empty(&mut self) -> bool {
+        if !self.emit_current_page_if_non_empty() {
+            return false;
+        }
+        self.page = RenderPage::new(self.page_no + 1);
+        true
+    }
+
+    fn into_pages(mut self) -> Vec<RenderPage> {
+        self.emit_current_page_if_non_empty();
+        self.emitted
+    }
+
+    fn emit_current_page_if_non_empty(&mut self) -> bool {
         if self.page.content_commands.is_empty()
             && self.page.chrome_commands.is_empty()
             && self.page.overlay_commands.is_empty()
         {
-            return;
+            return false;
         }
-        let mut page = core::mem::replace(&mut self.page, RenderPage::new(self.page_no + 1));
+        let mut page = core::mem::take(&mut self.page);
         page.metrics.chapter_page_index = page.page_number.saturating_sub(1);
         self.emitted.push(page);
+        true
     }
 
-    fn into_pages(mut self) -> Vec<RenderPage> {
-        self.flush_page_if_non_empty();
-        self.emitted
-    }
-
-    fn drain_emitted_pages(&mut self) -> Vec<RenderPage> {
-        self.emitted.drain(..).collect()
+    fn drain_emitted_pages<F>(&mut self, on_page: &mut F)
+    where
+        F: FnMut(RenderPage),
+    {
+        for page in self.emitted.drain(..) {
+            on_page(page);
+        }
     }
 }
 
@@ -1769,6 +1782,48 @@ fn resolve_line_justify_mode(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct FamilyClass {
+    proportional: bool,
+    serif: bool,
+    sans: bool,
+}
+
+fn classify_family(family: &str) -> FamilyClass {
+    let bytes = family.as_bytes();
+    let proportional = family_is_proportional(bytes);
+    FamilyClass {
+        proportional,
+        serif: contains_ascii_case_insensitive(bytes, b"serif"),
+        sans: contains_ascii_case_insensitive(bytes, b"sans"),
+    }
+}
+
+fn family_is_proportional(family: &[u8]) -> bool {
+    !contains_ascii_case_insensitive(family, b"mono")
+        && !contains_ascii_case_insensitive(family, b"fixed")
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let max_start = haystack.len() - needle.len();
+    for start in 0..=max_start {
+        if haystack[start..start + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn heuristic_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     let chars = text.chars().count();
     if chars == 0 {
@@ -1778,8 +1833,8 @@ fn heuristic_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
     // - per-glyph class widths (narrow/regular/wide/punctuation/digit)
     // - style/family modifiers
     // This is more stable across font sizes/families than a single scalar.
-    let family = style.family.to_ascii_lowercase();
-    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let family = classify_family(&style.family);
+    let proportional = family.proportional;
     let mut em_sum = 0.0f32;
     if proportional {
         for ch in text.chars() {
@@ -1792,9 +1847,9 @@ fn heuristic_measure_text(text: &str, style: &ResolvedTextStyle) -> f32 {
         }
     }
 
-    let mut family_scale = if family.contains("serif") {
+    let mut family_scale = if family.serif {
         1.03
-    } else if family.contains("sans") {
+    } else if family.sans {
         0.99
     } else {
         1.00
@@ -1845,8 +1900,7 @@ fn line_height_px(style: &ResolvedTextStyle, cfg: &LayoutConfig) -> i32 {
 }
 
 fn line_fit_guard_px(base_guard: f32, style: &ResolvedTextStyle) -> f32 {
-    let family = style.family.to_ascii_lowercase();
-    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let proportional = family_is_proportional(style.family.as_bytes());
     let mut guard = base_guard;
     // Proportional and larger sizes can have right-side overhangs in rendered
     // glyph bitmaps; reserve a tiny extra safety band to avoid clipping.
@@ -1867,8 +1921,7 @@ fn conservative_heuristic_measure_text(text: &str, style: &ResolvedTextStyle) ->
     if chars == 0 {
         return 0.0;
     }
-    let family = style.family.to_ascii_lowercase();
-    let proportional = !(family.contains("mono") || family.contains("fixed"));
+    let proportional = family_is_proportional(style.family.as_bytes());
     let mut em_sum = 0.0f32;
     if proportional {
         for ch in text.chars() {
