@@ -51,6 +51,11 @@ fills. The Vec keeps its allocation — no alloc, no free, no fragmentation.
 
 **This single pattern eliminates ~80% of fragmentation issues.**
 
+Render/layout has the same pattern via borrowed-page streaming:
+`RenderEngine::prepare_chapter_with_page_refs(...)` emits `&RenderPage`
+callbacks and reuses internal page buffers across page boundaries (with page
+chrome disabled).
+
 #### Implemented `_into` / scratch APIs
 
 | Method | Buffer type | Purpose |

@@ -42,9 +42,10 @@ In `epub-stream-render`:
 
 1. `RenderEngine::prepare_chapter(...) -> Vec<RenderPage>`.
 2. `RenderEngine::prepare_chapter_with(...)` page streaming callback.
-3. `LayoutConfig` with all typography knobs: margins, paragraph/list/heading gaps, indent policies, justification thresholds, line-height controls, soft-hyphen policy.
-4. IR must include resolved font identity in text commands (`font_id`, not weight/italic guesses).
-5. Header/footer/progress represented in IR as commands, not backend special-casing.
+3. `RenderEngine::prepare_chapter_with_page_refs(...)` borrowed page-view streaming callback for low-allocation embedded loops.
+4. `LayoutConfig` with all typography knobs: margins, paragraph/list/heading gaps, indent policies, justification thresholds, line-height controls, soft-hyphen policy.
+5. IR must include resolved font identity in text commands (`font_id`, not weight/italic guesses).
+6. Header/footer/progress represented in IR as commands, not backend special-casing.
 
 In `epub-stream-embedded-graphics`:
 

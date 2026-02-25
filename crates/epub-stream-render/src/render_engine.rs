@@ -1729,6 +1729,7 @@ impl RenderEngine {
             None
         } else {
             let mut session = self.layout.start_session_with_text_measurer(text_measurer);
+            session.set_chapter_index(chapter_index);
             if let Some(family) = config.forced_font_family.as_deref() {
                 session.set_override_family(Arc::from(family));
             }
@@ -1827,6 +1828,28 @@ impl RenderEngine {
         self.prepare_chapter_with_config(book, chapter_index, RenderConfig::default(), on_page)
     }
 
+    /// Prepare and layout a chapter while streaming borrowed page views.
+    ///
+    /// This mode is optimized for embedded render loops that consume each page
+    /// immediately and do not retain `RenderPage` values.
+    pub fn prepare_chapter_with_page_refs<R, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        on_page: F,
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(&RenderPage),
+    {
+        self.prepare_chapter_with_config_page_refs(
+            book,
+            chapter_index,
+            RenderConfig::default(),
+            on_page,
+        )
+    }
+
     /// Prepare and layout a chapter with explicit config and stream each page.
     pub fn prepare_chapter_with_config<R, F>(
         &self,
@@ -1843,6 +1866,40 @@ impl RenderEngine {
         self.prepare_chapter_with_cancel_and_config(book, chapter_index, cancel, config, |page| {
             on_page(page)
         })
+    }
+
+    /// Prepare and layout a chapter with explicit config while streaming borrowed page views.
+    ///
+    /// For configs that require ownership semantics (cache or page ranges), this
+    /// falls back to owned-page streaming internally.
+    pub fn prepare_chapter_with_config_page_refs<R, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        config: RenderConfig<'_>,
+        mut on_page: F,
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(&RenderPage),
+    {
+        if config.cache.is_some() || config.page_range.is_some() {
+            let mut page_count = 0usize;
+            self.prepare_chapter_with_config(book, chapter_index, config, |page| {
+                page_count += 1;
+                on_page(&page);
+            })?;
+            return Ok(ChapterLayoutSummary { page_count });
+        }
+
+        let cancel = config.cancel.unwrap_or(&NeverCancel);
+        self.prepare_chapter_with_cancel_and_config_page_refs(
+            book,
+            chapter_index,
+            cancel,
+            config,
+            &mut on_page,
+        )
     }
 
     /// Prepare and layout caller-provided chapter bytes and stream each page.
@@ -1978,6 +2035,73 @@ impl RenderEngine {
             page_count += 1;
             on_page(page);
         });
+        let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        self.emit_diagnostic(RenderDiagnostic::ReflowTimeMs(elapsed));
+        Ok(ChapterLayoutSummary { page_count })
+    }
+
+    fn prepare_chapter_with_cancel_and_config_page_refs<R, C, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        cancel: &C,
+        config: RenderConfig<'_>,
+        on_page: &mut F,
+    ) -> Result<ChapterLayoutSummary, RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        C: CancelToken + ?Sized,
+        F: FnMut(&RenderPage),
+    {
+        let embedded_fonts = config.embedded_fonts;
+        let forced_font_family = config.forced_font_family.clone();
+        let started = Instant::now();
+        if cancel.is_cancelled() {
+            self.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        let mut session = self.begin(chapter_index, config);
+        session.set_hyphenation_language(book.language());
+        let mut page_count = 0usize;
+        if session.is_complete() {
+            session.drain_pages(|page| {
+                page_count += 1;
+                on_page(&page);
+            });
+            return Ok(ChapterLayoutSummary { page_count });
+        }
+        let mut prep = if let Some(family) = forced_font_family.as_deref() {
+            RenderPrep::new(self.opts.prep).with_font_policy(forced_font_policy(family))
+        } else {
+            RenderPrep::new(self.opts.prep).with_serif_default()
+        };
+        if embedded_fonts {
+            prep = prep.with_embedded_fonts_from_book(book)?;
+        }
+        let mut saw_cancelled = false;
+        prep.prepare_chapter_with(book, chapter_index, |item| {
+            if saw_cancelled || cancel.is_cancelled() {
+                saw_cancelled = true;
+                return;
+            }
+            if session
+                .push_page_refs(item, &mut |page| {
+                    page_count += 1;
+                    on_page(page);
+                })
+                .is_err()
+            {
+                saw_cancelled = true;
+            }
+        })?;
+        if saw_cancelled || cancel.is_cancelled() {
+            self.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        session.finish_page_refs(&mut |page| {
+            page_count += 1;
+            on_page(page);
+        })?;
         let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         self.emit_diagnostic(RenderDiagnostic::ReflowTimeMs(elapsed));
         Ok(ChapterLayoutSummary { page_count })
@@ -2226,6 +2350,38 @@ impl LayoutSession<'_> {
         Ok(())
     }
 
+    /// Push one styled item and stream closed pages as borrowed views.
+    ///
+    /// This mode reuses internal page buffers and is intended for embedded
+    /// consumers that render immediately without retaining `RenderPage`s.
+    pub fn push_page_refs<F>(
+        &mut self,
+        item: StyledEventOrRun,
+        on_page: &mut F,
+    ) -> Result<(), RenderEngineError>
+    where
+        F: FnMut(&RenderPage),
+    {
+        if self.completed {
+            return Ok(());
+        }
+        if self.cfg.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            self.engine.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        if let Some(inner) = self.inner.as_mut() {
+            let range = normalize_page_range(self.cfg.page_range.clone());
+            let page_index = &mut self.page_index;
+            inner.push_item_with_page_refs(item, &mut |page| {
+                if page_in_range(*page_index, &range) {
+                    on_page(page);
+                }
+                *page_index += 1;
+            });
+        }
+        Ok(())
+    }
+
     /// Drain currently available pages in FIFO order.
     pub fn drain_pages<F>(&mut self, mut on_page: F)
     where
@@ -2274,6 +2430,35 @@ impl LayoutSession<'_> {
             if !self.rendered_pages.is_empty() {
                 cache.store_chapter_pages(self.profile, self.chapter_index, &self.rendered_pages);
             }
+        }
+        self.completed = true;
+        Ok(())
+    }
+
+    /// Finish layout and stream remaining pages as borrowed views.
+    ///
+    /// When cache/range/chrome requirements require ownership, this method may
+    /// internally fall back to owned-page emission.
+    pub fn finish_page_refs<F>(&mut self, on_page: &mut F) -> Result<(), RenderEngineError>
+    where
+        F: FnMut(&RenderPage),
+    {
+        if self.completed {
+            return Ok(());
+        }
+        if self.cfg.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            self.engine.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        if let Some(inner) = self.inner.as_mut() {
+            let range = normalize_page_range(self.cfg.page_range.clone());
+            let page_index = &mut self.page_index;
+            inner.finish_with_page_refs(&mut |page| {
+                if page_in_range(*page_index, &range) {
+                    on_page(page);
+                }
+                *page_index += 1;
+            });
         }
         self.completed = true;
         Ok(())
@@ -2591,6 +2776,39 @@ mod tests {
         }
         session.finish().expect("finish should pass");
         session.drain_pages(|page| streamed.push(page));
+
+        let mut expected = engine.layout.layout_items(items);
+        for page in &mut expected {
+            page.metrics.chapter_index = 3;
+        }
+        assert_eq!(streamed, expected);
+        assert!(streamed.iter().all(|page| page.metrics.chapter_index == 3));
+    }
+
+    #[test]
+    fn begin_push_and_drain_page_refs_streams_incrementally() {
+        let mut opts = RenderEngineOptions::for_display(300, 120);
+        opts.layout.margin_top = 8;
+        opts.layout.margin_bottom = 8;
+        let engine = RenderEngine::new(opts);
+
+        let mut items = Vec::new();
+        for _ in 0..40 {
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphStart));
+            items.push(body_run("one two three four five six seven eight nine ten"));
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphEnd));
+        }
+
+        let mut session = engine.begin(3, RenderConfig::default());
+        let mut streamed = Vec::new();
+        for item in &items {
+            session
+                .push_page_refs(item.clone(), &mut |page| streamed.push(page.clone()))
+                .expect("push should pass");
+        }
+        session
+            .finish_page_refs(&mut |page| streamed.push(page.clone()))
+            .expect("finish should pass");
 
         let mut expected = engine.layout.layout_items(items);
         for page in &mut expected {

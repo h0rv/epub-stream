@@ -102,6 +102,11 @@ engine.prepare_chapter_with(&mut book, 0, |page| {
     let _meta = page.page_meta();
 })?;
 
+// Borrowed-page callback path (reuses internal page buffers; lowest churn).
+engine.prepare_chapter_with_page_refs(&mut book, 0, |page| {
+    let _meta = page.page_meta();
+})?;
+
 // Range path.
 let _subset = engine.page_range(&mut book, 0, 0..3)?;
 

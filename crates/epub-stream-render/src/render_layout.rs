@@ -275,6 +275,26 @@ impl LayoutEngine {
         session.finish(&mut on_page);
     }
 
+    /// Layout styled items and stream borrowed page views.
+    ///
+    /// This path reuses the same page buffers across page boundaries when page
+    /// chrome markers are disabled, minimizing command-vector churn in
+    /// allocation-sensitive embedded flows.
+    ///
+    /// When page chrome markers are enabled, this falls back to owned-page
+    /// emission to preserve total-page-aware chrome semantics.
+    pub fn layout_with_page_refs<I, F>(&self, items: I, mut on_page: F)
+    where
+        I: IntoIterator<Item = StyledEventOrRun>,
+        F: FnMut(&RenderPage),
+    {
+        let mut session = self.start_session();
+        for item in items {
+            session.push_item_with_page_refs(item, &mut on_page);
+        }
+        session.finish_with_page_refs(&mut on_page);
+    }
+
     fn handle_run(&self, st: &mut LayoutState, ctx: &mut BlockCtx, run: StyledRun) {
         let mut style = to_resolved_style(&run.style);
         style.font_id = Some(run.font_id);
@@ -447,6 +467,26 @@ impl LayoutSession {
         self.st.drain_emitted_pages(on_page);
     }
 
+    /// Push one styled item and emit fully closed pages as borrowed views.
+    ///
+    /// Borrowed-page streaming avoids reallocating `RenderPage` command
+    /// buffers between page breaks while page chrome is disabled.
+    pub fn push_item_with_page_refs<F>(&mut self, item: StyledEventOrRun, on_page: &mut F)
+    where
+        F: FnMut(&RenderPage),
+    {
+        self.st.with_borrowed_page_sink(on_page, |st| match item {
+            StyledEventOrRun::Run(run) => self.engine.handle_run(st, &mut self.ctx, run),
+            StyledEventOrRun::Event(ev) => {
+                self.engine.handle_event(st, &mut self.ctx, ev);
+            }
+            StyledEventOrRun::Image(image) => {
+                self.engine.handle_image(st, &mut self.ctx, image);
+            }
+        });
+        debug_assert!(self.st.emitted.is_empty());
+    }
+
     /// Finish the session and stream resulting pages.
     pub fn finish<F>(&mut self, on_page: &mut F)
     where
@@ -467,6 +507,34 @@ impl LayoutSession {
         for page in pages {
             on_page(page);
         }
+    }
+
+    /// Finish the session and stream remaining pages as borrowed views.
+    ///
+    /// With page chrome enabled this falls back to owned-page emission because
+    /// chrome progress markers depend on final chapter page counts.
+    pub fn finish_with_page_refs<F>(&mut self, on_page: &mut F)
+    where
+        F: FnMut(&RenderPage),
+    {
+        let chrome_cfg = self.engine.cfg.page_chrome;
+        if chrome_cfg.header_enabled || chrome_cfg.footer_enabled || chrome_cfg.progress_enabled {
+            self.finish(&mut |page| on_page(&page));
+            return;
+        }
+        self.st.with_borrowed_page_sink(on_page, |st| {
+            st.flush_buffered_paragraph(false, true);
+            st.flush_line(true, false);
+            if st.emit_current_page_if_non_empty() {
+                st.page.clear_for_reuse(st.page_no);
+            }
+        });
+        debug_assert!(self.st.emitted.is_empty());
+    }
+
+    /// Set chapter index metadata used for emitted page metrics.
+    pub fn set_chapter_index(&mut self, chapter_index: usize) {
+        self.st.chapter_index = Some(chapter_index);
     }
 }
 
@@ -496,6 +564,39 @@ struct ParagraphWord {
     style_idx: usize,
     left_inset_px: i32,
     width_px: f32,
+}
+
+#[derive(Clone, Copy)]
+struct BorrowedPageSink {
+    ctx: *mut (),
+    emit_fn: unsafe fn(*mut (), &RenderPage),
+}
+
+impl BorrowedPageSink {
+    fn new<F>(sink: &mut F) -> Self
+    where
+        F: FnMut(&RenderPage),
+    {
+        unsafe fn emit<F>(ctx: *mut (), page: &RenderPage)
+        where
+            F: FnMut(&RenderPage),
+        {
+            // SAFETY: `ctx` was created from `&mut F` in `new` and remains
+            // valid for the duration of `with_borrowed_page_sink`.
+            let sink = unsafe { &mut *(ctx as *mut F) };
+            sink(page);
+        }
+        Self {
+            ctx: sink as *mut F as *mut (),
+            emit_fn: emit::<F>,
+        }
+    }
+
+    fn emit(self, page: &RenderPage) {
+        // SAFETY: construction and lifetime invariants are enforced by
+        // `with_borrowed_page_sink`.
+        unsafe { (self.emit_fn)(self.ctx, page) }
+    }
 }
 
 #[cfg(not(target_os = "espidf"))]
@@ -543,6 +644,8 @@ struct LayoutState {
     paragraph_chars: usize,
     replay_direct_mode: bool,
     buffered_flush_mode: bool,
+    chapter_index: Option<usize>,
+    borrowed_page_sink: Option<BorrowedPageSink>,
     /// When set, overrides the CSS family on every resolved text style.
     override_family: Option<Arc<str>>,
 }
@@ -592,8 +695,21 @@ impl LayoutState {
             paragraph_chars: 0,
             replay_direct_mode: false,
             buffered_flush_mode: false,
+            chapter_index: None,
+            borrowed_page_sink: None,
             override_family: None,
         }
+    }
+
+    fn with_borrowed_page_sink<F, R>(&mut self, sink: &mut F, f: impl FnOnce(&mut Self) -> R) -> R
+    where
+        F: FnMut(&RenderPage),
+    {
+        debug_assert!(self.borrowed_page_sink.is_none());
+        self.borrowed_page_sink = Some(BorrowedPageSink::new(sink));
+        let output = f(self);
+        self.borrowed_page_sink = None;
+        output
     }
 
     fn take_paragraph_buffers(&mut self) -> (Vec<ParagraphWord>, String, Vec<ResolvedTextStyle>) {
@@ -819,14 +935,13 @@ impl LayoutState {
             let max_caption_w = (content_w - 8).max(1) as f32;
             let caption_text =
                 truncate_text_to_width(self, &caption, &caption_style, max_caption_w);
-            self.page
-                .push_content_text_command(TextCommand {
-                    x: self.cfg.margin_left + 4,
-                    baseline_y: self.cursor_y + line_ascent_px(&caption_style, caption_line_h),
-                    text: caption_text,
-                    font_id: caption_style.font_id,
-                    style: caption_style,
-                });
+            self.page.push_content_text_command(TextCommand {
+                x: self.cfg.margin_left + 4,
+                baseline_y: self.cursor_y + line_ascent_px(&caption_style, caption_line_h),
+                text: caption_text,
+                font_id: caption_style.font_id,
+                style: caption_style,
+            });
             self.cursor_y += caption_line_h;
         }
         if enable_caption {
@@ -1759,14 +1874,13 @@ impl LayoutState {
             },
         );
 
-        self.page
-            .push_content_text_command(TextCommand {
-                x: self.cfg.margin_left + line.left_inset_px,
-                baseline_y: self.cursor_y + line_ascent_px(&line.style, line.line_height_px),
-                text: line.text,
-                font_id: line.style.font_id,
-                style: line.style,
-            });
+        self.page.push_content_text_command(TextCommand {
+            x: self.cfg.margin_left + line.left_inset_px,
+            baseline_y: self.cursor_y + line_ascent_px(&line.style, line.line_height_px),
+            text: line.text,
+            font_id: line.style.font_id,
+            style: line.style,
+        });
 
         self.cursor_y += line.line_height_px + self.cfg.line_gap_px;
         if self.in_paragraph {
@@ -1851,7 +1965,7 @@ impl LayoutState {
     fn start_next_page(&mut self) {
         let emitted_current = self.flush_page_if_non_empty();
         self.page_no += 1;
-        if !emitted_current {
+        if self.borrowed_page_sink.is_some() || !emitted_current {
             self.page.clear_for_reuse(self.page_no);
         }
         self.cursor_y = self.cfg.margin_top;
@@ -1864,7 +1978,9 @@ impl LayoutState {
         if !self.emit_current_page_if_non_empty() {
             return false;
         }
-        self.page = RenderPage::new(self.page_no + 1);
+        if self.borrowed_page_sink.is_none() {
+            self.page = RenderPage::new(self.page_no + 1);
+        }
         true
     }
 
@@ -1880,8 +1996,15 @@ impl LayoutState {
         {
             return false;
         }
-        let mut page = core::mem::take(&mut self.page);
-        page.metrics.chapter_page_index = page.page_number.saturating_sub(1);
+        if let Some(chapter_index) = self.chapter_index {
+            self.page.metrics.chapter_index = chapter_index;
+        }
+        self.page.metrics.chapter_page_index = self.page.page_number.saturating_sub(1);
+        if let Some(sink) = self.borrowed_page_sink {
+            sink.emit(&self.page);
+            return true;
+        }
+        let page = core::mem::take(&mut self.page);
         self.emitted.push(page);
         true
     }
@@ -2519,6 +2642,38 @@ mod tests {
 
         let pages = engine.layout_items(items);
         assert!(pages.len() > 1);
+    }
+
+    #[test]
+    fn layout_with_page_refs_reuses_content_command_capacity() {
+        let cfg = LayoutConfig {
+            display_height: 120,
+            margin_top: 8,
+            margin_bottom: 8,
+            ..LayoutConfig::default()
+        };
+        let engine = LayoutEngine::new(cfg);
+        let mut items = Vec::new();
+        for _ in 0..50 {
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphStart));
+            items.push(body_run("hello world epub-stream renderer pipeline"));
+            items.push(StyledEventOrRun::Event(StyledEvent::ParagraphEnd));
+        }
+
+        let mut page_numbers = Vec::new();
+        let mut capacities = Vec::new();
+        engine.layout_with_page_refs(items, |page| {
+            page_numbers.push(page.page_number);
+            capacities.push(page.content_commands.capacity());
+        });
+
+        assert!(page_numbers.len() > 1);
+        for (idx, page_no) in page_numbers.iter().enumerate() {
+            assert_eq!(*page_no, idx + 1);
+        }
+        for pair in capacities.windows(2) {
+            assert!(pair[1] >= pair[0]);
+        }
     }
 
     #[test]

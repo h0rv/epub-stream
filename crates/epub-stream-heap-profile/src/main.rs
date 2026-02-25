@@ -172,10 +172,14 @@ fn profile_file(path: &Path, phase: Phase) {
             };
             for _pass in 0..pass_count {
                 for ch in 0..count {
-                    let result =
-                        engine.prepare_chapter_with_config(&mut book, ch, config.clone(), |_| {
+                    let result = engine.prepare_chapter_with_config_page_refs(
+                        &mut book,
+                        ch,
+                        config.clone(),
+                        |_| {
                             flips = flips.saturating_add(1);
-                        });
+                        },
+                    );
                     let _ = result;
                 }
             }
