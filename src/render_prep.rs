@@ -1540,7 +1540,7 @@ impl RenderPrep {
         self.styler.style_chapter_bytes_with(&html, |item| {
             let item =
                 resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
-            let (item, _) = resolve_item_with_font(font_resolver, item);
+            let item = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
     }
@@ -1591,7 +1591,7 @@ impl RenderPrep {
         self.styler.style_chapter_bytes_with(html, |item| {
             let item =
                 resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
-            let (item, _) = resolve_item_with_font(font_resolver, item);
+            let item = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
     }
@@ -1645,7 +1645,7 @@ impl RenderPrep {
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
             let item = resolve_item_assets_for_chapter(chapter_href_ref, None, item);
-            let (item, _) = resolve_item_with_font(font_resolver, item);
+            let item = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
     }
@@ -1669,7 +1669,7 @@ impl RenderPrep {
         self.styler.style_chapter_bytes_with(&html, |item| {
             let item =
                 resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
-            let (item, trace) = resolve_item_with_font(font_resolver, item);
+            let (item, trace) = resolve_item_with_font_trace(font_resolver, item);
             on_item(item, trace);
         })
     }
@@ -1969,6 +1969,20 @@ fn has_non_ascii(text: &str) -> bool {
 }
 
 fn resolve_item_with_font(
+    font_resolver: &FontResolver,
+    item: StyledEventOrRun,
+) -> StyledEventOrRun {
+    match item {
+        StyledEventOrRun::Run(mut run) => {
+            run.font_id = font_resolver.resolve(&run.style).font_id;
+            StyledEventOrRun::Run(run)
+        }
+        StyledEventOrRun::Event(event) => StyledEventOrRun::Event(event),
+        StyledEventOrRun::Image(image) => StyledEventOrRun::Image(image),
+    }
+}
+
+fn resolve_item_with_font_trace(
     font_resolver: &FontResolver,
     item: StyledEventOrRun,
 ) -> (StyledEventOrRun, RenderPrepTrace) {
