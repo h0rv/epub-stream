@@ -464,7 +464,9 @@ struct CurrentLine {
 
 #[derive(Clone, Debug)]
 struct ParagraphWord {
-    text: String,
+    text_start: usize,
+    text_end: usize,
+    char_count: usize,
     style_idx: usize,
     left_inset_px: i32,
     width_px: f32,
@@ -493,6 +495,7 @@ struct LayoutState {
     pending_keep_with_next_lines: u8,
     hyphenation_lang: HyphenationLang,
     paragraph_words: Vec<ParagraphWord>,
+    paragraph_text: String,
     paragraph_styles: Vec<ResolvedTextStyle>,
     paragraph_chars: usize,
     replay_direct_mode: bool,
@@ -522,6 +525,7 @@ impl LayoutState {
             pending_keep_with_next_lines: 0,
             hyphenation_lang: HyphenationLang::Unknown,
             paragraph_words: Vec::with_capacity(cfg.max_buffered_paragraph_words),
+            paragraph_text: String::with_capacity(cfg.max_buffered_paragraph_chars),
             paragraph_styles: Vec::with_capacity(4),
             paragraph_chars: 0,
             replay_direct_mode: false,
@@ -534,12 +538,14 @@ impl LayoutState {
         self.in_paragraph = true;
         self.lines_on_current_paragraph_page = 0;
         self.paragraph_words.clear();
+        self.paragraph_text.clear();
         self.paragraph_styles.clear();
         self.paragraph_chars = 0;
     }
 
     fn end_paragraph(&mut self) {
         self.paragraph_words.clear();
+        self.paragraph_text.clear();
         self.paragraph_styles.clear();
         self.paragraph_chars = 0;
         self.in_paragraph = false;
@@ -772,9 +778,10 @@ impl LayoutState {
 
         let sanitized_word = strip_soft_hyphens(word);
         if self.should_buffer_paragraph_word(style, word) {
+            let word_chars = sanitized_word.chars().count();
             let projected_chars = self
                 .paragraph_chars
-                .saturating_add(sanitized_word.chars().count())
+                .saturating_add(word_chars)
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
             if self.paragraph_words.len() >= self.cfg.max_buffered_paragraph_words
                 || projected_chars > self.cfg.max_buffered_paragraph_chars
@@ -785,10 +792,15 @@ impl LayoutState {
             let style_idx = self.paragraph_style_index(style);
             self.paragraph_chars = self
                 .paragraph_chars
-                .saturating_add(sanitized_word.chars().count())
+                .saturating_add(word_chars)
                 .saturating_add(usize::from(!self.paragraph_words.is_empty()));
+            let text_start = self.paragraph_text.len();
+            self.paragraph_text.push_str(&sanitized_word);
+            let text_end = self.paragraph_text.len();
             self.paragraph_words.push(ParagraphWord {
-                text: sanitized_word.into_owned(),
+                text_start,
+                text_end,
+                char_count: word_chars,
                 style_idx,
                 left_inset_px,
                 width_px: word_w,
@@ -988,35 +1000,57 @@ impl LayoutState {
         if self.paragraph_words.is_empty() {
             return;
         }
-        if self.paragraph_words.len() < 2 {
-            let replay = core::mem::take(&mut self.paragraph_words);
-            let styles = core::mem::take(&mut self.paragraph_styles);
-            self.paragraph_chars = 0;
+        // Swap paragraph buffers out, replay/flush from local vectors, then swap
+        // them back in cleared form to preserve capacity for the next paragraph.
+        let mut words = Vec::new();
+        let mut paragraph_text = String::new();
+        let mut styles = Vec::new();
+        core::mem::swap(&mut words, &mut self.paragraph_words);
+        core::mem::swap(&mut paragraph_text, &mut self.paragraph_text);
+        core::mem::swap(&mut styles, &mut self.paragraph_styles);
+        self.paragraph_chars = 0;
+
+        if words.len() < 2 {
             self.replay_direct_mode = true;
-            for word in replay {
-                self.push_word_direct(&word.text, &styles[word.style_idx], word.left_inset_px);
+            for word in words.iter() {
+                self.push_word_direct(
+                    &paragraph_text[word.text_start..word.text_end],
+                    &styles[word.style_idx],
+                    word.left_inset_px,
+                );
             }
             self.replay_direct_mode = false;
+            words.clear();
+            paragraph_text.clear();
+            styles.clear();
+            core::mem::swap(&mut words, &mut self.paragraph_words);
+            core::mem::swap(&mut paragraph_text, &mut self.paragraph_text);
+            core::mem::swap(&mut styles, &mut self.paragraph_styles);
             return;
         }
-        let breaks = match self.optimize_paragraph_breaks() {
+
+        let breaks = match self.optimize_paragraph_breaks(&words, &styles) {
             Some(breaks) if !breaks.is_empty() => breaks,
             _ => {
-                let replay = core::mem::take(&mut self.paragraph_words);
-                let styles = core::mem::take(&mut self.paragraph_styles);
-                self.paragraph_chars = 0;
                 self.replay_direct_mode = true;
-                for word in replay {
-                    self.push_word_direct(&word.text, &styles[word.style_idx], word.left_inset_px);
+                for word in words.iter() {
+                    self.push_word_direct(
+                        &paragraph_text[word.text_start..word.text_end],
+                        &styles[word.style_idx],
+                        word.left_inset_px,
+                    );
                 }
                 self.replay_direct_mode = false;
+                words.clear();
+                paragraph_text.clear();
+                styles.clear();
+                core::mem::swap(&mut words, &mut self.paragraph_words);
+                core::mem::swap(&mut paragraph_text, &mut self.paragraph_text);
+                core::mem::swap(&mut styles, &mut self.paragraph_styles);
                 return;
             }
         };
 
-        let words = core::mem::take(&mut self.paragraph_words);
-        let styles = core::mem::take(&mut self.paragraph_styles);
-        self.paragraph_chars = 0;
         self.buffered_flush_mode = true;
         let mut start = 0usize;
         for (idx, end) in breaks.iter().copied().enumerate() {
@@ -1026,7 +1060,7 @@ impl LayoutState {
             let line_words = &words[start..end];
             let text_cap = line_words
                 .iter()
-                .map(|word| word.text.len())
+                .map(|word| word.text_end.saturating_sub(word.text_start))
                 .sum::<usize>()
                 .saturating_add(line_words.len().saturating_sub(1));
             let mut text = String::with_capacity(text_cap);
@@ -1034,7 +1068,7 @@ impl LayoutState {
                 if offset > 0 {
                     text.push(' ');
                 }
-                text.push_str(&word.text);
+                text.push_str(&paragraph_text[word.text_start..word.text_end]);
             }
             let style = styles[words[end - 1].style_idx].clone();
             let left_inset_px = words[start].left_inset_px;
@@ -1055,11 +1089,20 @@ impl LayoutState {
             start = end;
         }
         self.buffered_flush_mode = false;
+
+        words.clear();
+        paragraph_text.clear();
+        styles.clear();
+        core::mem::swap(&mut words, &mut self.paragraph_words);
+        core::mem::swap(&mut paragraph_text, &mut self.paragraph_text);
+        core::mem::swap(&mut styles, &mut self.paragraph_styles);
     }
 
-    fn optimize_paragraph_breaks(&self) -> Option<Vec<usize>> {
-        let words = &self.paragraph_words;
-        let styles = &self.paragraph_styles;
+    fn optimize_paragraph_breaks(
+        &self,
+        words: &[ParagraphWord],
+        styles: &[ResolvedTextStyle],
+    ) -> Option<Vec<usize>> {
         let n = words.len();
         if n == 0 {
             return Some(Vec::with_capacity(8));
@@ -1133,10 +1176,10 @@ impl LayoutState {
                 if !is_last && words_in_line == 1 {
                     badness += 3000;
                 }
-                if !is_last && words[j].text.chars().count() <= 2 {
+                if !is_last && words[j].char_count <= 2 {
                     badness += 4200;
                 }
-                if i > 0 && words[i].text.chars().count() <= 2 {
+                if i > 0 && words[i].char_count <= 2 {
                     badness += 1000;
                 }
                 let candidate = badness.saturating_add(dp[j + 1]);
@@ -2440,6 +2483,28 @@ mod tests {
             .expect("expected flushed text line");
         assert_eq!(text_cmd.text, "alpha beta gamma");
         assert!(text_cmd.style.italic);
+    }
+
+    #[test]
+    fn buffered_paragraph_flush_preserves_word_buffer_capacity() {
+        let mut cfg = LayoutConfig::default();
+        cfg.max_buffered_paragraph_words = 16;
+        let mut st = LayoutState::new(cfg, None);
+        let style = resolved_body_style();
+
+        st.begin_paragraph();
+        for word in ["alpha", "beta", "gamma", "delta"] {
+            st.push_word(word, &style, 0);
+        }
+        let word_cap_before = st.paragraph_words.capacity();
+        let style_cap_before = st.paragraph_styles.capacity();
+
+        st.flush_buffered_paragraph(false, true);
+
+        assert!(st.paragraph_words.is_empty());
+        assert!(st.paragraph_styles.is_empty());
+        assert_eq!(st.paragraph_words.capacity(), word_cap_before);
+        assert_eq!(st.paragraph_styles.capacity(), style_cap_before);
     }
 
     #[test]

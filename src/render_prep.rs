@@ -12,14 +12,16 @@ use core::fmt;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::book::EpubBook;
 use crate::css::{
     parse_inline_style, parse_stylesheet, CssStyle, FontSize, FontStyle, FontWeight, LineHeight,
     Stylesheet,
 };
-use crate::error::{EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext};
+use crate::error::{
+    EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext, ZipError,
+};
 
 const IMAGE_DIMENSION_PROBE_MAX_BYTES: usize = 64 * 1024;
 const IMAGE_DIMENSION_PROBE_CHUNK_BYTES: usize = 2 * 1024;
@@ -669,8 +671,12 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let ctx =
-                        element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
+                    let ctx = element_ctx_from_start(
+                        &reader,
+                        &e,
+                        tag,
+                        self.memory.max_inline_style_bytes,
+                    )?;
                     if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut on_item);
@@ -713,8 +719,12 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let ctx =
-                        element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
+                    let ctx = element_ctx_from_start(
+                        &reader,
+                        &e,
+                        tag,
+                        self.memory.max_inline_style_bytes,
+                    )?;
                     if matches!(ctx.tag.as_str(), "img" | "image") {
                         let in_figure = stack.iter().any(|parent| parent.tag == "figure");
                         emit_image_event(&ctx, in_figure, &mut on_item);
@@ -1161,6 +1171,114 @@ impl FontResolver {
         Ok(())
     }
 
+    /// Register EPUB fonts and validate byte limits via byte-counting callback.
+    ///
+    /// The callback receives a hard cap and should stream bytes without
+    /// materializing full font payloads in memory.
+    pub fn register_epub_fonts_with_size_loader<I, F>(
+        &mut self,
+        fonts: I,
+        mut loader: F,
+    ) -> Result<(), RenderPrepError>
+    where
+        I: IntoIterator<Item = EmbeddedFontFace>,
+        F: FnMut(&str, usize) -> Result<usize, EpubError>,
+    {
+        self.faces.clear();
+        let mut total = 0usize;
+        let mut dedupe_keys: Vec<(String, u16, EmbeddedFontStyle, String)> = Vec::with_capacity(8);
+        let hard_cap = self.limits.max_bytes_per_font.saturating_add(1);
+
+        for face in fonts {
+            let normalized_family = normalize_family(&face.family);
+            let dedupe_key = (
+                normalized_family,
+                face.weight,
+                face.style,
+                face.href.to_ascii_lowercase(),
+            );
+            if dedupe_keys.contains(&dedupe_key) {
+                continue;
+            }
+            if self.faces.len() >= self.limits.max_faces {
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
+                    "FONT_FACE_LIMIT",
+                    "Too many embedded font faces",
+                )
+                .with_limit(
+                    "max_faces",
+                    self.faces.len() + 1,
+                    self.limits.max_faces,
+                ));
+            }
+            let bytes_len = match loader(&face.href, hard_cap) {
+                Ok(size) => size,
+                Err(EpubError::Zip(ZipError::FileTooLarge))
+                | Err(EpubError::LimitExceeded { .. }) => {
+                    return Err(RenderPrepError::new_with_phase(
+                        ErrorPhase::Style,
+                        "FONT_BYTES_PER_FACE_LIMIT",
+                        format!(
+                            "Font exceeds max_bytes_per_font (>{})",
+                            self.limits.max_bytes_per_font
+                        ),
+                    )
+                    .with_path(face.href.clone())
+                    .with_limit(
+                        "max_bytes_per_font",
+                        self.limits.max_bytes_per_font.saturating_add(1),
+                        self.limits.max_bytes_per_font,
+                    ));
+                }
+                Err(err) => {
+                    return Err(RenderPrepError::new_with_phase(
+                        ErrorPhase::Style,
+                        "FONT_LOAD_ERROR",
+                        err.to_string(),
+                    )
+                    .with_path(face.href.clone()));
+                }
+            };
+            if bytes_len > self.limits.max_bytes_per_font {
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
+                    "FONT_BYTES_PER_FACE_LIMIT",
+                    format!(
+                        "Font exceeds max_bytes_per_font ({} > {})",
+                        bytes_len, self.limits.max_bytes_per_font
+                    ),
+                )
+                .with_path(face.href.clone())
+                .with_limit(
+                    "max_bytes_per_font",
+                    bytes_len,
+                    self.limits.max_bytes_per_font,
+                ));
+            }
+            total += bytes_len;
+            if total > self.limits.max_total_font_bytes {
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
+                    "FONT_TOTAL_BYTES_LIMIT",
+                    format!(
+                        "Total font bytes exceed max_total_font_bytes ({} > {})",
+                        total, self.limits.max_total_font_bytes
+                    ),
+                )
+                .with_limit(
+                    "max_total_font_bytes",
+                    total,
+                    self.limits.max_total_font_bytes,
+                ));
+            }
+            dedupe_keys.push(dedupe_key);
+            self.faces.push(face);
+        }
+
+        Ok(())
+    }
+
     fn best_candidate_for_family(
         &self,
         requested_family: &str,
@@ -1366,7 +1484,7 @@ impl RenderPrep {
 
     /// Register all embedded fonts from a book.
     pub fn with_embedded_fonts_from_book<R: std::io::Read + std::io::Seek>(
-        self,
+        mut self,
         book: &mut EpubBook<R>,
     ) -> Result<Self, RenderPrepError> {
         let fonts = book
@@ -1378,7 +1496,14 @@ impl RenderPrep {
                     e.to_string(),
                 )
             })?;
-        self.with_registered_fonts(fonts, |href| book.read_resource(href))
+        self.font_resolver.register_epub_fonts_with_size_loader(
+            fonts,
+            |href, hard_cap_bytes| {
+                let mut sink = std::io::sink();
+                book.read_resource_into_with_hard_cap(href, &mut sink, hard_cap_bytes)
+            },
+        )?;
+        Ok(self)
     }
 
     fn load_chapter_html_with_budget<R: std::io::Read + std::io::Seek>(
@@ -1835,9 +1960,9 @@ fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderP
 fn element_ctx_from_start(
     reader: &Reader<&[u8]>,
     e: &quick_xml::events::BytesStart<'_>,
+    tag: String,
     max_inline_style_bytes: usize,
 ) -> Result<ElementCtx, RenderPrepError> {
-    let tag = decode_tag_name(reader, e.name().as_ref())?;
     let mut classes = Vec::with_capacity(8);
     let mut inline_style = None;
     let mut img_src: Option<String> = None;
@@ -2050,6 +2175,9 @@ fn normalize_plain_text_whitespace(text: &str, preserve: bool) -> Cow<'_, str> {
     if preserve {
         return Cow::Borrowed(text);
     }
+    if text.chars().all(char::is_whitespace) {
+        return Cow::Borrowed("");
+    }
     // Fast path: already normalized single-space text with no trimming needed.
     let mut prev_space = true;
     let mut needs_rewrite = false;
@@ -2225,21 +2353,21 @@ fn bounded_nonzero_u16_f32(value: f32) -> Option<u16> {
 fn collect_image_sources_from_html(chapter_href: &str, html: &[u8]) -> Vec<String> {
     let mut reader = Reader::from_reader(html);
     let mut buf = Vec::with_capacity(8);
-    let mut out = BTreeSet::new();
+    let mut out = Vec::with_capacity(8);
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let Ok(tag) = decode_tag_name(&reader, e.name().as_ref()) else {
-                    buf.clear();
-                    continue;
-                };
-                if !matches!(tag.as_str(), "img" | "image") {
+                let name = e.name();
+                let tag_name = local_name_bytes(name.as_ref());
+                if !tag_name.eq_ignore_ascii_case(b"img")
+                    && !tag_name.eq_ignore_ascii_case(b"image")
+                {
                     buf.clear();
                     continue;
                 }
-                if let Some(src) = image_src_from_start(&reader, &tag, &e) {
-                    out.insert(resolve_relative(chapter_href, &src));
+                if let Some(src) = image_src_from_start(&reader, true, &e) {
+                    out.push(resolve_relative(chapter_href, &src));
                 }
             }
             Ok(Event::Eof) => break,
@@ -2249,19 +2377,19 @@ fn collect_image_sources_from_html(chapter_href: &str, html: &[u8]) -> Vec<Strin
         buf.clear();
     }
 
-    out.into_iter().collect()
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn image_src_from_start(
     reader: &Reader<&[u8]>,
-    tag: &str,
+    image_tag: bool,
     start: &quick_xml::events::BytesStart<'_>,
 ) -> Option<String> {
     for attr in start.attributes().flatten() {
         let key = attr.key.as_ref();
-        if attr_key_matches(key, b"src")
-            || (matches!(tag, "img" | "image") && attr_key_matches(key, b"href"))
-        {
+        if attr_key_matches(key, b"src") || (image_tag && attr_key_matches(key, b"href")) {
             let value = match reader.decoder().decode(attr.value.as_ref()) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -2434,8 +2562,7 @@ fn infer_svg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let tag = decode_tag_name(&reader, e.name().as_ref()).ok()?;
-                if tag != "svg" {
+                if !local_name_bytes(e.name().as_ref()).eq_ignore_ascii_case(b"svg") {
                     buf.clear();
                     continue;
                 }
@@ -2443,19 +2570,18 @@ fn infer_svg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
                 let mut height = None;
                 let mut view_box = None;
                 for attr in e.attributes().flatten() {
-                    let key = match reader.decoder().decode(attr.key.as_ref()) {
-                        Ok(v) => v.to_ascii_lowercase(),
-                        Err(_) => continue,
-                    };
                     let value = match reader.decoder().decode(&attr.value) {
                         Ok(v) => v.to_string(),
                         Err(_) => continue,
                     };
-                    match key.as_str() {
-                        "width" => width = parse_svg_length_px(&value),
-                        "height" => height = parse_svg_length_px(&value),
-                        "viewbox" => view_box = parse_svg_view_box(&value),
-                        _ => {}
+                    if attr_key_matches(attr.key.as_ref(), b"width") {
+                        width = parse_svg_length_px(&value);
+                    } else if attr_key_matches(attr.key.as_ref(), b"height") {
+                        height = parse_svg_length_px(&value);
+                    } else if attr_key_matches(attr.key.as_ref(), b"viewBox")
+                        || attr_key_matches(attr.key.as_ref(), b"viewbox")
+                    {
+                        view_box = parse_svg_view_box(&value);
                     }
                 }
                 if let (Some(w), Some(h)) = (width, height) {
@@ -2539,6 +2665,12 @@ pub(crate) fn parse_stylesheet_links(chapter_href: &str, html: &str) -> Vec<Stri
     parse_stylesheet_links_bytes(chapter_href, html.as_bytes())
 }
 
+fn value_has_token_ignore_ascii_case(value: &[u8], expected_token: &[u8]) -> bool {
+    value
+        .split(|b| b.is_ascii_whitespace())
+        .any(|token| !token.is_empty() && token.eq_ignore_ascii_case(expected_token))
+}
+
 pub(crate) fn parse_stylesheet_links_bytes(chapter_href: &str, html_bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::with_capacity(8);
     let mut reader = Reader::from_reader(html_bytes);
@@ -2552,30 +2684,33 @@ pub(crate) fn parse_stylesheet_links_bytes(chapter_href: &str, html_bytes: &[u8]
                     buf.clear();
                     continue;
                 }
-                let mut href = None;
-                let mut rel = None;
+                let mut href_raw: Option<Vec<u8>> = None;
+                let mut rel_is_stylesheet = false;
                 for attr in e.attributes().flatten() {
                     if attr_key_matches(attr.key.as_ref(), b"href") {
-                        let val = match reader.decoder().decode(attr.value.as_ref()) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        href = Some(val.into_owned());
+                        href_raw = Some(attr.value.as_ref().to_vec());
                     } else if attr_key_matches(attr.key.as_ref(), b"rel") {
-                        let val = match reader.decoder().decode(attr.value.as_ref()) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        rel = Some(val.into_owned());
+                        rel_is_stylesheet =
+                            value_has_token_ignore_ascii_case(attr.value.as_ref(), b"stylesheet");
                     }
                 }
-                if let (Some(href), Some(rel)) = (href, rel) {
-                    if rel
-                        .split_whitespace()
-                        .any(|v| v.eq_ignore_ascii_case("stylesheet"))
-                    {
-                        out.push(resolve_relative(chapter_href, &href));
+                if !rel_is_stylesheet {
+                    buf.clear();
+                    continue;
+                }
+                let Some(href_raw) = href_raw else {
+                    buf.clear();
+                    continue;
+                };
+                let href = match reader.decoder().decode(href_raw.as_slice()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        buf.clear();
+                        continue;
                     }
+                };
+                if !href.is_empty() {
+                    out.push(resolve_relative(chapter_href, href.as_ref()));
                 }
             }
             Ok(Event::Eof) => break,
