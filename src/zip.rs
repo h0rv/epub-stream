@@ -14,9 +14,9 @@ use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 #[cfg(target_os = "espidf")]
-const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
+pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
 #[cfg(not(target_os = "espidf"))]
-const DEFAULT_ZIP_SCRATCH_BYTES: usize = 8 * 1024;
+pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 8 * 1024;
 
 /// Maximum number of central directory entries to cache
 const MAX_CD_ENTRIES: usize = 256;
@@ -974,27 +974,60 @@ impl<F: Read + Seek> StreamingZip<F> {
         input_buf: &mut [u8],
         output_buf: &mut [u8],
     ) -> Result<usize, ZipError> {
+        let spec = EntryReadSpec::from_entry(entry);
+        self.read_file_to_writer_spec_with_scratch(spec, writer, input_buf, output_buf)
+    }
+
+    /// Stream a file's decompressed bytes into an arbitrary writer by filename using caller scratch.
+    ///
+    /// This is an internal allocation-free path for higher-level APIs that already resolve
+    /// entry names and want to enforce an explicit byte cap.
+    pub(crate) fn read_file_to_writer_by_name_with_limit_and_scratch<W: Write>(
+        &mut self,
+        filename: &str,
+        writer: &mut W,
+        max_bytes: usize,
+        input_buf: &mut [u8],
+        output_buf: &mut [u8],
+    ) -> Result<usize, ZipError> {
+        let spec = {
+            let entry = self.get_entry(filename).ok_or(ZipError::FileNotFound)?;
+            EntryReadSpec::from_entry(entry)
+        };
+        if spec.uncompressed_size > max_bytes as u64 || spec.compressed_size > max_bytes as u64 {
+            return Err(ZipError::FileTooLarge);
+        }
+        self.read_file_to_writer_spec_with_scratch(spec, writer, input_buf, output_buf)
+    }
+
+    fn read_file_to_writer_spec_with_scratch<W: Write>(
+        &mut self,
+        spec: EntryReadSpec,
+        writer: &mut W,
+        input_buf: &mut [u8],
+        output_buf: &mut [u8],
+    ) -> Result<usize, ZipError> {
         if input_buf.is_empty() || output_buf.is_empty() {
             return Err(ZipError::BufferTooSmall);
         }
         if let Some(limits) = self.limits {
-            if entry.uncompressed_size > limits.max_file_read_size as u64 {
+            if spec.uncompressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
-            if entry.compressed_size > limits.max_file_read_size as u64 {
+            if spec.compressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
         }
 
-        let data_offset = self.calc_data_offset(entry)?;
+        let data_offset = self.calc_data_offset_at(spec.local_header_offset)?;
         self.file
             .seek(SeekFrom::Start(data_offset))
             .map_err(|_| ZipError::IoError)?;
 
-        match entry.method {
+        match spec.method {
             METHOD_STORED => {
                 let mut remaining =
-                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
+                    usize::try_from(spec.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut hasher = crc32fast::Hasher::new();
                 let mut written = 0usize;
 
@@ -1011,7 +1044,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                     remaining -= take;
                 }
 
-                if entry.crc32 != 0 && hasher.finalize() != entry.crc32 {
+                if spec.crc32 != 0 && hasher.finalize() != spec.crc32 {
                     return Err(ZipError::CrcMismatch);
                 }
                 Ok(written)
@@ -1019,7 +1052,7 @@ impl<F: Read + Seek> StreamingZip<F> {
             METHOD_DEFLATED => {
                 self.inflate_state.reset(DataFormat::Raw);
                 let mut compressed_remaining =
-                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
+                    usize::try_from(spec.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
                 let mut written = 0usize;
                 let mut hasher = crc32fast::Hasher::new();
@@ -1069,7 +1102,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                     }
                 }
 
-                if entry.crc32 != 0 && hasher.finalize() != entry.crc32 {
+                if spec.crc32 != 0 && hasher.finalize() != spec.crc32 {
                     return Err(ZipError::CrcMismatch);
                 }
                 Ok(written)
@@ -1691,6 +1724,51 @@ mod tests {
             .read_file_to_writer_with_scratch(&entry, &mut out, &mut input, &mut output)
             .expect_err("empty input buffer must fail");
         assert!(matches!(err, ZipError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_read_file_to_writer_by_name_with_limit_and_scratch_streams_entry() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+
+        let mut out = Vec::with_capacity(8);
+        let mut input = [0u8; 16];
+        let mut output = [0u8; 16];
+        let n = zip
+            .read_file_to_writer_by_name_with_limit_and_scratch(
+                "mimetype",
+                &mut out,
+                1024,
+                &mut input,
+                &mut output,
+            )
+            .expect("streaming by name with scratch should succeed");
+        assert_eq!(n, content.len());
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn test_read_file_to_writer_by_name_with_limit_and_scratch_enforces_cap() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+
+        let mut out = Vec::with_capacity(8);
+        let mut input = [0u8; 16];
+        let mut output = [0u8; 16];
+        let err = zip
+            .read_file_to_writer_by_name_with_limit_and_scratch(
+                "mimetype",
+                &mut out,
+                8,
+                &mut input,
+                &mut output,
+            )
+            .expect_err("hard cap should fail");
+        assert!(matches!(err, ZipError::FileTooLarge));
     }
 
     #[test]

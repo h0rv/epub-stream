@@ -31,7 +31,7 @@ use crate::render_prep::{
 use crate::spine::Spine;
 
 use crate::tokenizer::{tokenize_html, Token};
-use crate::zip::{CdEntry, StreamingZip, ZipLimits};
+use crate::zip::{StreamingZip, ZipLimits};
 
 /// Validation strictness for high-level open/parse flows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -419,6 +419,8 @@ pub fn parse_epub_file_with_options<P: AsRef<Path>>(
 /// High-level EPUB handle backed by an open ZIP reader.
 pub struct EpubBook<R: Read + Seek> {
     zip: StreamingZip<R>,
+    resource_input_scratch: Vec<u8>,
+    resource_output_scratch: Vec<u8>,
     opf_path: String,
     metadata: EpubMetadata,
     spine: Spine,
@@ -851,6 +853,8 @@ impl EpubBook<File> {
         .map_err(EpubError::Zip)?;
 
         zip.validate_mimetype().map_err(EpubError::Zip)?;
+        let mut zip_input_scratch = Vec::new();
+        let mut zip_output_scratch = Vec::new();
 
         // Create temp file paths
         let temp_dir = temp_dir.as_ref();
@@ -860,7 +864,14 @@ impl EpubBook<File> {
         // Stream container.xml to temp file instead of loading into RAM
         let mut container_file = File::create(&container_temp)
             .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
-        read_entry_into(&mut zip, "META-INF/container.xml", &mut container_file)?;
+        read_entry_into_with_limit_and_scratch(
+            &mut zip,
+            "META-INF/container.xml",
+            &mut container_file,
+            usize::MAX,
+            &mut zip_input_scratch,
+            &mut zip_output_scratch,
+        )?;
         drop(container_file);
 
         // Parse container.xml from file to get OPF path
@@ -870,26 +881,17 @@ impl EpubBook<File> {
         // Clean up container temp file immediately
         let _ = std::fs::remove_file(&container_temp);
 
-        // Get OPF entry info first (before we borrow zip mutably again)
-        let opf_entry = zip
-            .get_entry(&opf_path)
-            .ok_or(EpubError::Zip(ZipError::FileNotFound))?;
-
-        // Clone entry data we need (avoids borrow issues)
-        let opf_entry_data = CdEntry {
-            method: opf_entry.method,
-            compressed_size: opf_entry.compressed_size,
-            uncompressed_size: opf_entry.uncompressed_size,
-            local_header_offset: opf_entry.local_header_offset,
-            crc32: opf_entry.crc32,
-            filename: String::with_capacity(32),
-        };
-
         // Stream OPF to temp file instead of loading into RAM
         let mut opf_file = File::create(&opf_temp)
             .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
-        zip.read_file_to_writer(&opf_entry_data, &mut opf_file)
-            .map_err(EpubError::Zip)?;
+        read_entry_into_with_limit_and_scratch(
+            &mut zip,
+            &opf_path,
+            &mut opf_file,
+            usize::MAX,
+            &mut zip_input_scratch,
+            &mut zip_output_scratch,
+        )?;
         drop(opf_file);
 
         // Parse OPF from file
@@ -928,6 +930,8 @@ impl EpubBook<File> {
 
         Ok(Self {
             zip,
+            resource_input_scratch: zip_input_scratch,
+            resource_output_scratch: zip_output_scratch,
             opf_path,
             metadata,
             spine,
@@ -1002,6 +1006,8 @@ impl<R: Read + Seek> EpubBook<R> {
 
         Ok(Self {
             zip,
+            resource_input_scratch: Vec::new(),
+            resource_output_scratch: Vec::new(),
             opf_path,
             metadata,
             spine,
@@ -1145,6 +1151,24 @@ impl<R: Read + Seek> EpubBook<R> {
         self.chapter(index)
     }
 
+    fn read_zip_path_into_with_hard_cap<W: Write>(
+        &mut self,
+        zip_path: &str,
+        writer: &mut W,
+        hard_cap_bytes: usize,
+    ) -> Result<usize, EpubError> {
+        ensure_zip_scratch_initialized(&mut self.resource_input_scratch);
+        ensure_zip_scratch_initialized(&mut self.resource_output_scratch);
+        read_entry_into_with_limit_and_scratch(
+            &mut self.zip,
+            zip_path,
+            writer,
+            hard_cap_bytes,
+            &mut self.resource_input_scratch,
+            &mut self.resource_output_scratch,
+        )
+    }
+
     /// Read a resource by OPF-relative href into a new `Vec<u8>`.
     ///
     /// Fragment suffixes (e.g. `chapter.xhtml#p3`) are ignored.
@@ -1200,7 +1224,7 @@ impl<R: Read + Seek> EpubBook<R> {
         hard_cap_bytes: usize,
     ) -> Result<usize, EpubError> {
         let zip_path = resolve_opf_relative_path(&self.opf_path, href);
-        read_entry_into_with_limit(&mut self.zip, &zip_path, writer, hard_cap_bytes)
+        self.read_zip_path_into_with_hard_cap(&zip_path, writer, hard_cap_bytes)
     }
 
     /// Open a pull-based resource reader by OPF-relative href.
@@ -1263,7 +1287,7 @@ impl<R: Read + Seek> EpubBook<R> {
                 href
             )));
         }
-        read_entry_into_with_limit(&mut self.zip, &zip_path, out, options.max_bytes)
+        self.read_zip_path_into_with_hard_cap(&zip_path, out, options.max_bytes)
     }
 
     /// Resolve cover image metadata using manifest/guide/XHTML hints.
@@ -1336,13 +1360,13 @@ impl<R: Read + Seek> EpubBook<R> {
                 continue;
             }
             doc_buf.clear();
-            if read_entry_into_with_limit(
-                &mut self.zip,
-                &zip_path,
-                &mut doc_buf,
-                options.max_cover_document_bytes,
-            )
-            .is_err()
+            if self
+                .read_zip_path_into_with_hard_cap(
+                    &zip_path,
+                    &mut doc_buf,
+                    options.max_cover_document_bytes,
+                )
+                .is_err()
             {
                 continue;
             }
@@ -1384,7 +1408,7 @@ impl<R: Read + Seek> EpubBook<R> {
             return Ok(None);
         };
         out.clear();
-        read_entry_into_with_limit(&mut self.zip, &cover.zip_path, out, options.image.max_bytes)?;
+        self.read_zip_path_into_with_hard_cap(&cover.zip_path, out, options.image.max_bytes)?;
         Ok(Some(cover))
     }
 
@@ -2187,32 +2211,42 @@ fn read_entry_into_with_limit<R: Read + Seek, W: Write>(
     writer: &mut W,
     max_bytes: usize,
 ) -> Result<usize, EpubError> {
-    let (method, compressed_size, uncompressed_size, local_header_offset, crc32) = {
-        let entry = zip
-            .get_entry(path)
-            .ok_or(EpubError::Zip(ZipError::FileNotFound))?;
-        (
-            entry.method,
-            entry.compressed_size,
-            entry.uncompressed_size,
-            entry.local_header_offset,
-            entry.crc32,
-        )
-    };
+    let mut input_scratch = Vec::new();
+    let mut output_scratch = Vec::new();
+    read_entry_into_with_limit_and_scratch(
+        zip,
+        path,
+        writer,
+        max_bytes,
+        &mut input_scratch,
+        &mut output_scratch,
+    )
+}
 
-    if uncompressed_size > max_bytes as u64 || compressed_size > max_bytes as u64 {
-        return Err(EpubError::Zip(ZipError::FileTooLarge));
+fn read_entry_into_with_limit_and_scratch<R: Read + Seek, W: Write>(
+    zip: &mut StreamingZip<R>,
+    path: &str,
+    writer: &mut W,
+    max_bytes: usize,
+    input_scratch: &mut Vec<u8>,
+    output_scratch: &mut Vec<u8>,
+) -> Result<usize, EpubError> {
+    ensure_zip_scratch_initialized(input_scratch);
+    ensure_zip_scratch_initialized(output_scratch);
+    zip.read_file_to_writer_by_name_with_limit_and_scratch(
+        path,
+        writer,
+        max_bytes,
+        input_scratch.as_mut_slice(),
+        output_scratch.as_mut_slice(),
+    )
+    .map_err(EpubError::Zip)
+}
+
+fn ensure_zip_scratch_initialized(buf: &mut Vec<u8>) {
+    if buf.is_empty() {
+        buf.resize(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES, 0);
     }
-    let entry = CdEntry {
-        method,
-        compressed_size,
-        uncompressed_size,
-        local_header_offset,
-        crc32,
-        filename: String::with_capacity(32),
-    };
-    zip.read_file_to_writer(&entry, writer)
-        .map_err(EpubError::Zip)
 }
 
 fn resolve_opf_relative_path(opf_path: &str, href: &str) -> String {
@@ -2524,6 +2558,37 @@ mod tests {
             .expect("resource should stream");
         assert_eq!(n, out.len());
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_read_resource_into_reuses_internal_scratch_buffers() {
+        let file = std::fs::File::open(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture should open");
+        let mut book = EpubBook::from_reader(file).expect("book should open");
+        assert!(book.resource_input_scratch.is_empty());
+        assert!(book.resource_output_scratch.is_empty());
+
+        let mut out = Vec::with_capacity(8);
+        book.read_resource_into("xhtml/nav.xhtml", &mut out)
+            .expect("first resource read should stream");
+        let input_ptr = book.resource_input_scratch.as_ptr();
+        let output_ptr = book.resource_output_scratch.as_ptr();
+
+        out.clear();
+        book.read_resource_into("xhtml/nav.xhtml", &mut out)
+            .expect("second resource read should stream");
+        assert_eq!(
+            book.resource_input_scratch.len(),
+            crate::zip::DEFAULT_ZIP_SCRATCH_BYTES
+        );
+        assert_eq!(
+            book.resource_output_scratch.len(),
+            crate::zip::DEFAULT_ZIP_SCRATCH_BYTES
+        );
+        assert_eq!(book.resource_input_scratch.as_ptr(), input_ptr);
+        assert_eq!(book.resource_output_scratch.as_ptr(), output_ptr);
     }
 
     #[test]
