@@ -11,6 +11,7 @@ use alloc::string::{String, ToString};
 use heapless::Vec as HeaplessVec;
 use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+use std::sync::{Mutex, OnceLock};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 #[cfg(target_os = "espidf")]
@@ -203,7 +204,7 @@ impl<'a, F: Read + Seek> ZipEntryReader<'a, F> {
             .seek(SeekFrom::Start(data_offset))
             .map_err(|_| ZipError::IoError)?;
         if spec.method == METHOD_DEFLATED {
-            zip.inflate_state.reset(DataFormat::Raw);
+            zip.ensure_inflate_state()?.reset(DataFormat::Raw);
         }
         Ok(Self {
             zip,
@@ -256,12 +257,18 @@ impl<'a, F: Read + Seek> ZipEntryReader<'a, F> {
             }
 
             let pending = &self.input_buf[self.input_start..self.input_end];
-            let result = miniz_oxide::inflate::stream::inflate(
-                &mut self.zip.inflate_state,
-                pending,
-                &mut self.output_buf,
-                MZFlush::None,
-            );
+            let result = {
+                let inflate_state = self
+                    .zip
+                    .ensure_inflate_state()
+                    .map_err(|_| io::Error::other("zip inflate init failed"))?;
+                miniz_oxide::inflate::stream::inflate(
+                    inflate_state,
+                    pending,
+                    &mut self.output_buf,
+                    MZFlush::None,
+                )
+            };
             self.input_start += result.bytes_consumed;
             if result.bytes_written > 0 {
                 self.output_end = result.bytes_written;
@@ -412,7 +419,52 @@ pub struct StreamingZip<F: Read + Seek> {
     /// Optional configurable resource/safety limits.
     limits: Option<ZipLimits>,
     /// Reusable DEFLATE state to avoid large hot-path allocations on embedded.
-    inflate_state: Box<miniz_oxide::inflate::stream::InflateState>,
+    ///
+    /// Lazily initialized so central-directory parsing can run without
+    /// allocating the inflate window.
+    inflate_state: Option<Box<miniz_oxide::inflate::stream::InflateState>>,
+}
+
+fn inflate_pool(
+) -> &'static Mutex<Option<Box<miniz_oxide::inflate::stream::InflateState>>> {
+    static INFLATE_POOL: OnceLock<Mutex<Option<Box<miniz_oxide::inflate::stream::InflateState>>>> =
+        OnceLock::new();
+    INFLATE_POOL.get_or_init(|| Mutex::new(None))
+}
+
+fn take_pooled_inflate_state() -> Option<Box<miniz_oxide::inflate::stream::InflateState>> {
+    let guard = inflate_pool().lock();
+    let mut guard = match guard {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.take()
+}
+
+fn return_pooled_inflate_state(state: Box<miniz_oxide::inflate::stream::InflateState>) {
+    let guard = inflate_pool().lock();
+    let mut guard = match guard {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.is_none() {
+        *guard = Some(state);
+    }
+}
+
+/// Pre-allocate and park the DEFLATE state so EPUB open paths avoid late
+/// large allocations on fragmented heaps.
+pub fn prewarm_inflate_state_pool() {
+    let guard = inflate_pool().lock();
+    let mut guard = match guard {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.is_none() {
+        *guard = Some(Box::new(miniz_oxide::inflate::stream::InflateState::new(
+            DataFormat::Raw,
+        )));
+    }
 }
 
 impl<F: Read + Seek> StreamingZip<F> {
@@ -485,10 +537,21 @@ impl<F: Read + Seek> StreamingZip<F> {
             entries,
             num_entries: core::cmp::min(eocd.num_entries, usize::MAX as u64) as usize,
             limits,
-            inflate_state: Box::new(miniz_oxide::inflate::stream::InflateState::new(
-                DataFormat::Raw,
-            )),
+            inflate_state: take_pooled_inflate_state(),
         })
+    }
+
+    fn ensure_inflate_state(
+        &mut self,
+    ) -> Result<&mut miniz_oxide::inflate::stream::InflateState, ZipError> {
+        if self.inflate_state.is_none() {
+            self.inflate_state = Some(Box::new(miniz_oxide::inflate::stream::InflateState::new(
+                DataFormat::Raw,
+            )));
+        }
+        self.inflate_state
+            .as_deref_mut()
+            .ok_or(ZipError::IoError)
     }
 
     /// Find EOCD and extract central directory info
@@ -886,7 +949,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(size)
             }
             METHOD_DEFLATED => {
-                self.inflate_state.reset(DataFormat::Raw);
+                self.ensure_inflate_state()?.reset(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
@@ -906,12 +969,15 @@ impl<F: Read + Seek> StreamingZip<F> {
                         return Err(ZipError::BufferTooSmall);
                     }
 
-                    let result = miniz_oxide::inflate::stream::inflate(
-                        &mut self.inflate_state,
-                        pending,
-                        &mut buf[written..],
-                        MZFlush::None,
-                    );
+                    let result = {
+                        let inflate_state = self.ensure_inflate_state()?;
+                        miniz_oxide::inflate::stream::inflate(
+                            inflate_state,
+                            pending,
+                            &mut buf[written..],
+                            MZFlush::None,
+                        )
+                    };
                     let consumed = result.bytes_consumed;
                     let produced = result.bytes_written;
                     pending = &pending[consumed..];
@@ -1050,7 +1116,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 Ok(written)
             }
             METHOD_DEFLATED => {
-                self.inflate_state.reset(DataFormat::Raw);
+                self.ensure_inflate_state()?.reset(DataFormat::Raw);
                 let mut compressed_remaining =
                     usize::try_from(spec.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
@@ -1067,12 +1133,15 @@ impl<F: Read + Seek> StreamingZip<F> {
                         compressed_remaining -= take;
                     }
 
-                    let result = miniz_oxide::inflate::stream::inflate(
-                        &mut self.inflate_state,
-                        pending,
-                        output_buf,
-                        MZFlush::None,
-                    );
+                    let result = {
+                        let inflate_state = self.ensure_inflate_state()?;
+                        miniz_oxide::inflate::stream::inflate(
+                            inflate_state,
+                            pending,
+                            output_buf,
+                            MZFlush::None,
+                        )
+                    };
                     let consumed = result.bytes_consumed;
                     let produced = result.bytes_written;
                     pending = &pending[consumed..];
@@ -1315,6 +1384,14 @@ impl<F: Read + Seek> StreamingZip<F> {
     /// Get the active limits used by this ZIP reader.
     pub fn limits(&self) -> Option<ZipLimits> {
         self.limits
+    }
+}
+
+impl<F: Read + Seek> Drop for StreamingZip<F> {
+    fn drop(&mut self) {
+        if let Some(state) = self.inflate_state.take() {
+            return_pooled_inflate_state(state);
+        }
     }
 }
 

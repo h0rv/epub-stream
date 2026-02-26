@@ -115,4 +115,4 @@ pub use validate::{
     ValidationSeverity,
 };
 #[cfg(feature = "std")]
-pub use zip::{ZipLimits, MAX_CD_ENTRIES_CAP};
+pub use zip::{prewarm_inflate_state_pool, ZipLimits, MAX_CD_ENTRIES_CAP};

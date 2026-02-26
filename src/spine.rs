@@ -202,6 +202,8 @@ pub fn parse_spine_with_limits(
     reader.config_mut().trim_text(true);
 
     let mut buf = Vec::with_capacity(8);
+    #[cfg(target_os = "espidf")]
+    let mut skip_buf = Vec::with_capacity(8);
     let mut spine = Spine::new();
     let mut in_spine = false;
 
@@ -213,6 +215,15 @@ pub fn parse_spine_with_limits(
                     .decode(e.name().as_ref())
                     .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
                     .to_string();
+                #[cfg(target_os = "espidf")]
+                if (name == "metadata" || name == "manifest" || name == "guide") && !e.is_empty()
+                {
+                    reader
+                        .read_to_end_into(e.name(), &mut skip_buf)
+                        .map_err(|e| EpubError::Parse(format!("XML parse error: {:?}", e)))?;
+                    buf.clear();
+                    continue;
+                }
 
                 if name == "spine" {
                     in_spine = true;

@@ -13,6 +13,82 @@ use quick_xml::reader::Reader;
 
 use crate::error::EpubError;
 
+#[cfg(target_os = "espidf")]
+const METADATA_TEXT_MAX_BYTES: usize = 1024;
+#[cfg(target_os = "espidf")]
+const METADATA_DESC_MAX_BYTES: usize = 2048;
+#[cfg(target_os = "espidf")]
+const METADATA_ATTR_MAX_BYTES: usize = 768;
+#[cfg(not(target_os = "espidf"))]
+const METADATA_TEXT_MAX_BYTES: usize = usize::MAX;
+#[cfg(not(target_os = "espidf"))]
+const METADATA_DESC_MAX_BYTES: usize = usize::MAX;
+
+#[cfg(target_os = "espidf")]
+fn truncate_utf8(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(max_bytes);
+    for ch in input.chars() {
+        let width = ch.len_utf8();
+        if out.len() + width > max_bytes {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[inline]
+fn metadata_text_value(input: &str) -> String {
+    #[cfg(target_os = "espidf")]
+    {
+        truncate_utf8(input, METADATA_TEXT_MAX_BYTES)
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        input.to_string()
+    }
+}
+
+#[inline]
+fn metadata_desc_value(input: &str) -> String {
+    #[cfg(target_os = "espidf")]
+    {
+        truncate_utf8(input, METADATA_DESC_MAX_BYTES)
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        input.to_string()
+    }
+}
+
+#[inline]
+fn metadata_attr_value(input: &str) -> String {
+    #[cfg(target_os = "espidf")]
+    {
+        truncate_utf8(input, METADATA_ATTR_MAX_BYTES)
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        input.to_string()
+    }
+}
+
+fn decode_text_limited(
+    decoder: quick_xml::encoding::Decoder,
+    text: &quick_xml::events::BytesText<'_>,
+    max_bytes: usize,
+) -> Result<String, EpubError> {
+    let raw = text.as_ref();
+    let capped = &raw[..raw.len().min(max_bytes)];
+    decoder
+        .decode(capped)
+        .map(|value| value.to_string())
+        .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))
+}
+
 /// Caller-configurable limits for EPUB metadata parsing.
 ///
 /// Controls how many manifest items, spine items, subject tags, and guide
@@ -53,10 +129,10 @@ impl MetadataLimits {
     /// Conservative limits for embedded / memory-constrained environments.
     pub fn embedded() -> Self {
         Self {
-            max_manifest_items: 256,
-            max_spine_items: 256,
-            max_subjects: 64,
-            max_guide_refs: 64,
+            max_manifest_items: 128,
+            max_spine_items: 128,
+            max_subjects: 32,
+            max_guide_refs: 32,
         }
     }
 }
@@ -385,6 +461,8 @@ pub fn parse_opf_with_limits(
     reader.config_mut().trim_text(true);
 
     let mut buf = Vec::with_capacity(8);
+    #[cfg(target_os = "espidf")]
+    let mut skip_buf = Vec::with_capacity(8);
     let mut metadata = EpubMetadata::new();
 
     // State tracking
@@ -459,13 +537,13 @@ pub fn parse_opf_with_limits(
                                 .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
 
                             if key == "name" && value == "cover" {
-                                name_attr = Some(value.to_string());
+                                name_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                             if key == "content" {
-                                content_attr = Some(value.to_string());
+                                content_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                             if key == "property" {
-                                property_attr = Some(value.to_string());
+                                property_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                         }
 
@@ -494,21 +572,23 @@ pub fn parse_opf_with_limits(
             }
             Ok(Event::Text(e)) => {
                 if let Some(ref elem) = current_element {
-                    let text = reader
-                        .decoder()
-                        .decode(&e)
-                        .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-                        .to_string();
+                    let text_limit = if elem == "description" {
+                        METADATA_DESC_MAX_BYTES
+                    } else {
+                        METADATA_TEXT_MAX_BYTES
+                    };
+                    let text = decode_text_limited(reader.decoder(), &e, text_limit)?;
 
                     // Handle EPUB3 <meta property="..."> text content
                     if elem == "meta" {
                         if let Some(ref prop) = current_meta_property {
                             match prop.as_str() {
                                 "dcterms:modified" => {
-                                    metadata.modified = Some(text.clone());
+                                    metadata.modified = Some(metadata_text_value(text.as_ref()));
                                 }
                                 "rendition:layout" => {
-                                    metadata.rendition_layout = Some(text.clone());
+                                    metadata.rendition_layout =
+                                        Some(metadata_text_value(text.as_ref()));
                                 }
                                 _ => {}
                             }
@@ -518,33 +598,33 @@ pub fn parse_opf_with_limits(
                     // Extract metadata fields (Dublin Core only)
                     match elem.as_str() {
                         "title" => {
-                            metadata.title = text;
+                            metadata.title = metadata_text_value(text.as_ref());
                         }
                         "creator" => {
-                            metadata.author = text;
+                            metadata.author = metadata_text_value(text.as_ref());
                         }
                         "language" => {
-                            metadata.language = text;
+                            metadata.language = metadata_text_value(text.as_ref());
                         }
                         "date" => {
-                            metadata.date = Some(text);
+                            metadata.date = Some(metadata_text_value(text.as_ref()));
                         }
                         "publisher" => {
-                            metadata.publisher = Some(text);
+                            metadata.publisher = Some(metadata_text_value(text.as_ref()));
                         }
                         "rights" => {
-                            metadata.rights = Some(text);
+                            metadata.rights = Some(metadata_text_value(text.as_ref()));
                         }
                         "description" => {
-                            metadata.description = Some(text);
+                            metadata.description = Some(metadata_desc_value(text.as_ref()));
                         }
                         "subject" => {
                             if metadata.subjects.len() < limits.max_subjects {
-                                metadata.subjects.push(text);
+                                metadata.subjects.push(metadata_text_value(text.as_ref()));
                             }
                         }
                         "identifier" => {
-                            metadata.identifier = Some(text);
+                            metadata.identifier = Some(metadata_text_value(text.as_ref()));
                         }
                         _ => {}
                     }
@@ -587,6 +667,8 @@ fn parse_opf_reader<R: std::io::BufRead>(
     reader.config_mut().trim_text(true);
 
     let mut buf = Vec::with_capacity(8);
+    #[cfg(target_os = "espidf")]
+    let mut skip_buf = Vec::with_capacity(8);
     let mut metadata = EpubMetadata::new();
 
     let mut current_element: Option<String> = None;
@@ -606,6 +688,18 @@ fn parse_opf_reader<R: std::io::BufRead>(
                     .to_string();
 
                 let local = local_name(&name);
+                #[cfg(target_os = "espidf")]
+                if (local == "metadata" || local == "guide") && !e.is_empty() {
+                    reader
+                        .read_to_end_into(e.name(), &mut skip_buf)
+                        .map_err(|e| EpubError::Parse(format!("XML parse error: {:?}", e)))?;
+                    current_element = None;
+                    current_meta_property = None;
+                    in_metadata = false;
+                    in_guide = false;
+                    buf.clear();
+                    continue;
+                }
                 match local {
                     "metadata" => in_metadata = true,
                     "manifest" => in_manifest = true,
@@ -655,13 +749,13 @@ fn parse_opf_reader<R: std::io::BufRead>(
                                 .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
 
                             if key == "name" && value == "cover" {
-                                name_attr = Some(value.to_string());
+                                name_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                             if key == "content" {
-                                content_attr = Some(value.to_string());
+                                content_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                             if key == "property" {
-                                property_attr = Some(value.to_string());
+                                property_attr = Some(metadata_attr_value(value.as_ref()));
                             }
                         }
 
@@ -684,32 +778,40 @@ fn parse_opf_reader<R: std::io::BufRead>(
             }
             Ok(Event::Text(e)) => {
                 if let Some(ref elem) = current_element {
-                    let text = reader
-                        .decoder()
-                        .decode(&e)
-                        .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-                        .to_string();
+                    let text_limit = if elem == "description" {
+                        METADATA_DESC_MAX_BYTES
+                    } else {
+                        METADATA_TEXT_MAX_BYTES
+                    };
+                    let text = decode_text_limited(reader.decoder(), &e, text_limit)?;
 
                     match elem.as_str() {
-                        "title" => metadata.title = text,
-                        "creator" => metadata.author = text,
-                        "language" => metadata.language = text,
-                        "date" => metadata.date = Some(text),
-                        "publisher" => metadata.publisher = Some(text),
-                        "rights" => metadata.rights = Some(text),
-                        "description" => metadata.description = Some(text),
+                        "title" => metadata.title = metadata_text_value(text.as_ref()),
+                        "creator" => metadata.author = metadata_text_value(text.as_ref()),
+                        "language" => metadata.language = metadata_text_value(text.as_ref()),
+                        "date" => metadata.date = Some(metadata_text_value(text.as_ref())),
+                        "publisher" => {
+                            metadata.publisher = Some(metadata_text_value(text.as_ref()))
+                        }
+                        "rights" => metadata.rights = Some(metadata_text_value(text.as_ref())),
+                        "description" => {
+                            metadata.description = Some(metadata_desc_value(text.as_ref()))
+                        }
                         "subject" => {
                             if metadata.subjects.len() < limits.max_subjects {
-                                metadata.subjects.push(text);
+                                metadata.subjects.push(metadata_text_value(text.as_ref()));
                             }
                         }
-                        "identifier" => metadata.identifier = Some(text),
+                        "identifier" => {
+                            metadata.identifier = Some(metadata_text_value(text.as_ref()))
+                        }
                         "meta" => {
                             if let Some(property) = current_meta_property.take() {
                                 if property == "dcterms:modified" {
-                                    metadata.modified = Some(text);
+                                    metadata.modified = Some(metadata_text_value(text.as_ref()));
                                 } else if property == "rendition:layout" {
-                                    metadata.rendition_layout = Some(text);
+                                    metadata.rendition_layout =
+                                        Some(metadata_text_value(text.as_ref()));
                                 }
                             }
                         }
@@ -777,8 +879,8 @@ fn parse_manifest_item<'a>(
         let value = reader
             .decoder()
             .decode(&attr.value)
-            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-            .to_string();
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = metadata_attr_value(value.as_ref());
 
         match key.as_ref() {
             "id" => id = Some(value),
@@ -820,8 +922,8 @@ fn parse_guide_reference<'a>(
         let value = reader
             .decoder()
             .decode(&attr.value)
-            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-            .to_string();
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = metadata_attr_value(value.as_ref());
 
         match key.as_ref() {
             "type" => guide_type = Some(value),
@@ -861,8 +963,8 @@ fn parse_manifest_item_reader<'a, R: std::io::BufRead>(
         let value = reader
             .decoder()
             .decode(&attr.value)
-            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-            .to_string();
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = metadata_attr_value(value.as_ref());
 
         match key.as_ref() {
             "id" => id = Some(value),
@@ -903,8 +1005,8 @@ fn parse_guide_reference_reader<'a, R: std::io::BufRead>(
         let value = reader
             .decoder()
             .decode(&attr.value)
-            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-            .to_string();
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = metadata_attr_value(value.as_ref());
 
         match key.as_ref() {
             "type" => guide_type = Some(value),
