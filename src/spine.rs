@@ -216,8 +216,7 @@ pub fn parse_spine_with_limits(
                     .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
                     .to_string();
                 #[cfg(target_os = "espidf")]
-                if (name == "metadata" || name == "manifest" || name == "guide") && !e.is_empty()
-                {
+                if (name == "metadata" || name == "manifest" || name == "guide") && !e.is_empty() {
                     reader
                         .read_to_end_into(e.name(), &mut skip_buf)
                         .map_err(|e| EpubError::Parse(format!("XML parse error: {:?}", e)))?;

@@ -11,8 +11,8 @@ use alloc::string::{String, ToString};
 use heapless::Vec as HeaplessVec;
 use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
-use std::sync::{Mutex, OnceLock};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_os = "espidf")]
 pub(crate) const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
@@ -425,8 +425,7 @@ pub struct StreamingZip<F: Read + Seek> {
     inflate_state: Option<Box<miniz_oxide::inflate::stream::InflateState>>,
 }
 
-fn inflate_pool(
-) -> &'static Mutex<Option<Box<miniz_oxide::inflate::stream::InflateState>>> {
+fn inflate_pool() -> &'static Mutex<Option<Box<miniz_oxide::inflate::stream::InflateState>>> {
     static INFLATE_POOL: OnceLock<Mutex<Option<Box<miniz_oxide::inflate::stream::InflateState>>>> =
         OnceLock::new();
     INFLATE_POOL.get_or_init(|| Mutex::new(None))
@@ -549,9 +548,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                 DataFormat::Raw,
             )));
         }
-        self.inflate_state
-            .as_deref_mut()
-            .ok_or(ZipError::IoError)
+        self.inflate_state.as_deref_mut().ok_or(ZipError::IoError)
     }
 
     /// Find EOCD and extract central directory info
