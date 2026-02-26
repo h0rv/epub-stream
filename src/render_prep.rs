@@ -12,7 +12,6 @@ use core::fmt;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 
 use crate::book::EpubBook;
@@ -711,8 +710,12 @@ impl Styler {
                                 if resolved_style_cache.is_none() {
                                     resolved_style_cache = Some(self.resolve_context_style(&stack));
                                 }
-                                let (resolved, role, bold_tag, italic_tag) =
-                                    resolved_style_cache.as_ref().expect("cache initialized");
+                                let Some((resolved, role, bold_tag, italic_tag)) =
+                                    resolved_style_cache.as_ref()
+                                else {
+                                    buf.clear();
+                                    continue;
+                                };
                                 let style =
                                     self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                                 emit_styled_run_text(
@@ -767,8 +770,12 @@ impl Styler {
                                 if resolved_style_cache.is_none() {
                                     resolved_style_cache = Some(self.resolve_context_style(&stack));
                                 }
-                                let (resolved, role, bold_tag, italic_tag) =
-                                    resolved_style_cache.as_ref().expect("cache initialized");
+                                let Some((resolved, role, bold_tag, italic_tag)) =
+                                    resolved_style_cache.as_ref()
+                                else {
+                                    buf.clear();
+                                    continue;
+                                };
                                 let style =
                                     self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                                 emit_styled_run_text(
@@ -845,8 +852,12 @@ impl Styler {
                     if resolved_style_cache.is_none() {
                         resolved_style_cache = Some(self.resolve_context_style(&stack));
                     }
-                    let (resolved, role, bold_tag, italic_tag) =
-                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let Some((resolved, role, bold_tag, italic_tag)) =
+                        resolved_style_cache.as_ref()
+                    else {
+                        buf.clear();
+                        continue;
+                    };
                     let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
@@ -873,8 +884,12 @@ impl Styler {
                     if resolved_style_cache.is_none() {
                         resolved_style_cache = Some(self.resolve_context_style(&stack));
                     }
-                    let (resolved, role, bold_tag, italic_tag) =
-                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let Some((resolved, role, bold_tag, italic_tag)) =
+                        resolved_style_cache.as_ref()
+                    else {
+                        buf.clear();
+                        continue;
+                    };
                     let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
@@ -916,8 +931,12 @@ impl Styler {
                     if resolved_style_cache.is_none() {
                         resolved_style_cache = Some(self.resolve_context_style(&stack));
                     }
-                    let (resolved, role, bold_tag, italic_tag) =
-                        resolved_style_cache.as_ref().expect("cache initialized");
+                    let Some((resolved, role, bold_tag, italic_tag)) =
+                        resolved_style_cache.as_ref()
+                    else {
+                        buf.clear();
+                        continue;
+                    };
                     let style = self.compute_style(resolved, *role, *bold_tag, *italic_tag);
                     emit_styled_run_text(&mut pending_run, normalized, style, 0, &mut on_item);
                 }
@@ -1466,7 +1485,7 @@ pub struct RenderPrep {
     opts: RenderPrepOptions,
     styler: Styler,
     font_resolver: FontResolver,
-    image_dimension_cache: BTreeMap<String, Option<(u16, u16)>>,
+    image_dimension_cache: Vec<(String, Option<(u16, u16)>)>,
     image_probe_scratch: Vec<u8>,
 }
 
@@ -1511,9 +1530,7 @@ impl RenderPrep {
             opts,
             styler,
             font_resolver,
-            // TODO: move to caller-owned or bounded cache to avoid per-RenderPrep map alloc
-            #[allow(clippy::disallowed_methods)]
-            image_dimension_cache: BTreeMap::new(), // allow: per-RenderPrep, bounded by manifest
+            image_dimension_cache: Vec::with_capacity(64),
             image_probe_scratch: Vec::with_capacity(IMAGE_DIMENSION_PROBE_CHUNK_BYTES),
         }
     }
@@ -1720,7 +1737,7 @@ impl RenderPrep {
                         "BOOK_CHAPTER_STYLESHEET_READ",
                         e.to_string(),
                     )
-                    .with_path(href.to_string())
+                    .with_path(href.clone())
                     .with_chapter_index(chapter_index)
                 })?;
             if scratch_buf.len() > css_limit {
@@ -1733,7 +1750,7 @@ impl RenderPrep {
                         css_limit
                     ),
                 )
-                .with_path(href.to_string())
+                .with_path(href.clone())
                 .with_chapter_index(chapter_index)
                 .with_limit("max_css_bytes", scratch_buf.len(), css_limit));
             }
@@ -1743,7 +1760,7 @@ impl RenderPrep {
                     "STYLE_CSS_NOT_UTF8",
                     format!("Stylesheet is not UTF-8: {}", href),
                 )
-                .with_path(href.to_string())
+                .with_path(href.clone())
                 .with_chapter_index(chapter_index)
             })?;
             self.styler
@@ -1758,11 +1775,9 @@ impl RenderPrep {
         book: &mut EpubBook<R>,
         chapter_href: &str,
         html: &[u8],
-    ) -> BTreeMap<String, (u16, u16)> {
-        // TODO: replace with caller-owned Vec<(String, (u16, u16))> to avoid per-chapter map alloc
-        #[allow(clippy::disallowed_methods)]
-        let mut out = BTreeMap::new(); // allow: per-chapter dimension lookup, bounded by image count
+    ) -> Vec<(String, (u16, u16))> {
         let sources = collect_image_sources_from_html(chapter_href, html);
+        let mut out = Vec::with_capacity(sources.len());
         self.collect_intrinsic_image_dimensions_from_sources(book, &sources, &mut out);
         out
     }
@@ -1771,11 +1786,11 @@ impl RenderPrep {
         &mut self,
         book: &mut EpubBook<R>,
         sources: &[String],
-        out: &mut BTreeMap<String, (u16, u16)>,
+        out: &mut Vec<(String, (u16, u16))>,
     ) {
         for src in sources.iter() {
             if let Some((w, h)) = self.resolve_intrinsic_image_dimensions(book, src) {
-                out.insert(resource_path_without_fragment(src).to_string(), (w, h));
+                image_dims_upsert_sorted(out, resource_path_without_fragment(src), (w, h));
             }
         }
     }
@@ -1786,8 +1801,8 @@ impl RenderPrep {
         src: &str,
     ) -> Option<(u16, u16)> {
         let key = resource_path_without_fragment(src);
-        if let Some(cached) = self.image_dimension_cache.get(key) {
-            return *cached;
+        if let Some(cached) = cache_lookup_sorted(&self.image_dimension_cache, key) {
+            return Some(cached);
         }
 
         // Probe only a bounded header prefix through a streaming reader; no full
@@ -1796,8 +1811,7 @@ impl RenderPrep {
             .opts
             .memory
             .max_entry_bytes
-            .min(IMAGE_DIMENSION_PROBE_MAX_BYTES)
-            .max(1);
+            .clamp(1, IMAGE_DIMENSION_PROBE_MAX_BYTES);
         self.image_probe_scratch.clear();
         let dimensions = match book.open_resource_reader(key) {
             Ok(mut reader) => {
@@ -1827,8 +1841,7 @@ impl RenderPrep {
             }
             Err(_) => None,
         };
-        self.image_dimension_cache
-            .insert(key.to_string(), dimensions);
+        cache_upsert_sorted(&mut self.image_dimension_cache, key, dimensions);
         dimensions
     }
 
@@ -1893,7 +1906,7 @@ impl RenderPrep {
             &stylesheet_links,
             &mut stylesheet_scratch,
         )?;
-        let mut image_dimensions = BTreeMap::new();
+        let mut image_dimensions = Vec::with_capacity(image_sources.len());
         self.collect_intrinsic_image_dimensions_from_sources(
             book,
             &image_sources,
@@ -2041,7 +2054,7 @@ impl RenderPrep {
             &stylesheet_links,
             &mut stylesheet_scratch,
         )?;
-        let mut image_dimensions = BTreeMap::new();
+        let mut image_dimensions = Vec::with_capacity(image_sources.len());
         self.collect_intrinsic_image_dimensions_from_sources(
             book,
             &image_sources,
@@ -2621,14 +2634,14 @@ fn resolve_item_with_font_trace(
 
 fn resolve_item_assets_for_chapter(
     chapter_href: &str,
-    image_dimensions: Option<&BTreeMap<String, (u16, u16)>>,
+    image_dimensions: Option<&[(String, (u16, u16))]>,
     mut item: StyledEventOrRun,
 ) -> StyledEventOrRun {
     if let StyledEventOrRun::Image(image) = &mut item {
         image.src = resolve_relative(chapter_href, &image.src);
         if let Some(dimensions) = image_dimensions {
             let key = resource_path_without_fragment(&image.src);
-            if let Some((intrinsic_w, intrinsic_h)) = dimensions.get(key).copied() {
+            if let Some((intrinsic_w, intrinsic_h)) = image_dims_lookup_sorted(dimensions, key) {
                 match (image.width_px, image.height_px) {
                     (None, None) => {
                         image.width_px = Some(intrinsic_w);
@@ -2678,6 +2691,37 @@ pub(crate) fn resolve_relative(base_path: &str, rel: &str) -> String {
 
 fn resource_path_without_fragment(path: &str) -> &str {
     path.split('#').next().unwrap_or(path)
+}
+
+fn image_dims_lookup_sorted(dims: &[(String, (u16, u16))], key: &str) -> Option<(u16, u16)> {
+    dims.binary_search_by(|(k, _)| k.as_str().cmp(key))
+        .ok()
+        .map(|idx| dims[idx].1)
+}
+
+fn image_dims_upsert_sorted(dims: &mut Vec<(String, (u16, u16))>, key: &str, value: (u16, u16)) {
+    match dims.binary_search_by(|(k, _)| k.as_str().cmp(key)) {
+        Ok(idx) => dims[idx].1 = value,
+        Err(idx) => dims.insert(idx, (key.to_string(), value)),
+    }
+}
+
+fn cache_lookup_sorted(cache: &[(String, Option<(u16, u16)>)], key: &str) -> Option<(u16, u16)> {
+    cache
+        .binary_search_by(|(k, _)| k.as_str().cmp(key))
+        .ok()
+        .and_then(|idx| cache[idx].1)
+}
+
+fn cache_upsert_sorted(
+    cache: &mut Vec<(String, Option<(u16, u16)>)>,
+    key: &str,
+    value: Option<(u16, u16)>,
+) {
+    match cache.binary_search_by(|(k, _)| k.as_str().cmp(key)) {
+        Ok(idx) => cache[idx].1 = value,
+        Err(idx) => cache.insert(idx, (key.to_string(), value)),
+    }
 }
 
 fn bounded_nonzero_u16(value: u32) -> Option<u16> {
@@ -3410,8 +3454,7 @@ mod tests {
 
     #[test]
     fn resolve_item_assets_uses_intrinsic_dimensions_when_missing() {
-        let mut map = BTreeMap::new();
-        map.insert("images/cover.jpg".to_string(), (600u16, 900u16));
+        let map = vec![("images/cover.jpg".to_string(), (600u16, 900u16))];
         let item = StyledEventOrRun::Image(StyledImage {
             src: "../images/cover.jpg".to_string(),
             alt: String::new(),

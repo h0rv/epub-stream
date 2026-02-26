@@ -855,8 +855,8 @@ impl EpubBook<File> {
         .map_err(EpubError::Zip)?;
 
         zip.validate_mimetype().map_err(EpubError::Zip)?;
-        let mut zip_input_scratch = Vec::new();
-        let mut zip_output_scratch = Vec::new();
+        let mut zip_input_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
+        let mut zip_output_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
 
         // Create temp file paths
         let temp_dir = temp_dir.as_ref();
@@ -1008,8 +1008,8 @@ impl<R: Read + Seek> EpubBook<R> {
 
         Ok(Self {
             zip,
-            resource_input_scratch: Vec::new(),
-            resource_output_scratch: Vec::new(),
+            resource_input_scratch: Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES),
+            resource_output_scratch: Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES),
             opf_path,
             metadata,
             spine,
@@ -2213,8 +2213,8 @@ fn read_entry_into_with_limit<R: Read + Seek, W: Write>(
     writer: &mut W,
     max_bytes: usize,
 ) -> Result<usize, EpubError> {
-    let mut input_scratch = Vec::new();
-    let mut output_scratch = Vec::new();
+    let mut input_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
+    let mut output_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
     read_entry_into_with_limit_and_scratch(
         zip,
         path,

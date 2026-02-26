@@ -1471,6 +1471,7 @@ fn block_role_to_string(role: BlockRole) -> String {
         BlockRole::Heading(level) => format!("heading-{}", level),
         BlockRole::ListItem => "list-item".to_string(),
         BlockRole::FigureCaption => "figure-caption".to_string(),
+        BlockRole::Preformatted => "preformatted".to_string(),
     }
 }
 
