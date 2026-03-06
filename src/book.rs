@@ -12,9 +12,13 @@ use alloc::vec::Vec;
 use core::str;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
+#[cfg(feature = "std")]
+use std::path::PathBuf;
+#[cfg(feature = "std")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{
     EpubError, ErrorLimitContext, ErrorPhase, LimitKind, PhaseError, PhaseErrorContext, ZipError,
@@ -41,6 +45,82 @@ macro_rules! epub_temp_trace {
             log::info!($($arg)*);
         }
     }};
+}
+
+#[cfg(feature = "std")]
+static EPUB_TEMP_FILE_NONCE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "std")]
+struct TempOpenFiles {
+    container_path: PathBuf,
+    opf_path: PathBuf,
+}
+
+#[cfg(feature = "std")]
+impl TempOpenFiles {
+    fn create(temp_dir: &Path) -> Result<Self, EpubError> {
+        std::fs::create_dir_all(temp_dir)
+            .map_err(|e| EpubError::Io(format!("Failed to prepare EPUB temp directory: {}", e)))?;
+        Ok(Self {
+            container_path: Self::reserve_temp_path(temp_dir, "container")?,
+            opf_path: Self::reserve_temp_path(temp_dir, "opf")?,
+        })
+    }
+
+    fn reserve_temp_path(temp_dir: &Path, stem: &str) -> Result<PathBuf, EpubError> {
+        let pid = std::process::id();
+        for _ in 0..32 {
+            let nonce = EPUB_TEMP_FILE_NONCE.fetch_add(1, Ordering::Relaxed);
+            let path = temp_dir.join(format!(".epub_stream_{stem}_{pid}_{nonce}.xml"));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(path);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    return Err(EpubError::Io(format!(
+                        "Failed to create temp file {}: {}",
+                        path.display(),
+                        err
+                    )));
+                }
+            }
+        }
+        Err(EpubError::Io(format!(
+            "Failed to reserve unique temp file for {stem}"
+        )))
+    }
+
+    fn open_container_file(&self) -> Result<File, EpubError> {
+        Self::open_reserved_path(&self.container_path)
+    }
+
+    fn open_opf_file(&self) -> Result<File, EpubError> {
+        Self::open_reserved_path(&self.opf_path)
+    }
+
+    fn open_reserved_path(path: &Path) -> Result<File, EpubError> {
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|err| {
+                EpubError::Io(format!(
+                    "Failed to open temp file {}: {}",
+                    path.display(),
+                    err
+                ))
+            })
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for TempOpenFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.container_path);
+        let _ = std::fs::remove_file(&self.opf_path);
+    }
 }
 
 /// Validation strictness for high-level open/parse flows.
@@ -870,14 +950,11 @@ impl EpubBook<File> {
         let mut zip_input_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
         let mut zip_output_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
 
-        // Create temp file paths
         let temp_dir = temp_dir.as_ref();
-        let container_temp = temp_dir.join(".epub_stream_container.xml");
-        let opf_temp = temp_dir.join(".epub_stream_opf.xml");
+        let temp_files = TempOpenFiles::create(temp_dir)?;
 
         // Stream container.xml to temp file instead of loading into RAM
-        let mut container_file = File::create(&container_temp)
-            .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
+        let mut container_file = temp_files.open_container_file()?;
         read_entry_into_with_limit_and_scratch(
             &mut zip,
             "META-INF/container.xml",
@@ -890,16 +967,12 @@ impl EpubBook<File> {
         epub_temp_trace!("[EPUB-TEMP] container_streamed");
 
         // Parse container.xml from file to get OPF path
-        let opf_path = parse_container_xml_file(&container_temp)
+        let opf_path = parse_container_xml_file(&temp_files.container_path)
             .map_err(|e| EpubError::Parse(format!("Failed to parse container.xml: {}", e)))?;
         epub_temp_trace!("[EPUB-TEMP] container_parsed");
 
-        // Clean up container temp file immediately
-        let _ = std::fs::remove_file(&container_temp);
-
         // Stream OPF to temp file instead of loading into RAM
-        let mut opf_file = File::create(&opf_temp)
-            .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
+        let mut opf_file = temp_files.open_opf_file()?;
         read_entry_into_with_limit_and_scratch(
             &mut zip,
             &opf_path,
@@ -912,20 +985,20 @@ impl EpubBook<File> {
         epub_temp_trace!("[EPUB-TEMP] opf_streamed");
 
         // Parse OPF from file
-        let mut metadata = parse_opf_file_with_limits(&opf_temp, &options.metadata_limits)
-            .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
+        let mut metadata =
+            parse_opf_file_with_limits(&temp_files.opf_path, &options.metadata_limits)
+                .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
         epub_temp_trace!("[EPUB-TEMP] metadata_parsed");
 
         // Store the OPF path in metadata
         metadata.opf_path = Some(opf_path.clone());
 
         // Parse spine from file to avoid full OPF buffering
-        let spine =
-            crate::spine::parse_spine_file_with_limits(&opf_temp, &options.metadata_limits)?;
+        let spine = crate::spine::parse_spine_file_with_limits(
+            &temp_files.opf_path,
+            &options.metadata_limits,
+        )?;
         epub_temp_trace!("[EPUB-TEMP] spine_parsed");
-
-        // Clean up OPF temp file
-        let _ = std::fs::remove_file(&opf_temp);
 
         validate_open_invariants(&metadata, &spine, options.validation_mode)?;
 
@@ -2552,6 +2625,69 @@ fn extract_plain_text_limited(
 mod tests {
     use super::*;
     use crate::render_prep::{RenderPrep, RenderPrepOptions, RenderPrepTrace, StyledEventOrRun};
+
+    fn temp_open_test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "epub-stream-open-{label}-{}",
+            EPUB_TEMP_FILE_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp test dir should be created");
+        dir
+    }
+
+    fn epub_temp_file_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("temp test dir should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".epub_stream_")
+            })
+            .count()
+    }
+
+    #[test]
+    fn test_open_with_temp_storage_cleans_temp_files_on_success() {
+        let temp_dir = temp_open_test_dir("success");
+        let book = EpubBook::open_with_temp_storage(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+            &temp_dir,
+            OpenConfig::default(),
+        )
+        .expect("temp-backed open should succeed");
+        assert!(book.chapter_count() > 0);
+        drop(book);
+        assert_eq!(epub_temp_file_count(&temp_dir), 0);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_open_with_temp_storage_cleans_temp_files_on_failure() {
+        let temp_dir = temp_open_test_dir("failure");
+        let err = match EpubBook::open_with_temp_storage(
+            "tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+            &temp_dir,
+            OpenConfig {
+                options: EpubBookOptions {
+                    max_nav_bytes: Some(8),
+                    ..EpubBookOptions::default()
+                },
+                lazy_navigation: false,
+            },
+        ) {
+            Ok(_) => panic!("nav byte limit should fail after temp files are created"),
+            Err(err) => err,
+        };
+        match err {
+            EpubError::Navigation(_) | EpubError::Phase(_) => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
+        assert_eq!(epub_temp_file_count(&temp_dir), 0);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_resolve_opf_relative_path() {

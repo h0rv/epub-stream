@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use epub_stream::{EpubBook, MemoryBudget, RenderPrepOptions};
 use epub_stream_render::{
     CancelToken, OverlayComposer, OverlayContent, OverlayItem, OverlaySize, OverlaySlot,
-    PageChromeConfig, PaginationProfileId, RenderBookPageMap, RenderCacheStore, RenderConfig,
-    RenderDiagnostic, RenderEngine, RenderEngineError, RenderEngineOptions,
-    RenderLocatorTargetKind, RenderPage, RenderReadingPositionToken,
+    PageChromeConfig, PaginationProfileId, RenderBookPageMap, RenderCacheStore,
+    RenderChapterArtifactWriter, RenderConfig, RenderDiagnostic, RenderEngine, RenderEngineError,
+    RenderEngineOptions, RenderLocatorTargetKind, RenderPage, RenderReadingPositionToken,
 };
 
 fn fixture_path() -> PathBuf {
@@ -463,6 +463,38 @@ struct CacheSpy {
     cached_pages: Mutex<Option<Vec<RenderPage>>>,
 }
 
+struct CacheSpyWriter<'a> {
+    cache: &'a CacheSpy,
+    pages: Vec<RenderPage>,
+}
+
+impl RenderChapterArtifactWriter for CacheSpyWriter<'_> {
+    fn append_page(&mut self, page: &RenderPage) -> bool {
+        self.pages.push(page.clone());
+        true
+    }
+
+    fn finish(mut self: Box<Self>) -> bool {
+        let page_count = self.pages.len().max(1);
+        for (idx, page) in self.pages.iter_mut().enumerate() {
+            page.metrics.chapter_page_index = idx;
+            page.metrics.chapter_page_count = Some(page_count);
+            page.metrics.global_page_index = Some(idx);
+            page.metrics.global_page_count_estimate = Some(page_count);
+            page.metrics.progress_chapter = if page_count <= 1 {
+                1.0
+            } else {
+                idx as f32 / (page_count - 1) as f32
+            };
+            page.metrics.progress_book = Some(page.metrics.progress_chapter);
+        }
+        let mut stores = self.cache.stores.lock().expect("store lock");
+        *stores += 1;
+        *self.cache.cached_pages.lock().expect("pages lock") = Some(self.pages);
+        true
+    }
+}
+
 impl CacheSpy {
     fn load_count(&self) -> usize {
         *self.loads.lock().expect("load lock")
@@ -484,6 +516,33 @@ impl RenderCacheStore for CacheSpy {
         self.cached_pages.lock().expect("pages lock").clone()
     }
 
+    fn load_chapter_page_count(
+        &self,
+        _profile: PaginationProfileId,
+        _chapter_index: usize,
+    ) -> Option<usize> {
+        let mut loads = self.loads.lock().expect("load lock");
+        *loads += 1;
+        self.cached_pages
+            .lock()
+            .expect("pages lock")
+            .as_ref()
+            .map(Vec::len)
+    }
+
+    fn load_chapter_page(
+        &self,
+        _profile: PaginationProfileId,
+        _chapter_index: usize,
+        page_index: usize,
+    ) -> Option<RenderPage> {
+        self.cached_pages
+            .lock()
+            .expect("pages lock")
+            .as_ref()
+            .and_then(|pages| pages.get(page_index).cloned())
+    }
+
     fn store_chapter_pages(
         &self,
         _profile: PaginationProfileId,
@@ -493,6 +552,17 @@ impl RenderCacheStore for CacheSpy {
         let mut stores = self.stores.lock().expect("store lock");
         *stores += 1;
         *self.cached_pages.lock().expect("pages lock") = Some(pages.to_vec());
+    }
+
+    fn begin_chapter_artifact(
+        &self,
+        _profile: PaginationProfileId,
+        _chapter_index: usize,
+    ) -> Option<Box<dyn RenderChapterArtifactWriter + '_>> {
+        Some(Box::new(CacheSpyWriter {
+            cache: self,
+            pages: Vec::new(),
+        }))
     }
 }
 

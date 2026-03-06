@@ -50,6 +50,23 @@ pub struct PersistedRenderPage {
     pub metrics: PersistedPageMetrics,
 }
 
+/// Binary-cache-friendly page payload.
+///
+/// This mirrors `PersistedRenderPage` but intentionally avoids
+/// `skip_serializing_if` so compact binary formats like postcard keep a stable
+/// field layout even when vectors are empty.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BinaryPersistedRenderPage {
+    pub page_number: usize,
+    pub commands: Vec<PersistedDrawCommand>,
+    pub content_commands: Vec<PersistedDrawCommand>,
+    pub chrome_commands: Vec<PersistedDrawCommand>,
+    pub overlay_commands: Vec<PersistedDrawCommand>,
+    pub overlay_items: Vec<PersistedOverlayItem>,
+    pub annotations: Vec<PersistedPageAnnotation>,
+    pub metrics: PersistedPageMetrics,
+}
+
 impl From<&RenderPage> for PersistedRenderPage {
     fn from(value: &RenderPage) -> Self {
         Self {
@@ -89,6 +106,42 @@ impl From<&RenderPage> for PersistedRenderPage {
     }
 }
 
+impl From<PersistedRenderPage> for BinaryPersistedRenderPage {
+    fn from(value: PersistedRenderPage) -> Self {
+        Self {
+            page_number: value.page_number,
+            commands: value.commands,
+            content_commands: value.content_commands,
+            chrome_commands: value.chrome_commands,
+            overlay_commands: value.overlay_commands,
+            overlay_items: value.overlay_items,
+            annotations: value.annotations,
+            metrics: value.metrics,
+        }
+    }
+}
+
+impl From<BinaryPersistedRenderPage> for PersistedRenderPage {
+    fn from(value: BinaryPersistedRenderPage) -> Self {
+        Self {
+            page_number: value.page_number,
+            commands: value.commands,
+            content_commands: value.content_commands,
+            chrome_commands: value.chrome_commands,
+            overlay_commands: value.overlay_commands,
+            overlay_items: value.overlay_items,
+            annotations: value.annotations,
+            metrics: value.metrics,
+        }
+    }
+}
+
+impl From<&RenderPage> for BinaryPersistedRenderPage {
+    fn from(value: &RenderPage) -> Self {
+        PersistedRenderPage::from(value).into()
+    }
+}
+
 impl From<PersistedRenderPage> for RenderPage {
     fn from(value: PersistedRenderPage) -> Self {
         Self {
@@ -121,6 +174,12 @@ impl From<PersistedRenderPage> for RenderPage {
                 .collect(),
             metrics: value.metrics.into(),
         }
+    }
+}
+
+impl From<BinaryPersistedRenderPage> for RenderPage {
+    fn from(value: BinaryPersistedRenderPage) -> Self {
+        PersistedRenderPage::from(value).into()
     }
 }
 

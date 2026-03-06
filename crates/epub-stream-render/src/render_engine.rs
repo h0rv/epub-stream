@@ -7,21 +7,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::persisted::PersistedCacheEnvelope;
+use crate::persisted::BinaryPersistedRenderPage;
 use crate::render_ir::{OverlayContent, OverlaySize, PaginationProfileId, RenderPage};
 use crate::render_layout::{
     LayoutConfig, LayoutEngine, LayoutSession as CoreLayoutSession, TextMeasurer,
 };
 
 #[cfg(test)]
-use crate::persisted::{PersistedPageAnnotation, CACHE_SCHEMA_VERSION};
+use crate::persisted::{PersistedCacheEnvelope, PersistedPageAnnotation, CACHE_SCHEMA_VERSION};
 
 /// Cancellation hook for long-running layout operations.
 pub trait CancelToken {
@@ -486,38 +486,94 @@ impl RenderBookPageMap {
 }
 
 /// Storage hooks for render-page caches.
+pub trait RenderChapterArtifactWriter {
+    /// Append one page payload to the chapter artifact.
+    fn append_page(&mut self, page: &RenderPage) -> bool;
+
+    /// Finalize and publish the chapter artifact.
+    fn finish(self: Box<Self>) -> bool;
+}
+
+/// Storage hooks for render-page caches.
 pub trait RenderCacheStore {
     /// Load cached pages for `chapter_index` and pagination profile, if available.
     fn load_chapter_pages(
         &self,
-        _profile: PaginationProfileId,
-        _chapter_index: usize,
+        profile: PaginationProfileId,
+        chapter_index: usize,
     ) -> Option<Vec<RenderPage>> {
-        None
+        let page_count = self.load_chapter_page_count(profile, chapter_index)?;
+        let mut pages = Vec::with_capacity(page_count);
+        for page_index in 0..page_count {
+            pages.push(self.load_chapter_page(profile, chapter_index, page_index)?);
+        }
+        Some(pages)
     }
 
     /// Persist rendered chapter pages for the pagination profile.
     fn store_chapter_pages(
         &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+        pages: &[RenderPage],
+    ) {
+        let Some(mut writer) = self.begin_chapter_artifact(profile, chapter_index) else {
+            return;
+        };
+        for page in pages {
+            if !writer.append_page(page) {
+                return;
+            }
+        }
+        let _ = writer.finish();
+    }
+
+    /// Load cached page count for `chapter_index` and pagination profile.
+    fn load_chapter_page_count(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+    ) -> Option<usize> {
+        self.load_chapter_pages(profile, chapter_index)
+            .map(|pages| pages.len())
+    }
+
+    /// Load one cached page for `chapter_index` and pagination profile.
+    fn load_chapter_page(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+        page_index: usize,
+    ) -> Option<RenderPage> {
+        self.load_chapter_pages(profile, chapter_index)
+            .and_then(|pages| pages.into_iter().nth(page_index))
+    }
+
+    /// Start a page-at-a-time artifact writer for one chapter/profile.
+    fn begin_chapter_artifact(
+        &self,
         _profile: PaginationProfileId,
         _chapter_index: usize,
-        _pages: &[RenderPage],
-    ) {
+    ) -> Option<Box<dyn RenderChapterArtifactWriter + '_>> {
+        None
     }
 }
 
 const DEFAULT_MAX_CACHE_FILE_BYTES: usize = 4 * 1024 * 1024;
+const CACHE_ARTIFACT_MAGIC: [u8; 8] = *b"ESRPAGE\0";
+const CACHE_ARTIFACT_VERSION: u8 = 1;
+const CACHE_ARTIFACT_HEADER_BYTES: usize = CACHE_ARTIFACT_MAGIC.len() + 1 + 4;
 const MAX_PAGE_CONTENT_COMMAND_CAPACITY_HINT: usize = 256;
 static CACHE_WRITE_NONCE: AtomicUsize = AtomicUsize::new(0);
 
 /// File-backed render-page cache store.
 ///
 /// Cache paths are deterministic by pagination profile and chapter index:
-/// `<root>/<profile-hex>/chapter-<index>.json`.
+/// `<root>/<profile-hex>/chapter-<index>.bin`.
 ///
-/// The store uses a JSON envelope with a schema version and enforces
-/// `max_file_bytes` on both reads and writes. When I/O, decode, or size checks
-/// fail, operations return `None`/no-op instead of bubbling errors.
+/// The store uses a binary chapter artifact with a versioned header, page LUT,
+/// and postcard-encoded page payloads. When I/O, decode, or size checks fail,
+/// operations return `None`/no-op instead of bubbling errors.
 #[derive(Clone, Debug)]
 pub struct FileRenderCacheStore {
     root: PathBuf,
@@ -560,7 +616,7 @@ impl FileRenderCacheStore {
         let profile_dir = profile_hex(profile);
         self.root
             .join(profile_dir)
-            .join(format!("chapter-{}.json", chapter_index)) // allow: file I/O path, not hot
+            .join(format!("chapter-{}.bin", chapter_index)) // allow: file I/O path, not hot
     }
 }
 
@@ -571,89 +627,251 @@ impl RenderCacheStore for FileRenderCacheStore {
         chapter_index: usize,
     ) -> Option<Vec<RenderPage>> {
         let path = self.chapter_cache_path(profile, chapter_index);
-        let max_file_bytes = self.max_file_bytes as u64;
-        if fs::metadata(&path).ok()?.len() > max_file_bytes {
-            return None;
+        let mut file = open_cache_file(&path, self.max_file_bytes)?;
+        let header = read_cache_header(&mut file)?;
+        let offsets = read_cache_offsets(&mut file, header.page_count)?;
+        let mut pages = Vec::with_capacity(header.page_count);
+        for page_index in 0..header.page_count {
+            pages.push(read_cache_page_at(&mut file, &offsets, page_index)?);
         }
-
-        let file = File::open(path).ok()?;
-        let mut reader = file.take(max_file_bytes.saturating_add(1));
-        let mut payload = Vec::with_capacity(8);
-        if reader.read_to_end(&mut payload).is_err() {
-            return None;
-        }
-        if payload.len() > self.max_file_bytes {
-            return None;
-        }
-        let envelope: PersistedCacheEnvelope = serde_json::from_slice(&payload).ok()?;
-        envelope.into_render_pages()
+        Some(pages)
     }
 
-    fn store_chapter_pages(
+    fn load_chapter_page_count(
         &self,
         profile: PaginationProfileId,
         chapter_index: usize,
-        pages: &[RenderPage],
-    ) {
-        let final_path = self.chapter_cache_path(profile, chapter_index);
-        let Some(parent) = final_path.parent() else {
-            return;
-        };
-        if fs::create_dir_all(parent).is_err() {
-            return;
+    ) -> Option<usize> {
+        let path = self.chapter_cache_path(profile, chapter_index);
+        let mut file = open_cache_file(&path, self.max_file_bytes)?;
+        Some(read_cache_header(&mut file)?.page_count)
+    }
+
+    fn load_chapter_page(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+        page_index: usize,
+    ) -> Option<RenderPage> {
+        let path = self.chapter_cache_path(profile, chapter_index);
+        let mut file = open_cache_file(&path, self.max_file_bytes)?;
+        let header = read_cache_header(&mut file)?;
+        if page_index >= header.page_count {
+            return None;
         }
+        let offsets = read_cache_offsets(&mut file, header.page_count)?;
+        read_cache_page_at(&mut file, &offsets, page_index)
+    }
+
+    fn begin_chapter_artifact(
+        &self,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+    ) -> Option<Box<dyn RenderChapterArtifactWriter + '_>> {
+        FileChapterArtifactWriter::create(self, profile, chapter_index)
+    }
+}
+
+struct FileChapterArtifactWriter {
+    max_file_bytes: usize,
+    final_path: PathBuf,
+    final_temp_path: PathBuf,
+    pages: Vec<RenderPage>,
+}
+
+impl FileChapterArtifactWriter {
+    fn create(
+        store: &FileRenderCacheStore,
+        profile: PaginationProfileId,
+        chapter_index: usize,
+    ) -> Option<Box<dyn RenderChapterArtifactWriter + '_>> {
+        let final_path = store.chapter_cache_path(profile, chapter_index);
+        let parent = final_path.parent()?.to_path_buf();
+        fs::create_dir_all(&parent).ok()?;
 
         let nonce = CACHE_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
-        let temp_path = parent.join(format!(
-            // allow: file I/O path, not hot
-            "chapter-{}.json.tmp-{}-{}",
+        let final_temp_path = parent.join(format!(
+            "chapter-{}.bin.tmp-{}-{}",
             chapter_index,
             std::process::id(),
             nonce
         ));
 
-        let envelope = PersistedCacheEnvelope::from_pages(pages);
+        Some(Box::new(Self {
+            max_file_bytes: store.max_file_bytes,
+            final_path,
+            final_temp_path,
+            pages: Vec::new(),
+        }))
+    }
+}
+
+impl RenderChapterArtifactWriter for FileChapterArtifactWriter {
+    fn append_page(&mut self, page: &RenderPage) -> bool {
+        self.pages.push(page.clone());
+        true
+    }
+
+    fn finish(mut self: Box<Self>) -> bool {
         let file = match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temp_path)
+            .open(&self.final_temp_path)
         {
             Ok(file) => file,
-            Err(_) => return,
+            Err(_) => return false,
         };
         let writer = BufWriter::new(file);
         let mut writer = CappedWriter::new(writer, self.max_file_bytes);
-        if serde_json::to_writer(&mut writer, &envelope).is_err() {
-            remove_file_quiet(&temp_path);
-            return;
+        let page_count = self.pages.len().max(1);
+        for (idx, page) in self.pages.iter_mut().enumerate() {
+            RenderEngine::annotate_page_for_chapter(page, page.metrics.chapter_index);
+            page.metrics.chapter_page_index = idx;
+            RenderEngine::annotate_page_metrics(page, page_count);
+        }
+        if write_cache_artifact(&mut writer, &self.pages).is_err() {
+            remove_file_quiet(&self.final_temp_path);
+            return false;
         }
         if writer.flush().is_err() {
-            remove_file_quiet(&temp_path);
-            return;
+            remove_file_quiet(&self.final_temp_path);
+            return false;
         }
         let mut writer = writer.into_inner();
         if writer.flush().is_err() {
-            remove_file_quiet(&temp_path);
-            return;
+            remove_file_quiet(&self.final_temp_path);
+            return false;
         }
         let file = match writer.into_inner() {
             Ok(file) => file,
             Err(_) => {
-                remove_file_quiet(&temp_path);
-                return;
+                remove_file_quiet(&self.final_temp_path);
+                return false;
             }
         };
         if file.sync_all().is_err() {
-            remove_file_quiet(&temp_path);
-            return;
+            remove_file_quiet(&self.final_temp_path);
+            return false;
         }
         drop(file);
-        if fs::rename(&temp_path, &final_path).is_err() {
-            remove_file_quiet(&temp_path);
-            return;
+        if fs::rename(&self.final_temp_path, &self.final_path).is_err() {
+            remove_file_quiet(&self.final_temp_path);
+            return false;
         }
-        sync_directory(parent);
+        if let Some(parent) = self.final_path.parent() {
+            sync_directory(parent);
+        }
+        true
     }
+}
+
+impl Drop for FileChapterArtifactWriter {
+    fn drop(&mut self) {
+        remove_file_quiet(&self.final_temp_path);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheArtifactHeader {
+    page_count: usize,
+}
+
+fn open_cache_file(path: &Path, max_file_bytes: usize) -> Option<File> {
+    let len = fs::metadata(path).ok()?.len();
+    if len > max_file_bytes as u64 {
+        return None;
+    }
+    File::open(path).ok()
+}
+
+fn read_cache_header(file: &mut File) -> Option<CacheArtifactHeader> {
+    let mut header = [0u8; CACHE_ARTIFACT_HEADER_BYTES];
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.read_exact(&mut header).ok()?;
+    if header[..CACHE_ARTIFACT_MAGIC.len()] != CACHE_ARTIFACT_MAGIC {
+        return None;
+    }
+    if header[CACHE_ARTIFACT_MAGIC.len()] != CACHE_ARTIFACT_VERSION {
+        return None;
+    }
+    let count_offset = CACHE_ARTIFACT_MAGIC.len() + 1;
+    let page_count_u32 =
+        u32::from_le_bytes(header[count_offset..count_offset + 4].try_into().ok()?);
+    let page_count = usize::try_from(page_count_u32).ok()?;
+    Some(CacheArtifactHeader { page_count })
+}
+
+fn read_cache_offsets(file: &mut File, page_count: usize) -> Option<Vec<u64>> {
+    let offset_count = page_count.checked_add(1)?;
+    let byte_len = offset_count.checked_mul(core::mem::size_of::<u64>())?;
+    let mut bytes = vec![0u8; byte_len];
+    file.seek(SeekFrom::Start(CACHE_ARTIFACT_HEADER_BYTES as u64))
+        .ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    let mut offsets = Vec::with_capacity(offset_count);
+    for chunk in bytes.chunks_exact(core::mem::size_of::<u64>()) {
+        offsets.push(u64::from_le_bytes(chunk.try_into().ok()?));
+    }
+    if offsets.len() != offset_count {
+        return None;
+    }
+    Some(offsets)
+}
+
+fn read_cache_page_at(file: &mut File, offsets: &[u64], page_index: usize) -> Option<RenderPage> {
+    let start = *offsets.get(page_index)?;
+    let end = *offsets.get(page_index.checked_add(1)?)?;
+    if end < start {
+        return None;
+    }
+    let page_len = usize::try_from(end.saturating_sub(start)).ok()?;
+    let mut bytes = vec![0u8; page_len];
+    file.seek(SeekFrom::Start(start)).ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    let persisted: BinaryPersistedRenderPage = postcard::from_bytes(&bytes).ok()?;
+    Some(persisted.into())
+}
+
+fn write_cache_artifact<W: Write>(writer: &mut W, pages: &[RenderPage]) -> io::Result<()> {
+    let lut_entries = pages
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("page count overflow"))?;
+    let lut_bytes = lut_entries
+        .checked_mul(core::mem::size_of::<u64>())
+        .ok_or_else(|| io::Error::other("cache LUT overflow"))?;
+    let header_bytes = CACHE_ARTIFACT_HEADER_BYTES
+        .checked_add(lut_bytes)
+        .ok_or_else(|| io::Error::other("cache header overflow"))?;
+    let mut payload_offset =
+        u64::try_from(header_bytes).map_err(|_| io::Error::other("cache header too large"))?;
+    let mut offsets = Vec::with_capacity(lut_entries);
+    let mut payloads = Vec::with_capacity(pages.len());
+    offsets.push(payload_offset);
+    for page in pages {
+        let payload = postcard::to_allocvec(&BinaryPersistedRenderPage::from(page))
+            .map_err(|err| io::Error::other(format!("cache encode failed: {err}")))?;
+        let payload_len = u64::try_from(payload.len())
+            .map_err(|_| io::Error::other("cache payload too large"))?;
+        payload_offset = payload_offset
+            .checked_add(payload_len)
+            .ok_or_else(|| io::Error::other("cache size overflow"))?;
+        payloads.push(payload);
+        offsets.push(payload_offset);
+    }
+
+    let page_count =
+        u32::try_from(pages.len()).map_err(|_| io::Error::other("too many pages for artifact"))?;
+    writer.write_all(&CACHE_ARTIFACT_MAGIC)?;
+    writer.write_all(&[CACHE_ARTIFACT_VERSION])?;
+    writer.write_all(&page_count.to_le_bytes())?;
+    for offset in offsets {
+        writer.write_all(&offset.to_le_bytes())?;
+    }
+    for payload in payloads {
+        writer.write_all(&payload)?;
+    }
+    Ok(())
 }
 
 /// Resolve a page index in `new_pages` by chapter progress carried by
@@ -1085,17 +1303,22 @@ impl RenderEngine {
         let mut pending = VecDeque::new();
         let mut cached_hit = false;
         if let Some(cache) = config.cache {
-            if let Some(pages) = cache.load_chapter_pages(profile, chapter_index) {
+            if let Some(page_count) = cache.load_chapter_page_count(profile, chapter_index) {
                 cached_hit = true;
                 self.emit_diagnostic(RenderDiagnostic::CacheHit {
                     chapter_index,
-                    page_count: pages.len(),
+                    page_count,
                 });
                 let range = normalize_page_range(config.page_range.clone());
-                let total_pages = pages.len();
-                for (idx, mut page) in pages.into_iter().enumerate() {
+                for idx in 0..page_count {
+                    let Some(mut page) = cache.load_chapter_page(profile, chapter_index, idx)
+                    else {
+                        cached_hit = false;
+                        pending.clear();
+                        break;
+                    };
                     Self::annotate_page_for_chapter(&mut page, chapter_index);
-                    Self::annotate_page_metrics(&mut page, total_pages);
+                    Self::annotate_page_metrics(&mut page, page_count);
                     if page_in_range(idx, &range) {
                         pending.push_back(page);
                     }
@@ -1121,14 +1344,20 @@ impl RenderEngine {
             }
             Some(session)
         };
+        let artifact_writer = if cached_hit {
+            None
+        } else {
+            config
+                .cache
+                .and_then(|cache| cache.begin_chapter_artifact(profile, chapter_index))
+        };
         LayoutSession {
             engine: self,
             chapter_index,
-            profile,
             cfg: config,
             inner,
             pending_pages: pending,
-            rendered_pages: Vec::with_capacity(8),
+            artifact_writer,
             page_index: 0,
             completed: cached_hit,
         }
@@ -1689,11 +1918,10 @@ impl RenderEngine {
 pub struct LayoutSession<'a> {
     engine: &'a RenderEngine,
     chapter_index: usize,
-    profile: PaginationProfileId,
     cfg: RenderConfig<'a>,
     inner: Option<CoreLayoutSession>,
     pending_pages: VecDeque<RenderPage>,
-    rendered_pages: Vec<RenderPage>,
+    artifact_writer: Option<Box<dyn RenderChapterArtifactWriter + 'a>>,
     page_index: usize,
     completed: bool,
 }
@@ -1718,14 +1946,15 @@ impl LayoutSession<'_> {
         if let Some(inner) = self.inner.as_mut() {
             let chapter = self.chapter_index;
             let range = normalize_page_range(self.cfg.page_range.clone());
-            let rendered = &mut self.rendered_pages;
+            let artifact_writer = &mut self.artifact_writer;
             let pending = &mut self.pending_pages;
             let page_index = &mut self.page_index;
-            let capture_for_cache = self.cfg.cache.is_some();
             inner.push_item_with_pages(item, &mut |mut page| {
                 RenderEngine::annotate_page_for_chapter(&mut page, chapter);
-                if capture_for_cache {
-                    rendered.push(page.clone());
+                if let Some(writer) = artifact_writer.as_mut() {
+                    if !writer.append_page(&page) {
+                        *artifact_writer = None;
+                    }
                 }
                 if page_in_range(*page_index, &range) {
                     pending.push_back(page);
@@ -1790,14 +2019,15 @@ impl LayoutSession<'_> {
         if let Some(inner) = self.inner.as_mut() {
             let chapter = self.chapter_index;
             let range = normalize_page_range(self.cfg.page_range.clone());
-            let rendered = &mut self.rendered_pages;
+            let artifact_writer = &mut self.artifact_writer;
             let pending = &mut self.pending_pages;
             let page_index = &mut self.page_index;
-            let capture_for_cache = self.cfg.cache.is_some();
             inner.finish(&mut |mut page| {
                 RenderEngine::annotate_page_for_chapter(&mut page, chapter);
-                if capture_for_cache {
-                    rendered.push(page.clone());
+                if let Some(writer) = artifact_writer.as_mut() {
+                    if !writer.append_page(&page) {
+                        *artifact_writer = None;
+                    }
                 }
                 if page_in_range(*page_index, &range) {
                     pending.push_back(page);
@@ -1811,13 +2041,8 @@ impl LayoutSession<'_> {
         for page in self.pending_pages.iter_mut() {
             RenderEngine::annotate_page_metrics(page, chapter_total);
         }
-        for page in self.rendered_pages.iter_mut() {
-            RenderEngine::annotate_page_metrics(page, chapter_total);
-        }
-        if let Some(cache) = self.cfg.cache {
-            if !self.rendered_pages.is_empty() {
-                cache.store_chapter_pages(self.profile, self.chapter_index, &self.rendered_pages);
-            }
+        if let Some(writer) = self.artifact_writer.take() {
+            let _ = writer.finish();
         }
         self.completed = true;
         Ok(())
@@ -2292,16 +2517,28 @@ mod tests {
         store.store_chapter_pages(profile, chapter_index, &pages);
         let cache_path = store.chapter_cache_path(profile, chapter_index);
         assert!(cache_path.exists());
-        let cache_json = fs::read_to_string(&cache_path).expect("cache file should be readable");
-        let cache_payload: serde_json::Value =
-            serde_json::from_str(&cache_json).expect("cache JSON should parse");
+        let cache_bytes = fs::read(&cache_path).expect("cache file should be readable");
+        assert!(cache_bytes.starts_with(&CACHE_ARTIFACT_MAGIC));
         assert_eq!(
-            cache_payload["pages"][0]["content_commands"][0]["Text"]["style"]["family"].as_str(),
-            Some("serif")
+            cache_bytes[CACHE_ARTIFACT_MAGIC.len()],
+            CACHE_ARTIFACT_VERSION
         );
 
         let loaded = store.load_chapter_pages(profile, chapter_index);
         assert_eq!(loaded, Some(pages.clone()));
+        assert_eq!(
+            store.load_chapter_page_count(profile, chapter_index),
+            Some(2)
+        );
+        assert_eq!(
+            store.load_chapter_page(profile, chapter_index, 0),
+            Some(pages[0].clone())
+        );
+        assert_eq!(
+            store.load_chapter_page(profile, chapter_index, 1),
+            Some(pages[1].clone())
+        );
+        assert!(store.load_chapter_page(profile, chapter_index, 2).is_none());
 
         let tiny_cap = FileRenderCacheStore::new(&root).with_max_file_bytes(48);
         tiny_cap.store_chapter_pages(profile, chapter_index + 1, &pages);
@@ -2330,11 +2567,6 @@ mod tests {
         assert!(page.commands.is_empty());
 
         store.store_chapter_pages(profile, chapter_index, &[page.clone()]);
-        let cache_path = store.chapter_cache_path(profile, chapter_index);
-        let cache_json = fs::read_to_string(&cache_path).expect("cache file should be readable");
-        let cache_payload: serde_json::Value =
-            serde_json::from_str(&cache_json).expect("cache JSON should parse");
-        assert!(cache_payload["pages"][0].get("commands").is_none());
 
         let loaded = store
             .load_chapter_pages(profile, chapter_index)
@@ -2342,6 +2574,11 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].commands.len(), 0);
         assert_eq!(loaded[0].merged_commands_len(), 1);
+        let page_only = store
+            .load_chapter_page(profile, chapter_index, 0)
+            .expect("page lookup should succeed");
+        assert_eq!(page_only.commands.len(), 0);
+        assert_eq!(page_only.merged_commands_len(), 1);
 
         let _ = fs::remove_dir_all(root);
     }
