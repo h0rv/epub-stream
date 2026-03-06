@@ -49,8 +49,8 @@ Every item below must follow `docs/specs/memory-management.md`.
 
 ### P0 Must-Have (production blocker)
 
-- [ ] `EMB-001` Real embedded image rendering (`partial`)
-  Current: image commands can render registered monochrome bitmaps, and unresolved PNG sources can stream-decode row-by-row from EPUB ZIP resources at render time. Non-PNG unresolved sources still fallback to explicit policy-driven placeholders (`OutlineOnly` or `OutlineWithAltText`).
+- [x] `EMB-001` Real embedded image rendering (`done`)
+  Current: image commands can render registered monochrome bitmaps; unresolved PNG sources stream-decode row-by-row from EPUB ZIP resources at render time; unresolved JPEG/GIF/WebP sources use a bounded buffered decode path with deterministic scaling. SVG remains on explicit fallback policy.
   Done when: decode and render core EPUB image types (PNG, JPEG, GIF, WebP where available) with deterministic scaling.
   Memory constraints: row/tile decode, bounded scratch, hard pixel and byte caps.
   Required tests: decode fixtures, pagination with images, allocation counter checks, out-of-budget failure behavior.

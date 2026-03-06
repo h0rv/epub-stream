@@ -27,17 +27,23 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
-use epub_stream::EpubBook;
+use epub_stream::{EpubBook, ImageReadOptions};
 use epub_stream_render::{
     DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeConfig,
     PageChromeKind, PageChromeTextStyle, RenderConfig, RenderPage, ResolvedTextStyle, TextCommand,
 };
+#[cfg(not(target_os = "espidf"))]
+use image::{
+    GenericImageView, ImageFormat as RasterImageFormat, ImageReader, Limits as RasterDecodeLimits,
+};
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use std::borrow::Cow;
 use std::convert::Infallible;
+use std::io::Cursor;
 #[cfg(feature = "ttf-backend")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
 
 /// Backend-local font identifier used for metrics and rasterization dispatch.
 pub type FontId = u8;
@@ -339,6 +345,8 @@ impl DrawTarget for PackedBinaryFrameBuffer<'_> {
 pub struct StreamedImageOptions {
     /// Hard cap applied to compressed resource bytes pulled from the EPUB.
     pub max_image_bytes: usize,
+    /// Hard cap for expanded raster decode buffers.
+    pub max_decoded_bytes: usize,
     /// Enable PNG streaming decode path.
     pub decode_png: bool,
 }
@@ -347,6 +355,7 @@ impl Default for StreamedImageOptions {
     fn default() -> Self {
         Self {
             max_image_bytes: 4 * 1024 * 1024,
+            max_decoded_bytes: 4 * 1024 * 1024,
             decode_png: true,
         }
     }
@@ -357,6 +366,9 @@ impl Default for StreamedImageOptions {
 pub struct StreamedImageDiagnostics {
     pub attempted: u64,
     pub decoded_png: u64,
+    pub decoded_jpeg: u64,
+    pub decoded_gif: u64,
+    pub decoded_webp: u64,
     pub decode_failures: u64,
     pub unsupported_sources: u64,
     pub resource_errors: u64,
@@ -368,6 +380,42 @@ enum StreamedImageOutcome {
     ResourceError,
     DecodeFailure,
     UnsupportedFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamedImageKind {
+    Png,
+    Jpeg,
+    Gif,
+    WebP,
+    Svg,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferedRasterFormat {
+    Jpeg,
+    Gif,
+    WebP,
+}
+
+impl BufferedRasterFormat {
+    #[cfg(not(target_os = "espidf"))]
+    fn image_format(self) -> RasterImageFormat {
+        match self {
+            Self::Jpeg => RasterImageFormat::Jpeg,
+            Self::Gif => RasterImageFormat::Gif,
+            Self::WebP => RasterImageFormat::WebP,
+        }
+    }
+
+    fn note_success(self, diagnostics: &mut StreamedImageDiagnostics) {
+        match self {
+            Self::Jpeg => diagnostics.decoded_jpeg = diagnostics.decoded_jpeg.saturating_add(1),
+            Self::Gif => diagnostics.decoded_gif = diagnostics.decoded_gif.saturating_add(1),
+            Self::WebP => diagnostics.decoded_webp = diagnostics.decoded_webp.saturating_add(1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1521,8 +1569,8 @@ where
     /// Render a page while streaming image payloads from EPUB resources.
     ///
     /// This path avoids materializing whole image resources in memory for
-    /// supported formats (currently PNG). Image bytes are streamed from ZIP,
-    /// decoded row-by-row, and drawn directly into the caller display target.
+    /// streamed PNG payloads and uses a bounded buffered decode path for
+    /// JPEG/GIF/WebP resources before drawing into the caller display target.
     pub fn render_page_with_streamed_images<R, D>(
         &self,
         book: &mut EpubBook<R>,
@@ -1795,25 +1843,31 @@ where
         }
 
         diagnostics.attempted = diagnostics.attempted.saturating_add(1);
-        if options.decode_png && source_is_png(&image.src) {
-            match self.draw_png_streamed_from_book(book, display, image, options.max_image_bytes)? {
-                StreamedImageOutcome::Drawn => {
-                    diagnostics.decoded_png = diagnostics.decoded_png.saturating_add(1);
-                    return Ok(());
-                }
-                StreamedImageOutcome::ResourceError => {
-                    diagnostics.resource_errors = diagnostics.resource_errors.saturating_add(1);
-                }
-                StreamedImageOutcome::DecodeFailure => {
-                    diagnostics.decode_failures = diagnostics.decode_failures.saturating_add(1);
-                }
-                StreamedImageOutcome::UnsupportedFormat => {
-                    diagnostics.unsupported_sources =
-                        diagnostics.unsupported_sources.saturating_add(1);
-                }
+        let outcome = match classify_streamed_image_source(&image.src) {
+            StreamedImageKind::Png if options.decode_png => {
+                self.draw_png_streamed_from_book(book, display, image, options.max_image_bytes)?
             }
-        } else {
-            diagnostics.unsupported_sources = diagnostics.unsupported_sources.saturating_add(1);
+            StreamedImageKind::Svg => StreamedImageOutcome::UnsupportedFormat,
+            StreamedImageKind::Png
+            | StreamedImageKind::Jpeg
+            | StreamedImageKind::Gif
+            | StreamedImageKind::WebP
+            | StreamedImageKind::Unknown => {
+                self.draw_buffered_raster_from_book(book, display, image, options, diagnostics)?
+            }
+        };
+
+        match outcome {
+            StreamedImageOutcome::Drawn => return Ok(()),
+            StreamedImageOutcome::ResourceError => {
+                diagnostics.resource_errors = diagnostics.resource_errors.saturating_add(1);
+            }
+            StreamedImageOutcome::DecodeFailure => {
+                diagnostics.decode_failures = diagnostics.decode_failures.saturating_add(1);
+            }
+            StreamedImageOutcome::UnsupportedFormat => {
+                diagnostics.unsupported_sources = diagnostics.unsupported_sources.saturating_add(1);
+            }
         }
 
         self.draw_image_fallback(display, image)
@@ -1836,6 +1890,35 @@ where
                 Err(_) => return Ok(StreamedImageOutcome::ResourceError),
             };
 
+        let decode_result = self.draw_png_streamed_from_reader(
+            &mut resource_reader,
+            display,
+            image,
+            max_image_bytes,
+        );
+
+        match decode_result {
+            Ok(true) => Ok(StreamedImageOutcome::Drawn),
+            Ok(false) => Ok(StreamedImageOutcome::DecodeFailure),
+            Err(PngStreamRowsError::Draw(err)) => Err(err),
+            Err(PngStreamRowsError::Decode(PngDecodeError::UnsupportedFormat)) => {
+                Ok(StreamedImageOutcome::UnsupportedFormat)
+            }
+            Err(PngStreamRowsError::Decode(_)) => Ok(StreamedImageOutcome::DecodeFailure),
+        }
+    }
+
+    fn draw_png_streamed_from_reader<R, D>(
+        &self,
+        reader: &mut R,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        max_image_bytes: usize,
+    ) -> Result<bool, PngStreamRowsError<D::Error>>
+    where
+        R: std::io::Read,
+        D: DrawTarget<Color = BinaryColor>,
+    {
         let mut saw_row = false;
         let mut src_h = 0u32;
         let mut target_w = 0u32;
@@ -1844,56 +1927,164 @@ where
         let mut origin_y = 0i32;
         let mut dst_row = 0u32;
 
-        let decode_result = decode_png_rows_streaming(
-            &mut resource_reader,
-            max_image_bytes,
-            |src_row, header, row| {
-                saw_row = true;
-                if src_h == 0 {
-                    src_h = header.height.max(1);
-                    (target_w, target_h) = fit_bitmap_inside(
-                        header.width.max(1),
-                        src_h,
-                        image.width.max(1),
-                        image.height.max(1),
-                    );
-                    origin_x = image.x + (image.width as i32 - target_w as i32) / 2;
-                    origin_y = image.y + (image.height as i32 - target_h as i32) / 2;
-                }
-
-                while dst_row < target_h {
-                    let mapped_src = ((dst_row as u64 * src_h as u64) / target_h as u64) as u32;
-                    if mapped_src != src_row {
-                        break;
-                    }
-                    let y = origin_y + dst_row as i32;
-                    display.draw_iter((0..target_w).map(|dx| {
-                        let src_x = ((dx as u64 * header.width as u64) / target_w as u64) as u32;
-                        let luma =
-                            png_row_sample_luma(row, header.color_type, header.bit_depth, src_x)
-                                .unwrap_or(255);
-                        let color = if luma < 128 {
-                            BinaryColor::On
-                        } else {
-                            BinaryColor::Off
-                        };
-                        Pixel(Point::new(origin_x + dx as i32, y), color)
-                    }))?;
-                    dst_row = dst_row.saturating_add(1);
-                }
-                Ok(())
-            },
-        );
-
-        match decode_result {
-            Ok(()) if saw_row => Ok(StreamedImageOutcome::Drawn),
-            Ok(()) => Ok(StreamedImageOutcome::DecodeFailure),
-            Err(PngStreamRowsError::Draw(err)) => Err(err),
-            Err(PngStreamRowsError::Decode(PngDecodeError::UnsupportedFormat)) => {
-                Ok(StreamedImageOutcome::UnsupportedFormat)
+        decode_png_rows_streaming(reader, max_image_bytes, |src_row, header, row| {
+            saw_row = true;
+            if src_h == 0 {
+                src_h = header.height.max(1);
+                (target_w, target_h) = fit_bitmap_inside(
+                    header.width.max(1),
+                    src_h,
+                    image.width.max(1),
+                    image.height.max(1),
+                );
+                origin_x = image.x + (image.width as i32 - target_w as i32) / 2;
+                origin_y = image.y + (image.height as i32 - target_h as i32) / 2;
             }
-            Err(PngStreamRowsError::Decode(_)) => Ok(StreamedImageOutcome::DecodeFailure),
+
+            while dst_row < target_h {
+                let mapped_src = ((dst_row as u64 * src_h as u64) / target_h as u64) as u32;
+                if mapped_src != src_row {
+                    break;
+                }
+                let y = origin_y + dst_row as i32;
+                display.draw_iter((0..target_w).map(|dx| {
+                    let src_x = ((dx as u64 * header.width as u64) / target_w as u64) as u32;
+                    let luma = png_row_sample_luma(row, header.color_type, header.bit_depth, src_x)
+                        .unwrap_or(255);
+                    let color = if luma < 128 {
+                        BinaryColor::On
+                    } else {
+                        BinaryColor::Off
+                    };
+                    Pixel(Point::new(origin_x + dx as i32, y), color)
+                }))?;
+                dst_row = dst_row.saturating_add(1);
+            }
+            Ok(())
+        })?;
+        Ok(saw_row)
+    }
+
+    fn draw_buffered_raster_from_book<R, D>(
+        &self,
+        book: &mut EpubBook<R>,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        options: StreamedImageOptions,
+        diagnostics: &mut StreamedImageDiagnostics,
+    ) -> Result<StreamedImageOutcome, D::Error>
+    where
+        R: std::io::Read + std::io::Seek,
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let initial_capacity = options.max_image_bytes.clamp(4096, 64 * 1024);
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        let read_options = ImageReadOptions {
+            max_bytes: options.max_image_bytes,
+            allow_svg: false,
+            allow_unknown_images: true,
+        };
+        if book
+            .read_image_resource_into_with_options(&image.src, &mut bytes, read_options)
+            .is_err()
+        {
+            return Ok(StreamedImageOutcome::ResourceError);
         }
+
+        match detect_buffered_raster_format(classify_streamed_image_source(&image.src), &bytes) {
+            Some(DetectedStreamedImage::Png) if options.decode_png => {
+                let mut cursor = Cursor::new(bytes);
+                match self.draw_png_streamed_from_reader(
+                    &mut cursor,
+                    display,
+                    image,
+                    options.max_image_bytes,
+                ) {
+                    Ok(true) => {
+                        diagnostics.decoded_png = diagnostics.decoded_png.saturating_add(1);
+                        Ok(StreamedImageOutcome::Drawn)
+                    }
+                    Ok(false) => Ok(StreamedImageOutcome::DecodeFailure),
+                    Err(PngStreamRowsError::Draw(err)) => Err(err),
+                    Err(PngStreamRowsError::Decode(PngDecodeError::UnsupportedFormat)) => {
+                        Ok(StreamedImageOutcome::UnsupportedFormat)
+                    }
+                    Err(PngStreamRowsError::Decode(_)) => Ok(StreamedImageOutcome::DecodeFailure),
+                }
+            }
+            Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Jpeg)) => {
+                match self.draw_jpeg_luma_from_bytes(display, image, &bytes, options) {
+                    Ok(()) => {
+                        BufferedRasterFormat::Jpeg.note_success(diagnostics);
+                        Ok(StreamedImageOutcome::Drawn)
+                    }
+                    Err(_) => Ok(StreamedImageOutcome::DecodeFailure),
+                }
+            }
+            #[cfg(not(target_os = "espidf"))]
+            Some(DetectedStreamedImage::Buffered(format)) => {
+                let decoded =
+                    match self.decode_buffered_raster_image(&bytes, format, image, options) {
+                        Ok(decoded) => decoded,
+                        Err(_) => return Ok(StreamedImageOutcome::DecodeFailure),
+                    };
+                self.draw_dynamic_image(display, image, &decoded)?;
+                format.note_success(diagnostics);
+                Ok(StreamedImageOutcome::Drawn)
+            }
+            #[cfg(target_os = "espidf")]
+            Some(DetectedStreamedImage::Buffered(_)) => Ok(StreamedImageOutcome::UnsupportedFormat),
+            Some(DetectedStreamedImage::Png) | None => Ok(StreamedImageOutcome::UnsupportedFormat),
+        }
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    fn decode_buffered_raster_image(
+        &self,
+        bytes: &[u8],
+        format: BufferedRasterFormat,
+        image: &ImageObjectCommand,
+        options: StreamedImageOptions,
+    ) -> image::ImageResult<image::DynamicImage> {
+        let mut reader = ImageReader::new(Cursor::new(bytes));
+        reader.set_format(format.image_format());
+        reader.limits(buffered_raster_limits(image, options.max_decoded_bytes));
+        reader.decode()
+    }
+
+    fn draw_jpeg_luma_from_bytes<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        bytes: &[u8],
+        options: StreamedImageOptions,
+    ) -> Result<(), ()>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let (max_width, max_height) = buffered_raster_dimension_limits(image);
+        let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+            ZCursor::new(bytes),
+            DecoderOptions::default()
+                .set_strict_mode(false)
+                .set_max_width(max_width as usize)
+                .set_max_height(max_height as usize)
+                .jpeg_set_out_colorspace(ColorSpace::Luma),
+        );
+        decoder.decode_headers().map_err(|_| ())?;
+        let Some((src_w, src_h)) = decoder.dimensions() else {
+            return Err(());
+        };
+        let Some(decoded_len) = decoder.output_buffer_size() else {
+            return Err(());
+        };
+        if decoded_len > options.max_decoded_bytes {
+            return Err(());
+        }
+        let mut luma = vec![0u8; decoded_len];
+        decoder.decode_into(&mut luma).map_err(|_| ())?;
+        self.draw_luma8_image(display, image, src_w as u32, src_h as u32, &luma)
+            .map_err(|_| ())
     }
 
     fn draw_command<D>(&self, display: &mut D, cmd: &DrawCommand) -> Result<(), D::Error>
@@ -2042,6 +2233,69 @@ where
                 let src_x = ((dx as u64 * bitmap.width() as u64) / scaled_w as u64) as u32;
                 bitmap
                     .pixel_is_on(src_x, src_y)
+                    .then_some(Pixel(Point::new(origin_x + dx as i32, y), BinaryColor::On))
+            }))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    fn draw_dynamic_image<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        decoded: &image::DynamicImage,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let src_w = decoded.width().max(1);
+        let src_h = decoded.height().max(1);
+        let target_w = image.width.max(1);
+        let target_h = image.height.max(1);
+        let (scaled_w, scaled_h) = fit_bitmap_inside(src_w, src_h, target_w, target_h);
+        let origin_x = image.x + (target_w as i32 - scaled_w as i32) / 2;
+        let origin_y = image.y + (target_h as i32 - scaled_h as i32) / 2;
+
+        for dy in 0..scaled_h {
+            let src_y = ((dy as u64 * src_h as u64) / scaled_h as u64) as u32;
+            let y = origin_y + dy as i32;
+            display.draw_iter((0..scaled_w).filter_map(|dx| {
+                let src_x = ((dx as u64 * src_w as u64) / scaled_w as u64) as u32;
+                let pixel = decoded.get_pixel(src_x, src_y).0;
+                (rgba_luma(pixel) < 128)
+                    .then_some(Pixel(Point::new(origin_x + dx as i32, y), BinaryColor::On))
+            }))?;
+        }
+        Ok(())
+    }
+
+    fn draw_luma8_image<D>(
+        &self,
+        display: &mut D,
+        image: &ImageObjectCommand,
+        src_w: u32,
+        src_h: u32,
+        luma: &[u8],
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let target_w = image.width.max(1);
+        let target_h = image.height.max(1);
+        let (scaled_w, scaled_h) =
+            fit_bitmap_inside(src_w.max(1), src_h.max(1), target_w, target_h);
+        let origin_x = image.x + (target_w as i32 - scaled_w as i32) / 2;
+        let origin_y = image.y + (target_h as i32 - scaled_h as i32) / 2;
+
+        for dy in 0..scaled_h {
+            let src_y = ((dy as u64 * src_h as u64) / scaled_h as u64) as u32;
+            let y = origin_y + dy as i32;
+            display.draw_iter((0..scaled_w).filter_map(|dx| {
+                let src_x = ((dx as u64 * src_w as u64) / scaled_w as u64) as u32;
+                let idx = src_y as usize * src_w as usize + src_x as usize;
+                luma.get(idx)
+                    .is_some_and(|value| *value < 128)
                     .then_some(Pixel(Point::new(origin_x + dx as i32, y), BinaryColor::On))
             }))?;
         }
@@ -2288,17 +2542,117 @@ const PNG_CHUNK_IO_BYTES: usize = 2048;
 const PNG_DEFLATE_OUT_BYTES: usize = 4096;
 const PNG_MAX_ROW_BYTES: usize = 8 * 1024;
 const PNG_DECODE_EXPANSION_FACTOR: usize = 16;
+const BUFFERED_RASTER_MAX_SCALE_FACTOR: u32 = 4;
 
-fn source_is_png(src: &str) -> bool {
-    let mut stem = src;
-    if let Some((base, _)) = stem.split_once('#') {
-        stem = base;
+fn classify_streamed_image_source(src: &str) -> StreamedImageKind {
+    let Some((_, ext)) = normalized_source_path(src).rsplit_once('.') else {
+        return StreamedImageKind::Unknown;
+    };
+    if ext.eq_ignore_ascii_case("png") {
+        StreamedImageKind::Png
+    } else if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
+        StreamedImageKind::Jpeg
+    } else if ext.eq_ignore_ascii_case("gif") {
+        StreamedImageKind::Gif
+    } else if ext.eq_ignore_ascii_case("webp") {
+        StreamedImageKind::WebP
+    } else if ext.eq_ignore_ascii_case("svg") || ext.eq_ignore_ascii_case("svgz") {
+        StreamedImageKind::Svg
+    } else {
+        StreamedImageKind::Unknown
     }
-    if let Some((base, _)) = stem.split_once('?') {
-        stem = base;
+}
+
+fn normalized_source_path(src: &str) -> &str {
+    src.split(['#', '?']).next().unwrap_or(src)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetectedStreamedImage {
+    Png,
+    Buffered(BufferedRasterFormat),
+}
+
+fn detect_buffered_raster_format(
+    source_kind: StreamedImageKind,
+    bytes: &[u8],
+) -> Option<DetectedStreamedImage> {
+    match source_kind {
+        StreamedImageKind::Png => return Some(DetectedStreamedImage::Png),
+        StreamedImageKind::Jpeg => {
+            return Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Jpeg));
+        }
+        StreamedImageKind::Gif => {
+            return Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Gif));
+        }
+        StreamedImageKind::WebP => {
+            return Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::WebP));
+        }
+        StreamedImageKind::Svg => return None,
+        StreamedImageKind::Unknown => {}
     }
-    stem.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("png"))
+
+    #[cfg(not(target_os = "espidf"))]
+    {
+        match image::guess_format(bytes).ok()? {
+            RasterImageFormat::Png => Some(DetectedStreamedImage::Png),
+            RasterImageFormat::Jpeg => {
+                Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Jpeg))
+            }
+            RasterImageFormat::Gif => {
+                Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Gif))
+            }
+            RasterImageFormat::WebP => {
+                Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::WebP))
+            }
+            _ => None,
+        }
+    }
+    #[cfg(target_os = "espidf")]
+    {
+        let _ = bytes;
+        None
+    }
+}
+
+fn buffered_raster_dimension_limits(image: &ImageObjectCommand) -> (u32, u32) {
+    (
+        image
+            .width
+            .max(1)
+            .saturating_mul(BUFFERED_RASTER_MAX_SCALE_FACTOR),
+        image
+            .height
+            .max(1)
+            .saturating_mul(BUFFERED_RASTER_MAX_SCALE_FACTOR),
+    )
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn buffered_raster_limits(
+    image: &ImageObjectCommand,
+    max_decoded_bytes: usize,
+) -> RasterDecodeLimits {
+    let (max_width, max_height) = buffered_raster_dimension_limits(image);
+    let mut limits = RasterDecodeLimits::default();
+    limits.max_image_width = Some(max_width);
+    limits.max_image_height = Some(max_height);
+    limits.max_alloc = Some(max_decoded_bytes as u64);
+    limits
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn rgba_luma(pixel: [u8; 4]) -> u8 {
+    let [r, g, b, a] = pixel;
+    if a == 0 {
+        return 255;
+    }
+    let alpha = a as u32;
+    let inv_alpha = 255u32.saturating_sub(alpha);
+    let blended_r = ((r as u32 * alpha) + (255 * inv_alpha)) / 255;
+    let blended_g = ((g as u32 * alpha) + (255 * inv_alpha)) / 255;
+    let blended_b = ((b as u32 * alpha) + (255 * inv_alpha)) / 255;
+    (((blended_r * 299) + (blended_g * 587) + (blended_b * 114)) / 1000) as u8
 }
 
 fn decode_png_rows_streaming<R, E, F>(
@@ -2852,7 +3206,7 @@ mod tests {
     use super::*;
     use core::convert::Infallible;
     use embedded_graphics::mock_display::MockDisplay;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, fs::File, rc::Rc};
 
     use epub_stream_render::{
         BlockRole, DrawCommand, ImageObjectCommand, JustifyMode, PageChromeCommand, PageChromeKind,
@@ -3708,11 +4062,102 @@ mod tests {
 
     #[test]
     fn streamed_png_source_detection_handles_case_and_suffixes() {
-        assert!(source_is_png("images/cover.png"));
-        assert!(source_is_png("images/cover.PNG#frag"));
-        assert!(source_is_png("images/cover.pNg?size=1"));
-        assert!(!source_is_png("images/cover.jpg"));
-        assert!(!source_is_png("images/cover"));
+        assert_eq!(
+            classify_streamed_image_source("images/cover.png"),
+            StreamedImageKind::Png
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/cover.PNG#frag"),
+            StreamedImageKind::Png
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/cover.pNg?size=1"),
+            StreamedImageKind::Png
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/cover.jpg"),
+            StreamedImageKind::Jpeg
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/cover"),
+            StreamedImageKind::Unknown
+        );
+    }
+
+    #[test]
+    fn streamed_image_source_classification_handles_core_formats() {
+        assert_eq!(
+            classify_streamed_image_source("images/cover.jpeg"),
+            StreamedImageKind::Jpeg
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/anim.GIF#page=1"),
+            StreamedImageKind::Gif
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/figure.webp?size=small"),
+            StreamedImageKind::WebP
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/diagram.svg"),
+            StreamedImageKind::Svg
+        );
+        assert_eq!(
+            classify_streamed_image_source("images/no-extension"),
+            StreamedImageKind::Unknown
+        );
+    }
+
+    #[test]
+    fn detect_buffered_raster_format_guesses_gif_and_webp_signatures() {
+        let gif = b"GIF89a\x01\x00\x01\x00";
+        assert_eq!(
+            detect_buffered_raster_format(StreamedImageKind::Unknown, gif),
+            Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::Gif))
+        );
+
+        let webp = b"RIFF\x1a\x00\x00\x00WEBPVP8 \x0c\x00\x00\x00";
+        assert_eq!(
+            detect_buffered_raster_format(StreamedImageKind::Unknown, webp),
+            Some(DetectedStreamedImage::Buffered(BufferedRasterFormat::WebP))
+        );
+    }
+
+    #[test]
+    fn buffered_jpeg_render_from_epub_fixture_draws_pixels() {
+        let file = File::open(
+            "../../tests/fixtures/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub",
+        )
+        .expect("fixture epub");
+        let mut book = EpubBook::from_reader(file).expect("open epub");
+        let renderer = EgRenderer::new(EgRenderConfig::default());
+        let mut display = PixelCaptureDisplay::with_size(160, 240);
+        let image = ImageObjectCommand {
+            src: "images/cover.jpg".to_string(),
+            alt: "Cover".to_string(),
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 240,
+        };
+        let mut diagnostics = StreamedImageDiagnostics::default();
+
+        let outcome = renderer
+            .draw_buffered_raster_from_book(
+                &mut book,
+                &mut display,
+                &image,
+                StreamedImageOptions {
+                    max_image_bytes: 512 * 1024,
+                    ..StreamedImageOptions::default()
+                },
+                &mut diagnostics,
+            )
+            .expect("jpeg draw should not fail");
+
+        assert_eq!(outcome, StreamedImageOutcome::Drawn);
+        assert_eq!(diagnostics.decoded_jpeg, 1);
+        assert!(!display.on_pixels.is_empty());
     }
 
     #[test]
