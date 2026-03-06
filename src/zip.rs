@@ -176,10 +176,10 @@ pub struct ZipEntryReader<'a, F: Read + Seek> {
     inflate_finished: bool,
     crc_verified: bool,
     hasher: crc32fast::Hasher,
-    input_buf: [u8; DEFAULT_ZIP_SCRATCH_BYTES],
+    input_buf: alloc::boxed::Box<[u8]>,
     input_start: usize,
     input_end: usize,
-    output_buf: [u8; DEFAULT_ZIP_SCRATCH_BYTES],
+    output_buf: alloc::boxed::Box<[u8]>,
     output_start: usize,
     output_end: usize,
 }
@@ -214,10 +214,10 @@ impl<'a, F: Read + Seek> ZipEntryReader<'a, F> {
             inflate_finished: false,
             crc_verified: false,
             hasher: crc32fast::Hasher::new(),
-            input_buf: [0u8; DEFAULT_ZIP_SCRATCH_BYTES],
+            input_buf: alloc::vec![0u8; DEFAULT_ZIP_SCRATCH_BYTES].into_boxed_slice(),
             input_start: 0,
             input_end: 0,
-            output_buf: [0u8; DEFAULT_ZIP_SCRATCH_BYTES],
+            output_buf: alloc::vec![0u8; DEFAULT_ZIP_SCRATCH_BYTES].into_boxed_slice(),
             output_start: 0,
             output_end: 0,
         })
@@ -265,7 +265,7 @@ impl<'a, F: Read + Seek> ZipEntryReader<'a, F> {
                 miniz_oxide::inflate::stream::inflate(
                     inflate_state,
                     pending,
-                    &mut self.output_buf,
+                    self.output_buf.as_mut(),
                     MZFlush::None,
                 )
             };
