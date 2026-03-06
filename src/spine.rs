@@ -404,9 +404,19 @@ fn parse_spine_item<'a>(
 
         match key.as_ref() {
             "idref" => idref = Some(value),
-            "id" => id = Some(value),
+            "id" => {
+                #[cfg(not(target_os = "espidf"))]
+                {
+                    id = Some(value);
+                }
+            }
             "linear" => linear = value != "no",
-            "properties" => properties = Some(value),
+            "properties" => {
+                #[cfg(not(target_os = "espidf"))]
+                {
+                    properties = Some(value);
+                }
+            }
             _ => {}
         }
     }
@@ -447,9 +457,19 @@ fn parse_spine_item_reader<'a, R: std::io::BufRead>(
 
         match key.as_ref() {
             "idref" => idref = Some(value),
-            "id" => id = Some(value),
+            "id" => {
+                #[cfg(not(target_os = "espidf"))]
+                {
+                    id = Some(value);
+                }
+            }
             "linear" => linear = value != "no",
-            "properties" => properties = Some(value),
+            "properties" => {
+                #[cfg(not(target_os = "espidf"))]
+                {
+                    properties = Some(value);
+                }
+            }
             _ => {}
         }
     }

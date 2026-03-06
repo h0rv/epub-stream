@@ -18,7 +18,12 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use epub_stream::{CoverImageOptions, EpubBook, ImageReadOptions};
+use epub_stream::book::OpenConfig;
+use epub_stream::metadata::MetadataLimits;
+use epub_stream::navigation::NavigationLimits;
+use epub_stream::{
+    CoverImageOptions, EpubBook, EpubBookOptions, ImageReadOptions, ValidationMode, ZipLimits,
+};
 use epub_stream_render::{RenderConfig, RenderEngine, RenderEngineOptions};
 
 const DISPLAY_WIDTH: i32 = 480;
@@ -34,6 +39,7 @@ const DEFAULT_FIXTURES: &[&str] = &[
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Open,
+    OpenTemp,
     Cover,
     Tokenize,
     Render,
@@ -46,6 +52,7 @@ impl Phase {
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "open" => Some(Self::Open),
+            "open-temp" | "open_temp" => Some(Self::OpenTemp),
             "cover" => Some(Self::Cover),
             "tokenize" => Some(Self::Tokenize),
             "render" => Some(Self::Render),
@@ -59,6 +66,7 @@ impl Phase {
     fn name(self) -> &'static str {
         match self {
             Self::Open => "open",
+            Self::OpenTemp => "open_temp",
             Self::Cover => "cover",
             Self::Tokenize => "tokenize",
             Self::Render => "render",
@@ -87,6 +95,28 @@ fn profile_file(path: &Path, phase: Phase) {
     match phase {
         Phase::Open => {
             let _book = EpubBook::open(path).unwrap_or_else(|e| panic!("open {}: {}", path_str, e));
+        }
+        Phase::OpenTemp => {
+            let temp_dir = std::env::temp_dir().join("xteink-epub-temp-profile");
+            std::fs::create_dir_all(&temp_dir)
+                .unwrap_or_else(|e| panic!("create temp dir {}: {}", temp_dir.display(), e));
+            let _book = EpubBook::open_with_temp_storage(
+                path,
+                &temp_dir,
+                OpenConfig {
+                    options: EpubBookOptions {
+                        zip_limits: Some(
+                            ZipLimits::new(256 * 1024, 128).with_max_eocd_scan(8 * 1024),
+                        ),
+                        validation_mode: ValidationMode::Lenient,
+                        max_nav_bytes: Some(32 * 1024),
+                        navigation_limits: NavigationLimits::embedded(),
+                        metadata_limits: MetadataLimits::embedded(),
+                    },
+                    lazy_navigation: true,
+                },
+            )
+            .unwrap_or_else(|e| panic!("open_temp {}: {}", path_str, e));
         }
         Phase::Cover => {
             let mut book =
@@ -202,7 +232,7 @@ fn usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!(
-        "  --phase <open|cover|tokenize|render|full|session_once|session>  Pipeline phase to profile (default: render)"
+        "  --phase <open|open_temp|cover|tokenize|render|full|session_once|session>  Pipeline phase to profile (default: render)"
     );
     eprintln!("  --out-dir <DIR>                      Output directory for dhat JSON (default: target/memory)");
     eprintln!(

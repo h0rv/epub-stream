@@ -632,7 +632,9 @@ impl RenderCacheStore for FileRenderCacheStore {
         let offsets = read_cache_offsets(&mut file, header.page_count)?;
         let mut pages = Vec::with_capacity(header.page_count);
         for page_index in 0..header.page_count {
-            pages.push(read_cache_page_at(&mut file, &offsets, page_index)?);
+            let mut page = read_cache_page_at(&mut file, &offsets, page_index)?;
+            normalize_cached_page_metrics(&mut page, page_index, header.page_count);
+            pages.push(page);
         }
         Some(pages)
     }
@@ -660,7 +662,9 @@ impl RenderCacheStore for FileRenderCacheStore {
             return None;
         }
         let offsets = read_cache_offsets(&mut file, header.page_count)?;
-        read_cache_page_at(&mut file, &offsets, page_index)
+        let mut page = read_cache_page_at(&mut file, &offsets, page_index)?;
+        normalize_cached_page_metrics(&mut page, page_index, header.page_count);
+        Some(page)
     }
 
     fn begin_chapter_artifact(
@@ -676,7 +680,10 @@ struct FileChapterArtifactWriter {
     max_file_bytes: usize,
     final_path: PathBuf,
     final_temp_path: PathBuf,
-    pages: Vec<RenderPage>,
+    payload_temp_path: PathBuf,
+    payload_writer: Option<CappedWriter<BufWriter<File>>>,
+    payload_offsets: Vec<u64>,
+    payload_bytes: u64,
 }
 
 impl FileChapterArtifactWriter {
@@ -696,69 +703,184 @@ impl FileChapterArtifactWriter {
             std::process::id(),
             nonce
         ));
+        let payload_temp_path = parent.join(format!(
+            "chapter-{}.payload.tmp-{}-{}",
+            chapter_index,
+            std::process::id(),
+            nonce
+        ));
+        let payload_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&payload_temp_path)
+            .ok()?;
+        let payload_writer = CappedWriter::new(BufWriter::new(payload_file), store.max_file_bytes);
 
         Some(Box::new(Self {
             max_file_bytes: store.max_file_bytes,
             final_path,
             final_temp_path,
-            pages: Vec::new(),
+            payload_temp_path,
+            payload_writer: Some(payload_writer),
+            payload_offsets: vec![0],
+            payload_bytes: 0,
         }))
     }
 }
 
 impl RenderChapterArtifactWriter for FileChapterArtifactWriter {
     fn append_page(&mut self, page: &RenderPage) -> bool {
-        self.pages.push(page.clone());
+        let payload = match encode_cache_page(page) {
+            Ok(payload) => payload,
+            Err(_) => return false,
+        };
+        let payload_len = match u64::try_from(payload.len()) {
+            Ok(payload_len) => payload_len,
+            Err(_) => return false,
+        };
+        let next_payload_bytes = match self.payload_bytes.checked_add(payload_len) {
+            Some(bytes) => bytes,
+            None => return false,
+        };
+        let page_count = self.payload_offsets.len();
+        let Some(header_bytes) = cache_artifact_header_bytes(page_count) else {
+            return false;
+        };
+        let projected_total = match u64::try_from(header_bytes)
+            .ok()
+            .and_then(|header| header.checked_add(next_payload_bytes))
+        {
+            Some(total) => total,
+            None => return false,
+        };
+        if projected_total > self.max_file_bytes as u64 {
+            return false;
+        }
+        let Some(writer) = self.payload_writer.as_mut() else {
+            return false;
+        };
+        if writer.write_all(&payload).is_err() {
+            return false;
+        }
+        self.payload_bytes = next_payload_bytes;
+        self.payload_offsets.push(next_payload_bytes);
         true
     }
 
-    fn finish(mut self: Box<Self>) -> bool {
+    fn finish(self: Box<Self>) -> bool {
+        let mut this = self;
+        let page_count = this.payload_offsets.len().saturating_sub(1);
+        let Some(header_bytes) = cache_artifact_header_bytes(page_count) else {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
+            return false;
+        };
+        let page_count_u32 = match u32::try_from(page_count) {
+            Ok(page_count_u32) => page_count_u32,
+            Err(_) => {
+                remove_file_quiet(&this.final_temp_path);
+                remove_file_quiet(&this.payload_temp_path);
+                return false;
+            }
+        };
+        let absolute_offsets = match absolute_cache_offsets(header_bytes, &this.payload_offsets) {
+            Some(offsets) => offsets,
+            None => {
+                remove_file_quiet(&this.final_temp_path);
+                remove_file_quiet(&this.payload_temp_path);
+                return false;
+            }
+        };
+        let payload_writer = match this.payload_writer.take() {
+            Some(writer) => writer,
+            None => return false,
+        };
+        let mut payload_writer = payload_writer.into_inner();
+        if payload_writer.flush().is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
+            return false;
+        }
+        let payload_file = match payload_writer.into_inner() {
+            Ok(file) => file,
+            Err(_) => {
+                remove_file_quiet(&this.final_temp_path);
+                remove_file_quiet(&this.payload_temp_path);
+                return false;
+            }
+        };
+        if payload_file.sync_all().is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
+            return false;
+        }
+        drop(payload_file);
+
         let file = match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&self.final_temp_path)
+            .open(&this.final_temp_path)
         {
             Ok(file) => file,
             Err(_) => return false,
         };
         let writer = BufWriter::new(file);
-        let mut writer = CappedWriter::new(writer, self.max_file_bytes);
-        let page_count = self.pages.len().max(1);
-        for (idx, page) in self.pages.iter_mut().enumerate() {
-            RenderEngine::annotate_page_for_chapter(page, page.metrics.chapter_index);
-            page.metrics.chapter_page_index = idx;
-            RenderEngine::annotate_page_metrics(page, page_count);
+        let mut writer = CappedWriter::new(writer, this.max_file_bytes);
+        if write_cache_header(&mut writer, page_count_u32).is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
+            return false;
         }
-        if write_cache_artifact(&mut writer, &self.pages).is_err() {
-            remove_file_quiet(&self.final_temp_path);
+        if write_cache_offsets(&mut writer, &absolute_offsets).is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
+            return false;
+        }
+        let mut payload_reader = match File::open(&this.payload_temp_path) {
+            Ok(file) => file,
+            Err(_) => {
+                remove_file_quiet(&this.final_temp_path);
+                remove_file_quiet(&this.payload_temp_path);
+                return false;
+            }
+        };
+        if io::copy(&mut payload_reader, &mut writer).is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
             return false;
         }
         if writer.flush().is_err() {
-            remove_file_quiet(&self.final_temp_path);
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
             return false;
         }
         let mut writer = writer.into_inner();
         if writer.flush().is_err() {
-            remove_file_quiet(&self.final_temp_path);
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
             return false;
         }
         let file = match writer.into_inner() {
             Ok(file) => file,
             Err(_) => {
-                remove_file_quiet(&self.final_temp_path);
+                remove_file_quiet(&this.final_temp_path);
+                remove_file_quiet(&this.payload_temp_path);
                 return false;
             }
         };
         if file.sync_all().is_err() {
-            remove_file_quiet(&self.final_temp_path);
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
             return false;
         }
         drop(file);
-        if fs::rename(&self.final_temp_path, &self.final_path).is_err() {
-            remove_file_quiet(&self.final_temp_path);
+        if fs::rename(&this.final_temp_path, &this.final_path).is_err() {
+            remove_file_quiet(&this.final_temp_path);
+            remove_file_quiet(&this.payload_temp_path);
             return false;
         }
-        if let Some(parent) = self.final_path.parent() {
+        remove_file_quiet(&this.payload_temp_path);
+        if let Some(parent) = this.final_path.parent() {
             sync_directory(parent);
         }
         true
@@ -768,6 +890,7 @@ impl RenderChapterArtifactWriter for FileChapterArtifactWriter {
 impl Drop for FileChapterArtifactWriter {
     fn drop(&mut self) {
         remove_file_quiet(&self.final_temp_path);
+        remove_file_quiet(&self.payload_temp_path);
     }
 }
 
@@ -832,44 +955,41 @@ fn read_cache_page_at(file: &mut File, offsets: &[u64], page_index: usize) -> Op
     Some(persisted.into())
 }
 
-fn write_cache_artifact<W: Write>(writer: &mut W, pages: &[RenderPage]) -> io::Result<()> {
-    let lut_entries = pages
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| io::Error::other("page count overflow"))?;
-    let lut_bytes = lut_entries
-        .checked_mul(core::mem::size_of::<u64>())
-        .ok_or_else(|| io::Error::other("cache LUT overflow"))?;
-    let header_bytes = CACHE_ARTIFACT_HEADER_BYTES
-        .checked_add(lut_bytes)
-        .ok_or_else(|| io::Error::other("cache header overflow"))?;
-    let mut payload_offset =
-        u64::try_from(header_bytes).map_err(|_| io::Error::other("cache header too large"))?;
-    let mut offsets = Vec::with_capacity(lut_entries);
-    let mut payloads = Vec::with_capacity(pages.len());
-    offsets.push(payload_offset);
-    for page in pages {
-        let payload = postcard::to_allocvec(&BinaryPersistedRenderPage::from(page))
-            .map_err(|err| io::Error::other(format!("cache encode failed: {err}")))?;
-        let payload_len = u64::try_from(payload.len())
-            .map_err(|_| io::Error::other("cache payload too large"))?;
-        payload_offset = payload_offset
-            .checked_add(payload_len)
-            .ok_or_else(|| io::Error::other("cache size overflow"))?;
-        payloads.push(payload);
-        offsets.push(payload_offset);
-    }
+fn normalize_cached_page_metrics(page: &mut RenderPage, page_index: usize, page_count: usize) {
+    page.metrics.chapter_page_index = page_index;
+    RenderEngine::annotate_page_metrics(page, page_count);
+}
 
-    let page_count =
-        u32::try_from(pages.len()).map_err(|_| io::Error::other("too many pages for artifact"))?;
+fn cache_artifact_header_bytes(page_count: usize) -> Option<usize> {
+    let lut_entries = page_count.checked_add(1)?;
+    let lut_bytes = lut_entries.checked_mul(core::mem::size_of::<u64>())?;
+    CACHE_ARTIFACT_HEADER_BYTES.checked_add(lut_bytes)
+}
+
+fn absolute_cache_offsets(header_bytes: usize, relative_offsets: &[u64]) -> Option<Vec<u64>> {
+    let base = u64::try_from(header_bytes).ok()?;
+    let mut offsets = Vec::with_capacity(relative_offsets.len());
+    for offset in relative_offsets {
+        offsets.push(base.checked_add(*offset)?);
+    }
+    Some(offsets)
+}
+
+fn encode_cache_page(page: &RenderPage) -> io::Result<Vec<u8>> {
+    postcard::to_allocvec(&BinaryPersistedRenderPage::from(page))
+        .map_err(|err| io::Error::other(format!("cache encode failed: {err}")))
+}
+
+fn write_cache_header<W: Write>(writer: &mut W, page_count: u32) -> io::Result<()> {
     writer.write_all(&CACHE_ARTIFACT_MAGIC)?;
     writer.write_all(&[CACHE_ARTIFACT_VERSION])?;
     writer.write_all(&page_count.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_cache_offsets<W: Write>(writer: &mut W, offsets: &[u64]) -> io::Result<()> {
     for offset in offsets {
         writer.write_all(&offset.to_le_bytes())?;
-    }
-    for payload in payloads {
-        writer.write_all(&payload)?;
     }
     Ok(())
 }

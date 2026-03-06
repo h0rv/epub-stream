@@ -38,11 +38,23 @@ use crate::tokenizer::{tokenize_html, Token};
 use crate::zip::{StreamingZip, ZipLimits};
 
 #[cfg(feature = "std")]
+fn epub_temp_trace_enabled() -> bool {
+    #[cfg(target_os = "espidf")]
+    {
+        true
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    {
+        cfg!(debug_assertions) || std::env::var_os("EPUB_TEMP_TRACE").is_some()
+    }
+}
+
+#[cfg(feature = "std")]
 macro_rules! epub_temp_trace {
     ($($arg:tt)*) => {{
-        #[cfg(any(not(target_os = "espidf"), debug_assertions))]
-        {
-            log::info!($($arg)*);
+        if crate::book::epub_temp_trace_enabled() {
+            eprintln!($($arg)*);
         }
     }};
 }
@@ -935,7 +947,7 @@ impl EpubBook<File> {
         temp_dir: TP,
         config: OpenConfig,
     ) -> Result<Self, EpubError> {
-        use crate::metadata::{parse_container_xml_file, parse_opf_file_with_limits};
+        use crate::metadata::parse_container_xml_file;
 
         epub_temp_trace!("[EPUB-TEMP] open_begin");
         let options = config.options;
@@ -984,21 +996,41 @@ impl EpubBook<File> {
         drop(opf_file);
         epub_temp_trace!("[EPUB-TEMP] opf_streamed");
 
-        // Parse OPF from file
-        let mut metadata =
-            parse_opf_file_with_limits(&temp_files.opf_path, &options.metadata_limits)
-                .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
-        epub_temp_trace!("[EPUB-TEMP] metadata_parsed");
+        #[cfg(target_os = "espidf")]
+        let (mut metadata, spine) = {
+            let spine = crate::spine::parse_spine_file_with_limits(
+                &temp_files.opf_path,
+                &options.metadata_limits,
+            )?;
+            epub_temp_trace!("[EPUB-TEMP] spine_parsed");
+            let metadata = crate::metadata::parse_opf_file_with_spine_filter(
+                &temp_files.opf_path,
+                &options.metadata_limits,
+                &spine,
+            )
+            .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
+            epub_temp_trace!("[EPUB-TEMP] metadata_parsed");
+            (metadata, spine)
+        };
+
+        #[cfg(not(target_os = "espidf"))]
+        let (mut metadata, spine) = {
+            let metadata = crate::metadata::parse_opf_file_with_limits(
+                &temp_files.opf_path,
+                &options.metadata_limits,
+            )
+            .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
+            epub_temp_trace!("[EPUB-TEMP] metadata_parsed");
+            let spine = crate::spine::parse_spine_file_with_limits(
+                &temp_files.opf_path,
+                &options.metadata_limits,
+            )?;
+            epub_temp_trace!("[EPUB-TEMP] spine_parsed");
+            (metadata, spine)
+        };
 
         // Store the OPF path in metadata
         metadata.opf_path = Some(opf_path.clone());
-
-        // Parse spine from file to avoid full OPF buffering
-        let spine = crate::spine::parse_spine_file_with_limits(
-            &temp_files.opf_path,
-            &options.metadata_limits,
-        )?;
-        epub_temp_trace!("[EPUB-TEMP] spine_parsed");
 
         validate_open_invariants(&metadata, &spine, options.validation_mode)?;
 

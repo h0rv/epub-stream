@@ -45,7 +45,7 @@ cli = ["std"]
 
 [dependencies]
 quick-xml = { version = "0.39", default-features = false }
-miniz_oxide = { version = "0.9", default-features = false, optional = true }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"], optional = true }
 heapless = { version = "0.9", optional = true }
 crc32fast = { version = "1", default-features = false, optional = true }
 log = { version = "0.4", default-features = false, optional = true }

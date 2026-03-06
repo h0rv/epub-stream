@@ -1530,8 +1530,16 @@ impl RenderPrep {
             opts,
             styler,
             font_resolver,
-            image_dimension_cache: Vec::with_capacity(64),
-            image_probe_scratch: Vec::with_capacity(IMAGE_DIMENSION_PROBE_CHUNK_BYTES),
+            image_dimension_cache: if cfg!(target_os = "espidf") {
+                Vec::new()
+            } else {
+                Vec::with_capacity(64)
+            },
+            image_probe_scratch: if cfg!(target_os = "espidf") {
+                Vec::new()
+            } else {
+                Vec::with_capacity(IMAGE_DIMENSION_PROBE_CHUNK_BYTES)
+            },
         }
     }
 
@@ -1684,6 +1692,15 @@ impl RenderPrep {
         image_sources.sort_unstable();
         image_sources.dedup();
         Ok((stylesheet_links, image_sources))
+    }
+
+    fn scan_chapter_stylesheet_links_from_reader<Rd: BufRead>(
+        &self,
+        chapter_href: &str,
+        reader: Rd,
+    ) -> Result<Vec<String>, RenderPrepError> {
+        let (stylesheet_links, _) = self.scan_chapter_assets_from_reader(chapter_href, reader)?;
+        Ok(stylesheet_links)
     }
 
     fn apply_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
@@ -1895,9 +1912,14 @@ impl RenderPrep {
                 .with_chapter_index(index)
         })?;
         let chapter_href = chapter.href;
-        let (stylesheet_links, image_sources) = {
+        let stylesheet_links = {
             let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
-            self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+            if cfg!(target_os = "espidf") {
+                self.scan_chapter_stylesheet_links_from_reader(&chapter_href, reader)?
+            } else {
+                self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+                    .0
+            }
         };
         let mut stylesheet_scratch = Vec::with_capacity(8);
         self.apply_stylesheet_links_with_budget_scratch(
@@ -1906,18 +1928,31 @@ impl RenderPrep {
             &stylesheet_links,
             &mut stylesheet_scratch,
         )?;
-        let mut image_dimensions = Vec::with_capacity(image_sources.len());
-        self.collect_intrinsic_image_dimensions_from_sources(
-            book,
-            &image_sources,
-            &mut image_dimensions,
-        );
+        let image_dimensions = if cfg!(target_os = "espidf") {
+            None
+        } else {
+            let image_sources = {
+                let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+                self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+                    .1
+            };
+            let mut image_dimensions = Vec::with_capacity(image_sources.len());
+            self.collect_intrinsic_image_dimensions_from_sources(
+                book,
+                &image_sources,
+                &mut image_dimensions,
+            );
+            Some(image_dimensions)
+        };
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
         self.styler.style_chapter_reader_with(reader, |item| {
-            let item =
-                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
+            let item = resolve_item_assets_for_chapter(
+                chapter_href_ref,
+                image_dimensions.as_deref(),
+                item,
+            );
             let item = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1962,13 +1997,19 @@ impl RenderPrep {
             ));
         }
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, html)?;
-        let image_dimensions =
-            self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), html);
+        let image_dimensions = if cfg!(target_os = "espidf") {
+            None
+        } else {
+            Some(self.collect_intrinsic_image_dimensions(book, chapter_href.as_str(), html))
+        };
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         self.styler.style_chapter_bytes_with(html, |item| {
-            let item =
-                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
+            let item = resolve_item_assets_for_chapter(
+                chapter_href_ref,
+                image_dimensions.as_deref(),
+                item,
+            );
             let item = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -2043,9 +2084,14 @@ impl RenderPrep {
                 .with_chapter_index(index)
         })?;
         let chapter_href = chapter.href;
-        let (stylesheet_links, image_sources) = {
+        let stylesheet_links = {
             let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
-            self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+            if cfg!(target_os = "espidf") {
+                self.scan_chapter_stylesheet_links_from_reader(&chapter_href, reader)?
+            } else {
+                self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+                    .0
+            }
         };
         let mut stylesheet_scratch = Vec::with_capacity(8);
         self.apply_stylesheet_links_with_budget_scratch(
@@ -2054,18 +2100,31 @@ impl RenderPrep {
             &stylesheet_links,
             &mut stylesheet_scratch,
         )?;
-        let mut image_dimensions = Vec::with_capacity(image_sources.len());
-        self.collect_intrinsic_image_dimensions_from_sources(
-            book,
-            &image_sources,
-            &mut image_dimensions,
-        );
+        let image_dimensions = if cfg!(target_os = "espidf") {
+            None
+        } else {
+            let image_sources = {
+                let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
+                self.scan_chapter_assets_from_reader(&chapter_href, reader)?
+                    .1
+            };
+            let mut image_dimensions = Vec::with_capacity(image_sources.len());
+            self.collect_intrinsic_image_dimensions_from_sources(
+                book,
+                &image_sources,
+                &mut image_dimensions,
+            );
+            Some(image_dimensions)
+        };
         let font_resolver = &self.font_resolver;
         let chapter_href_ref = chapter_href.as_str();
         let reader = self.open_chapter_reader_with_budget(book, &chapter_href, index)?;
         self.styler.style_chapter_reader_with(reader, |item| {
-            let item =
-                resolve_item_assets_for_chapter(chapter_href_ref, Some(&image_dimensions), item);
+            let item = resolve_item_assets_for_chapter(
+                chapter_href_ref,
+                image_dimensions.as_deref(),
+                item,
+            );
             let (item, trace) = resolve_item_with_font_trace(font_resolver, item);
             on_item(item, trace);
         })

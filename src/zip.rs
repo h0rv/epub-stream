@@ -460,9 +460,9 @@ pub fn prewarm_inflate_state_pool() {
         Err(poisoned) => poisoned.into_inner(),
     };
     if guard.is_none() {
-        *guard = Some(Box::new(miniz_oxide::inflate::stream::InflateState::new(
+        *guard = Some(miniz_oxide::inflate::stream::InflateState::new_boxed(
             DataFormat::Raw,
-        )));
+        ));
     }
 }
 
@@ -544,9 +544,11 @@ impl<F: Read + Seek> StreamingZip<F> {
         &mut self,
     ) -> Result<&mut miniz_oxide::inflate::stream::InflateState, ZipError> {
         if self.inflate_state.is_none() {
-            self.inflate_state = Some(Box::new(miniz_oxide::inflate::stream::InflateState::new(
+            // `InflateState` is large enough that constructing it on the stack
+            // and then moving it into a `Box` can overflow the ESP main task.
+            self.inflate_state = Some(miniz_oxide::inflate::stream::InflateState::new_boxed(
                 DataFormat::Raw,
-            )));
+            ));
         }
         self.inflate_state.as_deref_mut().ok_or(ZipError::IoError)
     }

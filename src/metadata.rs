@@ -12,6 +12,8 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
 use crate::error::EpubError;
+#[cfg(feature = "std")]
+use crate::spine::Spine;
 
 #[cfg(target_os = "espidf")]
 const METADATA_TEXT_MAX_BYTES: usize = 1024;
@@ -251,6 +253,14 @@ impl EpubMetadata {
     }
 }
 
+fn metadata_with_manifest_capacity(manifest_capacity: usize) -> EpubMetadata {
+    let mut metadata = EpubMetadata::new();
+    if manifest_capacity > metadata.manifest.capacity() {
+        metadata.manifest = Vec::with_capacity(manifest_capacity);
+    }
+    metadata
+}
+
 fn should_keep_manifest_item(item: &ManifestItem) -> bool {
     #[cfg(target_os = "espidf")]
     {
@@ -273,6 +283,28 @@ fn should_keep_manifest_item(item: &ManifestItem) -> bool {
         let _ = item;
         true
     }
+}
+
+#[cfg(feature = "std")]
+fn should_keep_manifest_item_for_spine(
+    item: &ManifestItem,
+    spine: &Spine,
+    cover_id: Option<&str>,
+) -> bool {
+    if spine.items().iter().any(|entry| entry.idref == item.id) {
+        return true;
+    }
+    if spine.toc_id().is_some_and(|toc_id| toc_id == item.id) {
+        return true;
+    }
+    if cover_id.is_some_and(|cover_id| cover_id == item.id) {
+        return true;
+    }
+    item.properties.as_deref().is_some_and(|props| {
+        props
+            .split_whitespace()
+            .any(|prop| prop == "nav" || prop == "cover-image")
+    })
 }
 
 fn local_attr_name(name: &str) -> &str {
@@ -663,13 +695,30 @@ fn parse_opf_reader<R: std::io::BufRead>(
     reader: R,
     limits: &MetadataLimits,
 ) -> Result<EpubMetadata, EpubError> {
+    parse_opf_reader_with_filter(reader, limits, None)
+}
+
+#[cfg(feature = "std")]
+fn parse_opf_reader_with_filter<R: std::io::BufRead>(
+    reader: R,
+    limits: &MetadataLimits,
+    manifest_filter: Option<&Spine>,
+) -> Result<EpubMetadata, EpubError> {
     let mut reader = Reader::from_reader(reader);
     reader.config_mut().trim_text(true);
 
     let mut buf = Vec::with_capacity(8);
     #[cfg(target_os = "espidf")]
     let mut skip_buf = Vec::with_capacity(8);
-    let mut metadata = EpubMetadata::new();
+    let mut metadata = if cfg!(target_os = "espidf") {
+        let hint = manifest_filter
+            .map(|spine| spine.len().saturating_add(4))
+            .unwrap_or(8)
+            .min(limits.max_manifest_items);
+        metadata_with_manifest_capacity(hint)
+    } else {
+        EpubMetadata::new()
+    };
 
     let mut current_element: Option<String> = None;
     let mut in_metadata = false;
@@ -713,7 +762,16 @@ fn parse_opf_reader<R: std::io::BufRead>(
                     && metadata.manifest.len() < limits.max_manifest_items
                 {
                     if let Some(item) = parse_manifest_item_reader(&e, &reader)? {
-                        if !should_keep_manifest_item(&item) {
+                        let keep = if let Some(spine) = manifest_filter {
+                            should_keep_manifest_item_for_spine(
+                                &item,
+                                spine,
+                                metadata.cover_id.as_deref(),
+                            )
+                        } else {
+                            should_keep_manifest_item(&item)
+                        };
+                        if !keep {
                             buf.clear();
                             continue;
                         }
@@ -1072,6 +1130,19 @@ pub fn parse_opf_file_with_limits<P: AsRef<std::path::Path>>(
         .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
     let reader = std::io::BufReader::new(file);
     parse_opf_reader(reader, limits)
+}
+
+/// Parse content.opf while retaining only manifest items required by the spine.
+#[cfg(feature = "std")]
+pub fn parse_opf_file_with_spine_filter<P: AsRef<std::path::Path>>(
+    path: P,
+    limits: &MetadataLimits,
+    spine: &Spine,
+) -> Result<EpubMetadata, EpubError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
+    let reader = std::io::BufReader::new(file);
+    parse_opf_reader_with_filter(reader, limits, Some(spine))
 }
 
 /// Full EPUB metadata extraction using file-based parsing (default limits).
