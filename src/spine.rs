@@ -386,9 +386,15 @@ fn parse_spine_item<'a>(
     reader: &Reader<&[u8]>,
 ) -> Result<Option<SpineItem>, EpubError> {
     let mut idref = None;
+    #[cfg(not(target_os = "espidf"))]
     let mut id = None;
+    #[cfg(target_os = "espidf")]
+    let id = None;
     let mut linear = true;
+    #[cfg(not(target_os = "espidf"))]
     let mut properties = None;
+    #[cfg(target_os = "espidf")]
+    let properties = None;
 
     for attr in e.attributes() {
         let attr = attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
@@ -439,9 +445,15 @@ fn parse_spine_item_reader<'a, R: std::io::BufRead>(
     reader: &Reader<R>,
 ) -> Result<Option<SpineItem>, EpubError> {
     let mut idref = None;
+    #[cfg(not(target_os = "espidf"))]
     let mut id = None;
+    #[cfg(target_os = "espidf")]
+    let id = None;
     let mut linear = true;
+    #[cfg(not(target_os = "espidf"))]
     let mut properties = None;
+    #[cfg(target_os = "espidf")]
+    let properties = None;
 
     for attr in e.attributes() {
         let attr = attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
