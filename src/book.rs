@@ -33,6 +33,16 @@ use crate::spine::Spine;
 use crate::tokenizer::{tokenize_html, Token};
 use crate::zip::{StreamingZip, ZipLimits};
 
+#[cfg(feature = "std")]
+macro_rules! epub_temp_trace {
+    ($($arg:tt)*) => {{
+        #[cfg(any(not(target_os = "espidf"), debug_assertions))]
+        {
+            log::info!($($arg)*);
+        }
+    }};
+}
+
 /// Validation strictness for high-level open/parse flows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -847,7 +857,7 @@ impl EpubBook<File> {
     ) -> Result<Self, EpubError> {
         use crate::metadata::{parse_container_xml_file, parse_opf_file_with_limits};
 
-        log::info!("[EPUB-TEMP] open_begin");
+        epub_temp_trace!("[EPUB-TEMP] open_begin");
         let options = config.options;
         let mut zip = StreamingZip::new_with_limits(
             File::open(&epub_path).map_err(|e| EpubError::Io(e.to_string()))?,
@@ -856,7 +866,7 @@ impl EpubBook<File> {
         .map_err(EpubError::Zip)?;
 
         zip.validate_mimetype().map_err(EpubError::Zip)?;
-        log::info!("[EPUB-TEMP] zip_ready");
+        epub_temp_trace!("[EPUB-TEMP] zip_ready");
         let mut zip_input_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
         let mut zip_output_scratch = Vec::with_capacity(crate::zip::DEFAULT_ZIP_SCRATCH_BYTES);
 
@@ -877,12 +887,12 @@ impl EpubBook<File> {
             &mut zip_output_scratch,
         )?;
         drop(container_file);
-        log::info!("[EPUB-TEMP] container_streamed");
+        epub_temp_trace!("[EPUB-TEMP] container_streamed");
 
         // Parse container.xml from file to get OPF path
         let opf_path = parse_container_xml_file(&container_temp)
             .map_err(|e| EpubError::Parse(format!("Failed to parse container.xml: {}", e)))?;
-        log::info!("[EPUB-TEMP] container_parsed");
+        epub_temp_trace!("[EPUB-TEMP] container_parsed");
 
         // Clean up container temp file immediately
         let _ = std::fs::remove_file(&container_temp);
@@ -899,12 +909,12 @@ impl EpubBook<File> {
             &mut zip_output_scratch,
         )?;
         drop(opf_file);
-        log::info!("[EPUB-TEMP] opf_streamed");
+        epub_temp_trace!("[EPUB-TEMP] opf_streamed");
 
         // Parse OPF from file
         let mut metadata = parse_opf_file_with_limits(&opf_temp, &options.metadata_limits)
             .map_err(|e| EpubError::Parse(format!("Failed to parse OPF: {}", e)))?;
-        log::info!("[EPUB-TEMP] metadata_parsed");
+        epub_temp_trace!("[EPUB-TEMP] metadata_parsed");
 
         // Store the OPF path in metadata
         metadata.opf_path = Some(opf_path.clone());
@@ -912,7 +922,7 @@ impl EpubBook<File> {
         // Parse spine from file to avoid full OPF buffering
         let spine =
             crate::spine::parse_spine_file_with_limits(&opf_temp, &options.metadata_limits)?;
-        log::info!("[EPUB-TEMP] spine_parsed");
+        epub_temp_trace!("[EPUB-TEMP] spine_parsed");
 
         // Clean up OPF temp file
         let _ = std::fs::remove_file(&opf_temp);
@@ -921,7 +931,7 @@ impl EpubBook<File> {
 
         // Navigation is deferred if lazy_navigation is enabled
         let (navigation, navigation_loaded) = if config.lazy_navigation {
-            log::info!("[EPUB-TEMP] navigation_deferred");
+            epub_temp_trace!("[EPUB-TEMP] navigation_deferred");
             (None, false)
         } else {
             (
@@ -938,10 +948,10 @@ impl EpubBook<File> {
             )
         };
         if navigation_loaded {
-            log::info!("[EPUB-TEMP] navigation_loaded");
+            epub_temp_trace!("[EPUB-TEMP] navigation_loaded");
         }
 
-        log::info!(
+        epub_temp_trace!(
             "[EPUB-TEMP] open_ready chapters={} nav_loaded={}",
             spine.len(),
             navigation_loaded
