@@ -13,6 +13,7 @@
     )
 )]
 
+pub mod persisted;
 mod render_engine;
 mod render_ir;
 mod render_layout;
